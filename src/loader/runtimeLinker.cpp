@@ -883,8 +883,7 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program) {
 	return ret;
 }
 
-static bool RelocateRecord(uint32_t index, Elf64_Rela* r, Program* program, bool jmprela_table,
-                           std::vector<std::string>& unresolved) {
+static bool RelocateRecord(uint32_t index, Elf64_Rela* r, Program* program, bool jmprela_table) {
 	KYTY_PROFILER_FUNCTION();
 
 	const auto ri      = GetRelocationInfo(r, program);
@@ -893,9 +892,10 @@ static bool RelocateRecord(uint32_t index, Elf64_Rela* r, Program* program, bool
 	if (!ri.resolved) {
 		const bool weak = ri.bind == BindType::Weak || !program->fail_if_global_not_resolved;
 		if (!weak) {
-			unresolved.push_back(fmt::format("[{:016x}] <- {:016x}, {}, {}, {}, {}", ri.vaddr,
-			                                 ri.value, ri.name, magic_enum::enum_name(ri.type),
-			                                 magic_enum::enum_name(ri.bind), ri.dbg_name));
+			LOGF("Stubbed: %s\n",
+			     fmt::format("[{:016x}] <- {:016x}, {}, {}, {}, {}", ri.vaddr, ri.value, ri.name,
+			                 magic_enum::enum_name(ri.type), magic_enum::enum_name(ri.bind),
+			                 ri.dbg_name).c_str());
 		}
 		if (ri.type == SymbolType::Object) {
 			value = g_invalid_memory;
@@ -925,20 +925,13 @@ static bool RelocateRecord(uint32_t index, Elf64_Rela* r, Program* program, bool
 	return ri.resolved;
 }
 
-static void RelocateRecords(Elf64_Rela* records, uint64_t size, Program* program,
-                            bool jmprela_table, uint32_t bit_base,
-                            std::vector<std::string>& unresolved) {
-	KYTY_PROFILER_FUNCTION();
-
-	uint32_t index = 0;
-	for (auto* r = records;
-	     reinterpret_cast<uint8_t*>(r) < reinterpret_cast<uint8_t*>(records) + size; r++, index++) {
-		const auto bit_index = bit_base + index;
-		if ((program->rela_bits[bit_index >> 3u] & (1u << (bit_index & 7u))) == 0) {
-			if (RelocateRecord(index, r, program, jmprela_table, unresolved)) {
-				program->rela_bits[bit_index >> 3u] |= 1u << (bit_index & 7u);
-			}
-		}
+static void ForEachRelocation(Program* program, auto&& func) {
+	const auto& info = *program->dynamic_info;
+	for (uint32_t i = 0; i < info.rela_table_total_size / sizeof(Elf64_Rela); ++i) {
+		func(info.rela_table + i, i, false);
+	}
+	for (uint32_t i = 0; i < info.jmprela_table_size / sizeof(Elf64_Rela); ++i) {
+		func(info.jmprela_table + i, i, true);
 	}
 }
 
@@ -1137,13 +1130,52 @@ void RuntimeLinker::UnloadProgram(Program* program) {
 
 	Common::LockGuard lock(m_mutex);
 
-	if (auto it = std::find(m_programs.begin(), m_programs.end(), program);
-	    it != m_programs.end()) {
-		DeleteProgram(*it);
-		m_programs.erase(it);
-	} else {
-		EXIT("program not found");
+	auto it = std::find(m_programs.begin(), m_programs.end(), program);
+	EXIT_IF(it == m_programs.end());
+	m_programs.erase(it);
+
+	for (auto* importer: m_programs) {
+		const auto& info = *importer->dynamic_info;
+		const auto rela_count =
+		    static_cast<uint32_t>(info.rela_table_total_size / sizeof(Elf64_Rela));
+		ForEachRelocation(importer, [&](Elf64_Rela* r, uint32_t index, bool jmprela) {
+			const auto bit_index = (jmprela ? rela_count : 0) + index;
+			auto&      bits      = importer->rela_bits[bit_index >> 3u];
+			const auto mask      = 1u << (bit_index & 7u);
+			const auto type      = r->GetType();
+			if ((bits & mask) == 0 || (type != R_X86_64_64 && type != R_X86_64_GLOB_DAT &&
+			                           type != R_X86_64_JUMP_SLOT)) {
+				return;
+			}
+			const auto& symbol = info.symbol_table[r->GetSymbol()];
+			if (symbol.GetBind() != STB_GLOBAL && symbol.GetBind() != STB_WEAK) {
+				return;
+			}
+			const auto value =
+			    *reinterpret_cast<const uint64_t*>(importer->base_vaddr + r->r_offset);
+			const auto address = value - (type == R_X86_64_64 ? r->r_addend : 0);
+			if (address < program->base_vaddr ||
+			    address >= program->base_vaddr + program->mapped_size) {
+				return;
+			}
+			SymbolType symbol_type;
+			switch (symbol.GetType()) {
+				case STT_NOTYPE: symbol_type = SymbolType::NoType; break;
+				case STT_FUNC: symbol_type = SymbolType::Func; break;
+				case STT_OBJECT: symbol_type = SymbolType::Object; break;
+				default: return;
+			}
+			const std::string name = info.str_table + symbol.st_name;
+			if (program->export_symbols->FindByNid(name.substr(0, name.find('#')), symbol_type,
+			                                       address) != nullptr) {
+				bits &= ~mask;
+				if (RelocateRecord(index, r, importer, jmprela)) {
+					bits |= mask;
+				}
+			}
+		});
 	}
+	DeleteProgram(program);
 }
 
 RuntimeLinker::RuntimeLinker(): m_symbols(std::make_unique<SymbolDatabase>()) {
@@ -2122,26 +2154,21 @@ void RuntimeLinker::Relocate(Program* program) {
 	EXIT_NOT_IMPLEMENTED(program->dynamic_info->rela_table == nullptr);
 	EXIT_NOT_IMPLEMENTED(program->dynamic_info->symbol_table == nullptr);
 
-	std::vector<std::string> unresolved;
 	const auto rela_count = static_cast<uint32_t>(
 	    program->dynamic_info->rela_table_total_size / sizeof(Elf64_Rela));
 
-	RelocateRecords(program->dynamic_info->rela_table, program->dynamic_info->rela_table_total_size,
-	                program, false, 0, unresolved);
-	RelocateRecords(program->dynamic_info->jmprela_table, program->dynamic_info->jmprela_table_size,
-	                program, true, rela_count, unresolved);
+	ForEachRelocation(program, [&](Elf64_Rela* r, uint32_t index, bool jmprela) {
+		const auto bit_index = (jmprela ? rela_count : 0) + index;
+		if ((program->rela_bits[bit_index >> 3u] & (1u << (bit_index & 7u))) == 0 &&
+		    RelocateRecord(index, r, program, jmprela)) {
+			program->rela_bits[bit_index >> 3u] |= 1u << (bit_index & 7u);
+		}
+	});
 
 	if (program->tls.image_vaddr != 0 && program->tls.init_size != 0 &&
 	    program->tls.init_image.empty()) {
 		const auto* src = reinterpret_cast<const uint8_t*>(program->tls.image_vaddr);
 		program->tls.init_image.assign(src, src + program->tls.init_size);
-	}
-
-	if (!unresolved.empty()) {
-		LOGF("--- Stubbed unresolved imports: %zu ---\n", unresolved.size());
-		for (const auto& symbol: unresolved) {
-			LOGF("Stubbed: %s\n", symbol.c_str());
-		}
 	}
 }
 
