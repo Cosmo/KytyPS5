@@ -16,6 +16,7 @@
 #include <limits>
 #include <magic_enum.hpp>
 #include <memory>
+#include <numbers>
 #include <vector>
 
 #include "libatrac9.h"
@@ -391,6 +392,106 @@ enum class Ngs2VoicePlayEvent { None, Play, Pause, Resume, Stop, StopImm, Kill }
 struct Ngs2VoiceInternal;
 static void Ngs2ApplyEvent(Ngs2VoiceInternal& voice);
 
+// PS5 filter controls add a coefficient mode before the FCQ parameters.
+// Supported configuration: low-pass (type 0), rear (location 1), FCQ (mode 1).
+struct Ngs2SamplerFilterParam {
+	uint32_t index;
+	uint32_t location;
+	uint32_t type;
+	uint32_t channel_mask;
+	uint32_t coefficient_mode;
+	float    frequency;
+	float    q;
+	float    level;
+	uint32_t reserved[4];
+};
+static_assert(sizeof(Ngs2SamplerFilterParam) == 48);
+
+struct Ngs2SamplerFilter {
+	struct History {
+		double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+	};
+	bool                 enabled      = false;
+	bool                 warned       = false;
+	uint32_t             channel_mask = 0;
+	double               b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+	std::vector<History> history;
+
+	void Configure(const Ngs2SamplerFilterParam& param, uint32_t rate, uint32_t channels) {
+		if (param.location != 1 || param.type != 0 || param.coefficient_mode != 1 ||
+		    !std::isfinite(param.frequency) || param.frequency <= 0 || !std::isfinite(param.q) ||
+		    param.q <= 0 || !std::isfinite(param.level) || param.level < 0 || rate == 0) {
+			enabled = false;
+			history.clear();
+			if (!warned) {
+				Log::WriteToConsoleAndLog(fmt::sprintf(
+				    "warning: unsupported NGS2 sampler filter (location=%u, type=%u, mode=%u)\n",
+				    param.location, param.type, param.coefficient_mode));
+				warned = true;
+			}
+			return;
+		}
+		channel_mask = param.channel_mask;
+		history.resize(channels);
+		enabled = true;
+		if (param.frequency >= rate * 0.5) {
+			b0 = param.level;
+			b1 = b2 = a1 = a2 = 0;
+			return;
+		}
+		// RBJ low-pass biquad, normalized by a0 (Audio EQ Cookbook).
+		const double omega      = (2.0 * std::numbers::pi) * param.frequency / rate;
+		const double cosine     = std::cos(omega);
+		const double alpha      = std::sin(omega) / (2.0 * param.q);
+		const double inverse_a0 = 1.0 / (1.0 + alpha);
+		b0                      = (1.0 - cosine) * 0.5 * inverse_a0 * param.level;
+		b1                      = 2.0 * b0;
+		b2                      = b0;
+		a1                      = -2.0 * cosine * inverse_a0;
+		a2                      = (1.0 - alpha) * inverse_a0;
+	}
+
+	bool HasHistory() const {
+		if (!enabled) {
+			return false;
+		}
+		for (size_t c = 0; c < history.size(); ++c) {
+			if (channel_mask != 0 && (c >= 32 || (channel_mask & (1u << c)) == 0)) {
+				continue;
+			}
+			const auto& h = history[c];
+			if (h.x1 != 0 || h.x2 != 0 || h.y1 != 0 || h.y2 != 0) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void Process(std::vector<float>& samples, uint32_t channels, uint32_t grain) {
+		if (!enabled) {
+			return;
+		}
+		for (uint32_t c = 0; c < channels; ++c) {
+			if (channel_mask != 0 && (c >= 32 || (channel_mask & (1u << c)) == 0)) {
+				continue;
+			}
+			auto& h = history[c];
+			for (uint32_t i = 0; i < grain; ++i) {
+				const double x = samples[c * grain + i];
+				double       y = b0 * x + b1 * h.x1 + b2 * h.x2 - a1 * h.y1 - a2 * h.y2;
+				if (std::abs(y) < 1e-20) {
+					y = 0;
+				}
+				h.x2                   = h.x1;
+				h.x1                   = x;
+				h.y2                   = h.y1;
+				h.y1                   = y;
+				samples[c * grain + i] = static_cast<float>(y);
+			}
+		}
+	}
+};
+
 struct Ngs2VoiceInternal {
 	struct Port {
 		Ngs2VoiceInternal* dest   = nullptr;
@@ -437,6 +538,7 @@ struct Ngs2VoiceInternal {
 	uint64_t                           sample_step     = 0;
 	uint64_t                           decoded_samples = 0;
 	uint64_t                           decoded_bytes   = 0;
+	std::vector<Ngs2SamplerFilter>      filters;
 
 	void SetupSampler(const Ngs2WaveformFormat& format) {
 		EXIT_NOT_IMPLEMENTED(format.frame_margin != 0 || format.frame_offset != 0 ||
@@ -450,6 +552,7 @@ struct Ngs2VoiceInternal {
 		decoded_samples = 0;
 		decoded_bytes   = 0;
 		blocks.clear();
+		filters.clear();
 		decoder.reset();
 		decoded_frame.clear();
 		accepts_blocks = true;
@@ -1420,6 +1523,13 @@ static void Ngs2RenderVoice(Ngs2VoiceInternal& voice, const std::vector<Ngs2Voic
 		if (voice.rack->type == Ngs2RackType::Sampler ||
 		    voice.rack->type == Ngs2RackType::CustomSampler) {
 			Ngs2ConsumeSamples(voice, grain);
+			// A playing stream can have no source data but still have a filter tail.
+			for (auto& filter: voice.filters) {
+				if (voice.has_samples || filter.HasHistory()) {
+					filter.Process(voice.samples, voice.channels, grain);
+					voice.has_samples = true;
+				}
+			}
 		}
 		for (auto* source: voices) {
 			for (const auto& port: source->ports) {
@@ -2046,6 +2156,21 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 						                     (voice->decoder != nullptr && ratio != 1.0f));
 						voice->sample_step = static_cast<uint64_t>(std::llround(
 						    static_cast<double>(voice->sample_rate) * ratio * 4294967296.0));
+						break;
+					}
+					case 0xa: {
+						EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Sampler);
+						EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2VoiceParamHeader) +
+						                                        sizeof(Ngs2SamplerFilterParam));
+						const auto& filter =
+						    *reinterpret_cast<const Ngs2SamplerFilterParam*>(param + 1);
+						EXIT_NOT_IMPLEMENTED(filter.index >=
+						                     voice->rack->option.sampler.max_filters);
+						if (voice->filters.size() <= filter.index) {
+							voice->filters.resize(filter.index + 1);
+						}
+						voice->filters[filter.index].Configure(
+						    filter, voice->rack->ngs->option.sample_rate, voice->channels);
 						break;
 					}
 					default: EXIT("unsupported sampler control: 0x%08" PRIx32 "\n", param->id);

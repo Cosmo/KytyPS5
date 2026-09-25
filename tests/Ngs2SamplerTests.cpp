@@ -1,8 +1,10 @@
 // Exercise sampler controls and rendering without a host audio device.
 #include "libs/ngs2.cpp"
 
+#include <bit>
 #include <cstdio>
 #include <cstdlib>
+#include <numbers>
 
 using namespace Libs::Audio::Ngs2;
 
@@ -192,6 +194,117 @@ void TestStopThenPlayBeforeRender() {
 	      "restarted voice produced no audio");
 }
 
+void SetLowPass(Fixture& f, float frequency = 1000.0f, uint32_t mask = 0) {
+	struct Param {
+		Ngs2VoiceParamHeader   header {56, 0, 0x1000000a};
+		Ngs2SamplerFilterParam filter {0, 1, 0, 0, 1, 1000.0f, 0.70710678f, 1.0f, {}};
+	} param;
+	param.filter.frequency            = frequency;
+	param.filter.channel_mask         = mask;
+	f.rack.option.sampler.max_filters = 8;
+	Check(Ngs2VoiceControl(reinterpret_cast<uintptr_t>(&f.voice), &param.header) == OK,
+	      "filter ABI command failed");
+}
+
+void TestLowPassResponse() {
+	// A second-order Butterworth LPF has unity DC gain and -3 dB at cutoff.
+	for (double frequency: {100.0, 1000.0, 10000.0}) {
+		Fixture f(48000);
+		SetLowPass(f);
+		std::vector<int16_t> pcm(48000);
+		for (size_t i = 0; i < pcm.size(); ++i) {
+			pcm[i] =
+			    static_cast<int16_t>(8192 * std::sin((2.0 * std::numbers::pi) * frequency * i / 48000));
+		}
+		f.Queue(pcm.data(), static_cast<uint32_t>(pcm.size()), 0);
+		f.Render(static_cast<uint32_t>(pcm.size()));
+		double input = 0, output = 0;
+		for (size_t i = 24000; i < pcm.size(); ++i) {
+			input += std::pow(pcm[i] / 32768.0, 2);
+			output += std::pow(f.voice.samples[i], 2);
+		}
+		const double ratio = std::sqrt(output / input);
+		if (frequency == 100) {
+			Check(std::abs(ratio - 1.0) < 0.002, "low-pass lost bass");
+		}
+		if (frequency == 1000) {
+			Check(std::abs(ratio - std::sqrt(0.5)) < 0.002, "cutoff gain incorrect");
+		}
+		if (frequency == 10000) {
+			Check(ratio < 0.01, "low-pass did not reject high frequencies");
+		}
+	}
+}
+
+void TestFilterHistoryAndChannels() {
+	Fixture whole(48000, 2), split(48000, 2);
+	SetLowPass(whole, 1000, 1);
+	SetLowPass(split, 1000, 1);
+	std::vector<int16_t> pcm(256 * 2, 0);
+	pcm[0] = pcm[1] = 16384;
+	whole.Queue(pcm.data(), 256, 0);
+	split.Queue(pcm.data(), 32, 1);
+	split.Queue(pcm.data() + 64, 224, 0);
+	whole.Render(256);
+	for (uint32_t g = 0; g < 8; ++g) {
+		// Games resend unchanged parameters; this must not reset the delay line.
+		SetLowPass(split, 1000, 1);
+		split.Render(32);
+		for (uint32_t c = 0; c < 2; ++c) {
+			for (uint32_t i = 0; i < 32; ++i) {
+				Check(std::abs(split.voice.samples[c * 32 + i] -
+				               whole.voice.samples[c * 256 + g * 32 + i]) < 1e-7,
+				      "filter history changed at a grain/block/control boundary");
+			}
+		}
+	}
+	Check(whole.voice.samples[256] == 0.5f && whole.voice.samples[257] == 0.0f,
+	      "channel mask filtered the unselected channel");
+	Fixture stereo(48000, 2);
+	SetLowPass(stereo);
+	pcm[1] = 0;
+	stereo.Queue(pcm.data(), 256, 0);
+	stereo.Render(256);
+	for (size_t i = 256; i < 512; ++i) {
+		Check(stereo.voice.samples[i] == 0.0f, "filter leaked history between channels");
+	}
+	stereo.voice.SetupSampler({0x12, 2, 48000});
+	Check(stereo.voice.filters.empty(), "reused voice retained old filters");
+}
+
+void TestFilterUsesOutputRate() {
+	Fixture f(22050);
+	SetLowPass(f, 6833.0f);
+	const auto& filter = f.voice.filters[0];
+	// Rear filtering operates at the 48 kHz system rate, not the PCM source rate.
+	const double w        = (2.0 * std::numbers::pi) * 6833 / 48000;
+	const double expected = (1 - std::cos(w)) / (2 * (1 + std::sin(w) / (2 * double(0.70710678f))));
+	Check(std::abs(filter.b0 - expected) < 1e-10, "rear filter used source sample rate");
+	SetLowPass(f, 48000);
+	const int16_t pcm[] = {16384, 16384};
+	f.Queue(pcm, 2, 0);
+	f.Render(2);
+	Check(f.voice.samples[0] == 0.5f && f.voice.samples[1] == 0.5f,
+	      "above-Nyquist cutoff was unstable");
+}
+
+void TestPs5FcqFilterControl() {
+	Fixture f(48000, 2);
+	f.rack.option.sampler.max_filters = 8;
+	// Captured 56-byte PS5 command, including the unused trailing stack word.
+	const uint32_t words[] = {56,         0x1000000a, 0,          1, 0, 0, 1,
+	                          0x45d58800, 0x3fd55555, 0x3f800000, 0, 0, 0, 0x13f};
+	Ngs2VoiceControl(reinterpret_cast<uintptr_t>(&f.voice),
+	                 reinterpret_cast<const Ngs2VoiceParamHeader*>(words));
+	Check(f.voice.filters.size() == 1 && f.voice.filters[0].enabled,
+	      "PS5 FCQ filter command was not recognized");
+	const double omega    = (2.0 * std::numbers::pi) * 6833.0 / 48000.0;
+	const double q        = static_cast<double>(std::bit_cast<float>(0x3fd55555u));
+	const double expected = (1 - std::cos(omega)) / (2 * (1 + std::sin(omega) / (2 * q)));
+	Check(std::abs(f.voice.filters[0].b0 - expected) < 1e-10,
+	      "PS5 FCQ fields were read at the wrong offsets");
+}
+
 struct CallbackEvent {
 	Ngs2VoiceInternal* voice;
 	uint32_t           event;
@@ -287,9 +400,43 @@ void TestUpstreamCustomSamplerControls() {
 	      "custom sampler state layout regressed");
 }
 
+void TestFilterTailDuringStarvation() {
+	Fixture reference(48000), stream(48000);
+	SetLowPass(reference);
+	SetLowPass(stream);
+	std::vector<int16_t> pcm(128, 0);
+	pcm[0] = pcm[64] = 16384;
+	reference.Queue(pcm.data(), 128, 1);
+	reference.Render(128);
+	stream.Queue(pcm.data(), 1, 1);
+	stream.Render(1);
+	Check(stream.voice.samples[0] == reference.voice.samples[0], "initial filter sample differs");
+	stream.Render(63);
+	Check(stream.voice.has_samples, "starved filter tail was not available for routing");
+	for (size_t i = 0; i < 63; ++i) {
+		Check(std::abs(stream.voice.samples[i] - reference.voice.samples[i + 1]) < 1e-7f,
+		      "filter tail changed at a starvation/grain boundary");
+	}
+	stream.Queue(pcm.data() + 64, 64, 1);
+	stream.Render(64);
+	for (size_t i = 0; i < 64; ++i) {
+		Check(std::abs(stream.voice.samples[i] - reference.voice.samples[i + 64]) < 1e-7f,
+		      "refilled stream reused stale filter history");
+	}
+	stream.Render(8192);
+	stream.Render(32);
+	Check(!stream.voice.has_samples && !stream.voice.filters[0].HasHistory(),
+	      "fully decayed filter kept a silent stream active");
+}
+
 } // namespace
 
 int main() {
+	TestFilterTailDuringStarvation();
+	TestLowPassResponse();
+	TestFilterHistoryAndChannels();
+	TestFilterUsesOutputRate();
+	TestPs5FcqFilterControl();
 	TestUpstreamCustomSamplerControls();
 	TestCallbackStopsConsumption();
 	TestCallbackPauseDuringLargeStep();
