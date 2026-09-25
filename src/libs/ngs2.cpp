@@ -386,24 +386,18 @@ struct Ngs2RackInternal {
 	std::array<Ngs2UserFxOption, 24>     fx {};
 };
 
-enum class Ngs2VoicePlayState { Empty, Playing, Paused, Stopped };
-enum class Ngs2VoicePlayEvent { None, Play, Pause, Resume, Stop, StopImm, Kill };
+enum class Ngs2VoicePlayState : uint32_t { Empty = 0, Playing = 3, Paused = 5, Stopped = 0xb };
 
-struct Ngs2VoiceInternal;
-static void Ngs2ApplyEvent(Ngs2VoiceInternal& voice);
-
-// PS5 filter controls add a coefficient mode before the FCQ parameters.
-// Supported configuration: low-pass (type 0), rear (location 1), FCQ (mode 1).
+// The 64-bit bypass mask precedes the filter type and FCQ parameters.
 struct Ngs2SamplerFilterParam {
 	uint32_t index;
 	uint32_t location;
+	uint64_t channel_mask;
 	uint32_t type;
-	uint32_t channel_mask;
-	uint32_t coefficient_mode;
 	float    frequency;
 	float    q;
 	float    level;
-	uint32_t reserved[4];
+	uint32_t reserved[3];
 };
 static_assert(sizeof(Ngs2SamplerFilterParam) == 48);
 
@@ -413,20 +407,25 @@ struct Ngs2SamplerFilter {
 	};
 	bool                 enabled      = false;
 	bool                 warned       = false;
-	uint32_t             channel_mask = 0;
+	uint64_t             channel_mask = 0;
 	double               b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
 	std::vector<History> history;
 
 	void Configure(const Ngs2SamplerFilterParam& param, uint32_t rate, uint32_t channels) {
-		if (param.location != 1 || param.type != 0 || param.coefficient_mode != 1 ||
-		    !std::isfinite(param.frequency) || param.frequency <= 0 || !std::isfinite(param.q) ||
-		    param.q <= 0 || !std::isfinite(param.level) || param.level < 0 || rate == 0) {
+		if (param.type == 0) {
+			enabled = false;
+			history.clear();
+			return;
+		}
+		if (param.location != 1 || param.type != 1 || !std::isfinite(param.frequency) ||
+		    param.frequency < 0 || !std::isfinite(param.q) || param.q <= 0 ||
+		    !std::isfinite(param.level) || param.level < 0 || rate == 0) {
 			enabled = false;
 			history.clear();
 			if (!warned) {
 				Log::WriteToConsoleAndLog(fmt::sprintf(
-				    "warning: unsupported NGS2 sampler filter (location=%u, type=%u, mode=%u)\n",
-				    param.location, param.type, param.coefficient_mode));
+				    "warning: unsupported NGS2 sampler filter (location=%u, type=%u)\n",
+				    param.location, param.type));
 				warned = true;
 			}
 			return;
@@ -434,8 +433,8 @@ struct Ngs2SamplerFilter {
 		channel_mask = param.channel_mask;
 		history.resize(channels);
 		enabled = true;
-		if (param.frequency >= rate * 0.5) {
-			b0 = param.level;
+		if (param.frequency == 0 || param.frequency >= rate * 0.5) {
+			b0 = param.frequency == 0 ? 0 : param.level;
 			b1 = b2 = a1 = a2 = 0;
 			return;
 		}
@@ -451,12 +450,16 @@ struct Ngs2SamplerFilter {
 		a2                      = (1.0 - alpha) * inverse_a0;
 	}
 
+	bool Bypasses(size_t channel) const {
+		return channel < 64 && (channel_mask & (uint64_t {1} << channel)) != 0;
+	}
+
 	bool HasHistory() const {
 		if (!enabled) {
 			return false;
 		}
 		for (size_t c = 0; c < history.size(); ++c) {
-			if (channel_mask != 0 && (c >= 32 || (channel_mask & (1u << c)) == 0)) {
+			if (Bypasses(c)) {
 				continue;
 			}
 			const auto& h = history[c];
@@ -472,7 +475,7 @@ struct Ngs2SamplerFilter {
 			return;
 		}
 		for (uint32_t c = 0; c < channels; ++c) {
-			if (channel_mask != 0 && (c >= 32 || (channel_mask & (1u << c)) == 0)) {
+			if (Bypasses(c)) {
 				continue;
 			}
 			auto& h = history[c];
@@ -505,6 +508,7 @@ struct Ngs2VoiceInternal {
 		uint32_t          cursor         = 0;
 		size_t            data_cursor    = 0;
 		uint32_t          skip_remaining = info.num_skip_samples;
+		uint32_t          repeated_count = 0;
 	};
 	struct Module {
 		std::vector<uint8_t> param, work, state;
@@ -512,8 +516,8 @@ struct Ngs2VoiceInternal {
 		bool                 control_warned = false;
 		bool                 render_warned  = false;
 	};
-	Ngs2VoicePlayEvent              event          = Ngs2VoicePlayEvent::None;
 	Ngs2VoicePlayState              state          = Ngs2VoicePlayState::Empty;
+	uint32_t                        state_flags    = 0;
 	Ngs2RackInternal*               rack           = nullptr;
 	uintptr_t                       callback       = 0;
 	uintptr_t                       callback_data  = 0;
@@ -538,19 +542,37 @@ struct Ngs2VoiceInternal {
 	uint64_t                           sample_step     = 0;
 	uint64_t                           decoded_samples = 0;
 	uint64_t                           decoded_bytes   = 0;
+	const uint8_t*                      waveform_end    = nullptr;
 	std::vector<Ngs2SamplerFilter>      filters;
+
+	const uint8_t* WaveformData() const {
+		if (blocks.empty()) {
+			return waveform_end;
+		}
+		const auto& block = blocks.front();
+		return block.data + (decoder != nullptr
+		                         ? block.data_cursor
+		                         : (uint64_t(block.info.num_skip_samples) + block.cursor) *
+		                               channels * sizeof(int16_t));
+	}
 
 	void SetupSampler(const Ngs2WaveformFormat& format) {
 		EXIT_NOT_IMPLEMENTED(format.frame_margin != 0 || format.frame_offset != 0 ||
 		                     format.sample_rate == 0 || format.num_channels == 0 ||
 		                     (format.waveform_type == NGS2_WAVEFORM_TYPE_ATRAC9 &&
 		                      format.sample_rate != rack->ngs->option.sample_rate));
+		SetEvent(4);
+		std::ranges::fill(ports, Port {});
+		for (auto& matrix: matrices) {
+			matrix.clear();
+		}
 		channels        = format.num_channels;
 		sample_rate     = format.sample_rate;
 		sample_phase    = 0;
 		sample_step     = uint64_t(sample_rate) << 32u;
 		decoded_samples = 0;
 		decoded_bytes   = 0;
+		waveform_end    = nullptr;
 		blocks.clear();
 		filters.clear();
 		decoder.reset();
@@ -591,16 +613,32 @@ struct Ngs2VoiceInternal {
 	}
 	void SetEvent(uint32_t id) {
 		switch (id) {
-			case 1: event = Ngs2VoicePlayEvent::Play; break;
-			case 2: event = Ngs2VoicePlayEvent::Stop; break;
-			case 4: event = Ngs2VoicePlayEvent::StopImm; break;
-			case 8: event = Ngs2VoicePlayEvent::Kill; break;
-			case 16: event = Ngs2VoicePlayEvent::Pause; break;
-			case 32: event = Ngs2VoicePlayEvent::Resume; break;
+			case 1:
+				if (state == Ngs2VoicePlayState::Empty || state == Ngs2VoicePlayState::Stopped) {
+					state = Ngs2VoicePlayState::Playing;
+					// Reserve the voice immediately; publish playback flags after rendering.
+					state_flags |= 1;
+				}
+				break;
+			case 2:
+				if (state == Ngs2VoicePlayState::Playing || state == Ngs2VoicePlayState::Paused) {
+					state = Ngs2VoicePlayState::Stopped;
+				}
+				break;
+			case 4:
+			case 8: state = Ngs2VoicePlayState::Empty; break;
+			case 16:
+				if (state == Ngs2VoicePlayState::Playing) {
+					state = Ngs2VoicePlayState::Paused;
+				}
+				break;
+			case 32:
+				if (state == Ngs2VoicePlayState::Paused) {
+					state = Ngs2VoicePlayState::Playing;
+				}
+				break;
 			default: EXIT("unknown event_id: 0x%08" PRIx32 "\n", id);
 		}
-		// Publish state before the next render so guest queries see each event.
-		Ngs2ApplyEvent(*this);
 	}
 };
 
@@ -715,14 +753,7 @@ static_assert(sizeof(Ngs2WaveformBlock) == 40);
 static_assert(sizeof(Ngs2WaveformInfo) == 232);
 
 static uint32_t Ngs2GetStateFlags(const Ngs2VoiceInternal* voice) {
-	switch (voice->state) {
-		case Ngs2VoicePlayState::Empty: return 0;
-		case Ngs2VoicePlayState::Playing: return 0x3;
-		case Ngs2VoicePlayState::Paused: return 0x5;
-		case Ngs2VoicePlayState::Stopped: return 0xb;
-	}
-
-	return 0;
+	return voice->state_flags;
 }
 
 static Ngs2SystemOption Ngs2DefaultSystemOption() {
@@ -1347,61 +1378,42 @@ int KYTY_SYSV_ABI Ngs2RackUnlock(uintptr_t rack_handle) {
 	return OK;
 }
 
-static void Ngs2ApplyEvent(Ngs2VoiceInternal& voice) {
-	switch (voice.event) {
-		case Ngs2VoicePlayEvent::None: break;
-		case Ngs2VoicePlayEvent::Play:
-			if (voice.state == Ngs2VoicePlayState::Empty ||
-			    voice.state == Ngs2VoicePlayState::Stopped) {
-				voice.state = Ngs2VoicePlayState::Playing;
-			}
-			break;
-		case Ngs2VoicePlayEvent::Pause:
-			if (voice.state == Ngs2VoicePlayState::Playing) {
-				voice.state = Ngs2VoicePlayState::Paused;
-			}
-			break;
-		case Ngs2VoicePlayEvent::Resume:
-			if (voice.state == Ngs2VoicePlayState::Paused) {
-				voice.state = Ngs2VoicePlayState::Playing;
-			}
-			break;
-		case Ngs2VoicePlayEvent::Stop:
-			if (voice.state == Ngs2VoicePlayState::Playing) {
-				voice.state = Ngs2VoicePlayState::Stopped;
-			}
-			break;
-		case Ngs2VoicePlayEvent::StopImm:
-		case Ngs2VoicePlayEvent::Kill: voice.state = Ngs2VoicePlayState::Empty; break;
-	}
-	voice.event = Ngs2VoicePlayEvent::None;
-}
+struct Ngs2VoiceCallbackInfo {
+	uintptr_t   data, voice;
+	uint32_t    flag, reserved;
+	uintptr_t   user;
+	const void* block_data;
+	size_t      size;
+	uint32_t    repeats, attributes;
+};
+static_assert(sizeof(Ngs2VoiceCallbackInfo) == 56);
 
 static void Ngs2FinishBlock(Ngs2VoiceInternal& voice) {
-	const auto& block = voice.blocks.front();
-	struct CallbackInfo {
-		uintptr_t   data, voice;
-		uint32_t    flag, reserved;
-		uintptr_t   user;
-		const void* block_data;
-		size_t      size;
-		uint32_t    repeats, attributes;
-	} info {voice.callback_data,
-	        reinterpret_cast<uintptr_t>(&voice),
-	        1,
-	        0,
-	        block.info.user_data,
-	        block.data,
-	        block.info.data_size,
-	        0,
-	        0};
-	static_assert(sizeof(CallbackInfo) == 56);
-	voice.blocks.pop_front();
-	if (voice.blocks.empty() && !voice.accepts_blocks) {
-		voice.state = Ngs2VoicePlayState::Empty;
+	auto&      block   = voice.blocks.front();
+	const bool repeat  = block.info.num_repeats != 0;
+	voice.waveform_end = voice.WaveformData();
+	if (repeat) {
+		if (block.info.num_repeats != UINT32_MAX) {
+			--block.info.num_repeats;
+		}
+		++block.repeated_count;
+		block.cursor = 0;
 	}
-	if (voice.callback != 0 && (voice.callback_flags & 1u) != 0) {
-		reinterpret_cast<void KYTY_SYSV_ABI (*)(const CallbackInfo*)>(voice.callback)(&info);
+	const Ngs2VoiceCallbackInfo info {voice.callback_data,
+	                                  reinterpret_cast<uintptr_t>(&voice),
+	                                  repeat ? 2u : 1u,
+	                                  0,
+	                                  block.info.user_data,
+	                                  block.data,
+	                                  block.info.data_size,
+	                                  block.repeated_count,
+	                                  0};
+	if (!repeat) {
+		voice.blocks.pop_front();
+	}
+	if (voice.callback != 0 && (voice.callback_flags & info.flag) != 0) {
+		reinterpret_cast<void KYTY_SYSV_ABI (*)(const Ngs2VoiceCallbackInfo*)>(voice.callback)(
+		    &info);
 	}
 }
 
@@ -1419,14 +1431,7 @@ static void Ngs2AdvancePcm(Ngs2VoiceInternal& voice) {
 		voice.decoded_bytes += advance * voice.channels * sizeof(int16_t);
 		voice.sample_phase -= advance * output_rate;
 		if (block.cursor == block.info.num_samples) {
-			if (block.info.num_repeats != 0) {
-				if (block.info.num_repeats != UINT32_MAX) {
-					--block.info.num_repeats;
-				}
-				block.cursor = 0;
-			} else {
-				Ngs2FinishBlock(voice);
-			}
+			Ngs2FinishBlock(voice);
 		}
 	}
 	if (voice.blocks.empty() && !voice.accepts_blocks) {
@@ -1443,8 +1448,7 @@ static void Ngs2ConsumeSamples(Ngs2VoiceInternal& voice, uint32_t grain) {
 				break;
 			}
 			const auto& block = voice.blocks.front();
-			const auto* pcm = reinterpret_cast<const int16_t*>(block.data) +
-			                  (block.info.num_skip_samples + block.cursor) * voice.channels;
+			const auto* pcm   = reinterpret_cast<const int16_t*>(voice.WaveformData());
 			const auto* next = pcm;
 			if (block.cursor + 1 < block.info.num_samples) {
 				next += voice.channels;
@@ -1530,6 +1534,12 @@ static void Ngs2RenderVoice(Ngs2VoiceInternal& voice, const std::vector<Ngs2Voic
 					voice.has_samples = true;
 				}
 			}
+			if (voice.state == Ngs2VoicePlayState::Playing && voice.blocks.empty() &&
+			    !voice.accepts_blocks &&
+			    std::ranges::none_of(voice.filters,
+			                         [](const auto& filter) { return filter.HasHistory(); })) {
+				voice.state = Ngs2VoicePlayState::Empty;
+			}
 		}
 		for (auto* source: voices) {
 			for (const auto& port: source->ports) {
@@ -1612,9 +1622,7 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 			auto* items = reinterpret_cast<Ngs2VoiceInternal*>(rack + 1);
 			for (uint32_t i = 0; i < rack->option.common.max_voices; ++i) {
 				items[i].rendered = false;
-				if (items[i].channels != 0) {
-					voices.push_back(items + i);
-				}
+				voices.push_back(items + i);
 			}
 		}
 	}
@@ -1625,6 +1633,9 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 	}
 	const auto grain = ngs->option.num_grain_samples;
 	for (auto* voice: voices) {
+		if (voice->channels == 0) {
+			continue;
+		}
 		Ngs2RenderVoice(*voice, voices, grain);
 		if (voice->rack->type != Ngs2RackType::Mastering || !voice->has_samples) {
 			continue;
@@ -1646,6 +1657,13 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 				}
 			}
 		}
+	}
+	for (auto* voice: voices) {
+		// No envelope is configured, so a release stop finishes in this render.
+		if (voice->state == Ngs2VoicePlayState::Stopped) {
+			voice->state = Ngs2VoicePlayState::Empty;
+		}
+		voice->state_flags = static_cast<uint32_t>(voice->state);
 	}
 	++ngs->render_count;
 	return OK;
@@ -2133,6 +2151,7 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 						if (blocks.flags == 0x4) {
 							voice->blocks.clear();
 							voice->sample_phase = 0;
+							voice->waveform_end = nullptr;
 						}
 						voice->accepts_blocks = (blocks.flags & 1u) != 0;
 						for (uint32_t i = 0; i < blocks.count; ++i) {
@@ -2147,6 +2166,16 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 							            voice->channels * 2 >
 							        block.data_size);
 							voice->blocks.push_back({blocks.data + block.data_offset, block});
+						}
+						break;
+					}
+					case 4: {
+						EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Sampler);
+						for (auto& block: voice->blocks) {
+							if (block.info.num_repeats != 0) {
+								block.info.num_repeats = 0;
+								break;
+							}
 						}
 						break;
 					}
@@ -2302,9 +2331,9 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 			sampler->reserved            = 0;
 			sampler->num_decoded_samples = voice->decoded_samples;
 			sampler->decoded_data_size   = voice->decoded_bytes;
+			sampler->waveform_data       = voice->WaveformData();
 			if (!voice->blocks.empty()) {
-				sampler->user_data     = voice->blocks.front().info.user_data;
-				sampler->waveform_data = voice->blocks.front().data;
+				sampler->user_data = voice->blocks.front().info.user_data;
 			}
 			break;
 		}
