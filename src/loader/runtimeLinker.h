@@ -86,7 +86,6 @@ struct DynamicInfo {
 	uint64_t init_array_size     = 0;
 	uint64_t fini_array_size     = 0;
 	uint64_t preinit_array_size  = 0;
-	uint64_t pltgot_vaddr        = 0;
 
 	Elf64_Rela* jmprela_table      = nullptr;
 	uint64_t    jmprela_table_size = 0;
@@ -134,8 +133,6 @@ struct Program {
 	bool                            dbg_print_reloc             = false;
 	std::vector<uint8_t>            rela_bits;
 	uint64_t                        proc_param_vaddr            = 0;
-	uint64_t                        custom_call_plt_vaddr       = 0;
-	uint32_t                        custom_call_plt_num         = 0;
 };
 
 class RuntimeLinker {
@@ -171,7 +168,6 @@ public:
 
 	void Resolve(const std::string& name, SymbolType type, Program* program, SymbolRecord* out_info,
 	             bool* bind_self);
-	bool ResolveLoadedSymbolByNid(const std::string& nid, SymbolType type, SymbolRecord* out_info);
 
 	SymbolDatabase* Symbols() { return m_symbols.get(); }
 
@@ -193,8 +189,6 @@ private:
 	static void DeleteProgram(Program* program);
 	static void SetupTlsHandler(Program* program);
 	void        PreloadAdjacentPrograms();
-
-	Program* FindProgram(const ModuleId& m, const LibraryId& l);
 
 	static const ModuleId*  FindModule(const Program& program, const std::string& id);
 	static const LibraryId* FindLibrary(const Program& program, const std::string& id);
