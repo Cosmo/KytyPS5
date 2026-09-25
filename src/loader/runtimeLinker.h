@@ -115,6 +115,7 @@ struct Program {
 
 	int32_t                      unique_id = -1;
 	RuntimeLinker*               rt        = nullptr;
+	uint32_t                     load_count = 0; // Successful sceKernelLoadStartModule calls.
 	std::filesystem::path        file_name;
 	std::unique_ptr<Elf64>       elf;
 	std::unique_ptr<DynamicInfo> dynamic_info;
