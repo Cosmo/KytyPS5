@@ -1429,7 +1429,7 @@ static void Ngs2AdvancePcm(Ngs2VoiceInternal& voice) {
 			}
 		}
 	}
-	if (voice.blocks.empty()) {
+	if (voice.blocks.empty() && !voice.accepts_blocks) {
 		voice.sample_phase = 0;
 	}
 }

@@ -429,9 +429,37 @@ void TestFilterTailDuringStarvation() {
 	      "fully decayed filter kept a silent stream active");
 }
 
+void TestResamplingPhaseAfterStarvation() {
+	for (auto rack: {Ngs2RackType::Sampler, Ngs2RackType::CustomSampler}) {
+		for (uint32_t rate: {44100u, 96000u}) {
+			Fixture        reference(rate, 1, rack), stream(rate, 1, rack);
+			const int16_t  pcm[]  = {0, 0, 16384, 8192};
+			const uint32_t frames = rate == 44100 ? 2 : 1;
+			reference.Queue(pcm, 4, 0);
+			stream.Queue(pcm, 1, 1);
+			reference.Render(frames);
+			stream.Render(frames);
+			Check(stream.voice.blocks.empty() && stream.voice.state == Ngs2VoicePlayState::Playing,
+			      "open stream did not enter starvation");
+			stream.Render(8);
+			Check(!stream.voice.has_samples, "starved stream produced audio without a filter");
+			stream.Queue(pcm + 1, 3, 0);
+			reference.Render(1);
+			stream.Render(1);
+			Check(std::abs(stream.voice.samples[0] - reference.voice.samples[0]) < 1e-7f,
+			      "stream refill lost resampling phase");
+			Check(stream.voice.decoded_samples == reference.voice.decoded_samples,
+			      "stream refill lost pending source advancement");
+			stream.voice.SetupSampler({0x12, 1, rate});
+			Check(stream.voice.sample_phase == 0, "sampler setup retained old resampling phase");
+		}
+	}
+}
+
 } // namespace
 
 int main() {
+	TestResamplingPhaseAfterStarvation();
 	TestFilterTailDuringStarvation();
 	TestLowPassResponse();
 	TestFilterHistoryAndChannels();
