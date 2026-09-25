@@ -132,7 +132,7 @@ struct Program {
 	ThreadLocalStorage              tls;
 	bool                            fail_if_global_not_resolved = true;
 	bool                            dbg_print_reloc             = false;
-	bool                            relocated                   = false;
+	std::vector<uint8_t>            rela_bits;
 	uint64_t                        proc_param_vaddr            = 0;
 	uint64_t                        custom_call_plt_vaddr       = 0;
 	uint32_t                        custom_call_plt_num         = 0;
@@ -201,7 +201,6 @@ private:
 
 	std::vector<Program*>           m_programs;
 	std::unique_ptr<SymbolDatabase> m_symbols;
-	bool                            m_relocated = false;
 	Common::Mutex                   m_mutex;
 
 	application_heap_malloc_func_t         m_application_heap_malloc         = nullptr;
