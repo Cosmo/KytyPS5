@@ -3,6 +3,7 @@
 
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <optional>
 #include <span>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -17,6 +18,8 @@ struct SrtRuntime {
 	SrtMemoryReader           read_memory                = nullptr;
 	void*                     userdata                   = nullptr;
 	SrtMemoryReader           read_specialization_memory = nullptr;
+	// Set for compute dispatches issued one workgroup Z slice at a time.
+	std::optional<uint32_t>   workgroup_id_z;
 };
 
 enum class RuntimeValueType { Any, Integer };
@@ -28,6 +31,7 @@ bool ValidateRuntimeValue(const ResourcePlan& program, Value value,
                           RuntimeValueType type = RuntimeValueType::Any);
 // Uses the strict reader for values that affect shader specialization.
 SrtRuntime CleanRuntime(SrtRuntime runtime);
+bool       IsWorkgroupIdZ(const Inst& inst);
 
 // One memoized evaluation session shared by the entire shader resource refresh.
 class SrtWalker {

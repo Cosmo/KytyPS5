@@ -1636,6 +1636,13 @@ static bool SkipAdjacentModuleFile(const std::string& name) {
 	return lower == "eboot.bin" || lower == "libkernel.prx" || lower == "libkernel_sys.prx";
 }
 
+// PPSA24156 ships 360-byte pdiWheel_N.prx files that are not ELF or SELF images.
+static bool IsElfFile(const std::filesystem::path& path) {
+	Elf64 elf;
+	elf.Open(path);
+	return elf.IsValid();
+}
+
 void RuntimeLinker::PreloadAdjacentPrograms() {
 	if (m_programs.empty()) {
 		return;
@@ -1674,7 +1681,7 @@ void RuntimeLinker::PreloadAdjacentPrograms() {
 		}
 		for (const auto& entry: Common::File::GetDirEntries(dir)) {
 			if (entry.is_file && IsAdjacentModuleFile(entry.name) &&
-			    !SkipAdjacentModuleFile(entry.name)) {
+			    !SkipAdjacentModuleFile(entry.name) && IsElfFile(dir / entry.name)) {
 				add_path(dir / entry.name);
 			}
 		}

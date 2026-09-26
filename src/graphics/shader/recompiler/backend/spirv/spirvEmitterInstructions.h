@@ -29,6 +29,7 @@ uint32_t EmitConvertSigned32ToFloat(EmitterState& state, uint32_t arg0) {
 inline constexpr auto EmitConvertF32S32 = EmitConvertSigned32ToFloat<IR::Type::F32>;
 inline constexpr auto EmitConvertF64S32 = EmitConvertSigned32ToFloat<IR::Type::F64>;
 uint32_t              EmitConvertF32F64(EmitterState& state, uint32_t arg0);
+EMIT_NATIVE(ConvertF64F32, OpFConvert, F64, uint32_t)
 EMIT_NATIVE(ConvertF32U32, OpConvertUToF, F32, uint32_t)
 EMIT_NATIVE(CompositeConstructU64, OpCompositeConstruct, U64, uint32_t, uint32_t)
 EMIT_NATIVE(CompositeConstructU32x2, OpCompositeConstruct, U32x2, uint32_t, uint32_t)
@@ -129,7 +130,10 @@ inline constexpr auto EmitFPCmpClass32 = EmitClassMaskF32;
 EMIT_NATIVE(FPAdd32, OpFAdd, F32, uint32_t, uint32_t)
 EMIT_NATIVE(FPSub32, OpFSub, F32, uint32_t, uint32_t)
 EMIT_NATIVE(FPMul32, OpFMul, F32, uint32_t, uint32_t)
+EMIT_NATIVE(FPAdd64, OpFAdd, F64, uint32_t, uint32_t)
 EMIT_NATIVE(FPMul64, OpFMul, F64, uint32_t, uint32_t)
+uint32_t              EmitFPMin64(EmitterState& state, uint32_t arg0, uint32_t arg1);
+uint32_t              EmitFPMax64(EmitterState& state, uint32_t arg0, uint32_t arg1);
 inline constexpr auto EmitFPFma64 =
     EmitGlsl<GLSLstd450Fma, IR::Type::F64, uint32_t, uint32_t, uint32_t>;
 uint32_t              EmitFPRecip64(EmitterState& state, uint32_t arg0);
@@ -151,6 +155,7 @@ inline constexpr auto EmitFPRoundEven32 = EmitGlsl<GLSLstd450RoundEven, IR::Type
 inline constexpr auto EmitFPFloor32     = EmitGlsl<GLSLstd450Floor, IR::Type::F32, uint32_t>;
 inline constexpr auto EmitFPCeil32      = EmitGlsl<GLSLstd450Ceil, IR::Type::F32, uint32_t>;
 inline constexpr auto EmitFPTrunc32     = EmitGlsl<GLSLstd450Trunc, IR::Type::F32, uint32_t>;
+inline constexpr auto EmitFPTrunc64     = EmitGlsl<GLSLstd450Trunc, IR::Type::F64, uint32_t>;
 inline constexpr auto EmitFPFract32     = EmitGlsl<GLSLstd450Fract, IR::Type::F32, uint32_t>;
 uint32_t              EmitFPSin(EmitterState& state, uint32_t arg0);
 uint32_t              EmitFPCos(EmitterState& state, uint32_t arg0);

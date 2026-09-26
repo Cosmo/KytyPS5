@@ -12,6 +12,12 @@
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
+bool IsWorkgroupIdZ(const Inst& inst) {
+	return inst.GetOpcode() == ValueOpcode::GetBuiltin && inst.NumArgs() == 2 &&
+	       inst.Arg(0) == Value(static_cast<uint32_t>(StageInputKind::WorkgroupId)) &&
+	       inst.Arg(1) == Value(2u);
+}
+
 SrtRuntime CleanRuntime(SrtRuntime runtime) {
 	runtime.read_memory = runtime.read_specialization_memory != nullptr
 	                          ? runtime.read_specialization_memory
@@ -233,6 +239,10 @@ private:
 				return finish(false);
 			}
 			return finish(true);
+		}
+		if (op == ValueOpcode::GetBuiltin) {
+			// Compute descriptors indexed by the workgroup Z id are materialized per Z slice.
+			return finish(m_program.stage == ShaderType::Compute && IsWorkgroupIdZ(*inst));
 		}
 		if (op == ValueOpcode::Phi) {
 			if (m_type == RuntimeValueType::Integer && !ValidateArguments(*inst, false)) {
@@ -664,6 +674,12 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 			return true;
 		}
 		case ValueOpcode::GetShaderBase: result = m_runtime.shader_base; return true;
+		case ValueOpcode::GetBuiltin:
+			if (!IsWorkgroupIdZ(inst) || !m_runtime.workgroup_id_z.has_value()) {
+				return false;
+			}
+			result = *m_runtime.workgroup_id_z;
+			return true;
 		case ValueOpcode::Phi: return EvaluatePhi(inst, result);
 		case ValueOpcode::ReadFirstLane: {
 			const auto clean_runtime = CleanRuntime(m_runtime);

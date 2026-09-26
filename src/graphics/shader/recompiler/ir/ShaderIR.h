@@ -451,6 +451,8 @@ struct ShaderInfo {
 	int32_t                          instance_offset_sgpr = -1;
 	bool                             has_bitwise_xor    = false;
 	bool                             uses_dma           = false;
+	// Compute descriptors that depend on the workgroup Z id, dispatched one Z slice at a time.
+	bool                             workgroup_z_descriptors = false;
 
 	bool operator==(const ShaderInfo& other) const = default;
 };

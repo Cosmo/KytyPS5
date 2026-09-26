@@ -550,7 +550,11 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	const auto height          = static_cast<uint32_t>(descriptor.Height5()) + 1u;
 	const auto base_level      = descriptor.BaseLevel();
 	const auto last_level      = descriptor.LastLevel();
-	const auto type            = TextureType(descriptor);
+	// A single-slice volume read by a 2D instruction is a plane (see DescriptorDimension).
+	const auto type = TextureType(descriptor) == Prospero::ImageType::kColor3D &&
+	                          resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D
+	                      ? Prospero::ImageType::kColor2D
+	                      : TextureType(descriptor);
 	const bool multisampled    = IsMultisampledTexture(type);
 	const auto max_mip         = resource.r128 ? last_level : descriptor.MaxMip();
 	const auto physical_levels = multisampled ? 1u : static_cast<uint32_t>(max_mip) + 1u;

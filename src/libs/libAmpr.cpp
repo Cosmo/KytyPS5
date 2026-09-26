@@ -1381,8 +1381,10 @@ static int ExecuteAprCommandBuffer(uint64_t command_buffer, int32_t* execution_r
 			case CommandKind::KernelEvent: {
 				const auto& command = state.kernel_event_commands[entry.index];
 				const auto  eq      = static_cast<LibKernel::EventQueue::KernelEqueue>(command.eq);
-				auto        result  = LibKernel::EventQueue::KernelTriggerUserEvent(
-				    eq, command.id, reinterpret_cast<void*>(command.data));
+				auto        result  = LibKernel::EventQueue::KernelTriggerEvent(
+				    eq, static_cast<uintptr_t>(command.id),
+				    LibKernel::EventQueue::KERNEL_EVFILT_AMPR,
+				    reinterpret_cast<void*>(command.data));
 				if (result != OK) {
 					LOGF("\tAPR submit event failed: eq=0x%016" PRIx64 ", id=%" PRId32
 					     ", result=0x%08" PRIx32 "\n",

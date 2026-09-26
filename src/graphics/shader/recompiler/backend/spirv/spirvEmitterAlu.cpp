@@ -451,6 +451,36 @@ uint32_t EmitFPMax32(EmitterState& state, uint32_t arg0, uint32_t arg1) {
 	return EmitMinMaxF32Value(state, arg0, arg1, true);
 }
 
+// Same rules as the FP32 forms: a NaN operand yields the other operand, and -0 orders below +0.
+static uint32_t EmitMinMaxF64(EmitterState& state, uint32_t lhs, uint32_t rhs, bool max_value) {
+	const auto ordered =
+	    Binary(state, max_value ? spv::OpFOrdGreaterThanEqual : spv::OpFOrdLessThan,
+	           TypeBool(state), lhs, rhs);
+	const auto zero      = state.builder.Constant(spv::OpConstant, TypeF64(state), 0u, 0u);
+	const auto both_zero = Binary(state, spv::OpLogicalAnd, TypeBool(state),
+	                              Binary(state, spv::OpFOrdEqual, TypeBool(state), lhs, zero),
+	                              Binary(state, spv::OpFOrdEqual, TypeBool(state), rhs, zero));
+	const auto signed_zero =
+	    Unary(state, spv::OpBitcast, TypeF64(state),
+	          Binary(state, max_value ? spv::OpBitwiseAnd : spv::OpBitwiseOr, TypeU64(state),
+	                 Unary(state, spv::OpBitcast, TypeU64(state), lhs),
+	                 Unary(state, spv::OpBitcast, TypeU64(state), rhs)));
+	const auto numeric = Select(state, TypeF64(state), both_zero, signed_zero,
+	                            Select(state, TypeF64(state), ordered, lhs, rhs));
+	const auto rhs_nan = Unary(state, spv::OpIsNan, TypeBool(state), rhs);
+	const auto lhs_nan = Unary(state, spv::OpIsNan, TypeBool(state), lhs);
+	return Select(state, TypeF64(state), lhs_nan, rhs,
+	              Select(state, TypeF64(state), rhs_nan, lhs, numeric));
+}
+
+uint32_t EmitFPMin64(EmitterState& state, uint32_t arg0, uint32_t arg1) {
+	return EmitMinMaxF64(state, arg0, arg1, false);
+}
+
+uint32_t EmitFPMax64(EmitterState& state, uint32_t arg0, uint32_t arg1) {
+	return EmitMinMaxF64(state, arg0, arg1, true);
+}
+
 uint32_t EmitFPMinTri32(EmitterState& state, uint32_t arg0, uint32_t arg1, uint32_t arg2) {
 	return EmitFMinMax3(state, arg0, arg1, arg2, false);
 }

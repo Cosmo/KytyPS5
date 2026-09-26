@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <fmt/format.h>
 #include <span>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 namespace {
@@ -44,7 +46,8 @@ Value CanonicalizeSampleAdjustDword3(Value value) {
 		value            = value.Resolve();
 		const auto* inst = value.TryInstruction();
 		if (inst == nullptr || inst->GetOpcode() != ValueOpcode::BitwiseOr32) {
-			return value;
+			// A lone scratch term remains once `0 | scratch` has folded away.
+			return (PossibleU32Bits(value) & ~SamplerDword3ReservedMask) == 0 ? Value(0u) : value;
 		}
 		const auto left           = inst->Arg(0).Resolve();
 		const auto right          = inst->Arg(1).Resolve();
@@ -134,12 +137,47 @@ public:
 				return std::ranges::find(plan.reads, inst) != plan.reads.end();
 			});
 		});
+		if (m_program.stage == ShaderType::Compute) {
+			m_info.workgroup_z_descriptors =
+			    std::ranges::any_of(m_sources, [&](const DescriptorSource& source) {
+				    return std::any_of(source.dwords.begin(),
+				                       source.dwords.begin() + source.dword_count,
+				                       [&](Value dword) { return DependsOnWorkgroupZ(dword); });
+			    });
+		}
 		m_program.descriptor_sources         = std::move(m_sources);
 		m_program.info                       = std::move(m_info);
 		m_program.resource_tracking_complete = true;
 	}
 
 private:
+	// Whether a value reads the workgroup Z id, directly or through SRT reads.
+	[[nodiscard]] bool DependsOnWorkgroupZ(Value root) const {
+		std::vector<Value>              pending {root};
+		std::unordered_set<const Inst*> visited;
+		while (!pending.empty()) {
+			const auto* inst = pending.back().Resolve().TryInstruction();
+			pending.pop_back();
+			if (inst == nullptr || !visited.insert(inst).second) {
+				continue;
+			}
+			if (IsWorkgroupIdZ(*inst)) {
+				return true;
+			}
+			if (inst->GetOpcode() == ValueOpcode::ReadConst && inst->NumArgs() == 2) {
+				const auto slot = inst->Arg(1).Resolve();
+				if (slot.IsImmediate() && slot.GetType() == Type::U32 &&
+				    slot.U32() < m_program.srt_reads.size()) {
+					pending.push_back(m_program.srt_reads[slot.U32()].value);
+				}
+			}
+			for (size_t index = 0; index < inst->NumArgs(); index++) {
+				pending.push_back(inst->Arg(index));
+			}
+		}
+		return false;
+	}
+
 	struct HandlePatch {
 		Inst*    handle   = nullptr;
 		uint32_t resource = 0;

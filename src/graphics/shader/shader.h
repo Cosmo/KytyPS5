@@ -152,6 +152,8 @@ struct ShaderComputeInputInfo: ShaderWorkgroupInputInfo {
 	int                thread_ids_num             = 0;
 	int                workgroup_register         = 0;
 	bool               tg_size_en                 = false;
+	// Z slice whose descriptors are materialized; not part of the program key.
+	uint32_t           workgroup_id_z             = 0;
 	ShaderStageRuntime stage;
 };
 

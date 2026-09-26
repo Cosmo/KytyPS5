@@ -351,7 +351,9 @@ uint32_t InverseSwizzle(uint32_t swizzle, uint32_t component) {
 Format::BufferFormatInfo ImageConversionFormat(const EmitterState&   state,
                                                const IR::MemoryInfo& mem) {
 	const auto format = state.program.info.images[mem.resource].conversion_format;
-	if (format == Prospero::BufferFormat::kInvalid) return {};
+	if (format == Prospero::BufferFormat::kInvalid || Prospero::IsScaledTextureFormat(format)) {
+		return {};
+	}
 	const auto info = Format::GetFormatInfo(format);
 	EXIT_IF(Prospero::SampledTextureNumericClass(format) != Prospero::TextureNumericClass::Uint ||
 	        Prospero::RemapTextureFormat(format) == format ||
@@ -361,7 +363,71 @@ Format::BufferFormatInfo ImageConversionFormat(const EmitterState&   state,
 	return info;
 }
 
+// USCALED images sample their UNORM backing through an identity view. Every supported scaled
+// format has equally wide channels, so one maximum restores the integers.
+Format::BufferFormatInfo ScaledImageFormat(const EmitterState& state, const IR::MemoryInfo& mem) {
+	const auto format = state.program.info.images[mem.resource].conversion_format;
+	return Prospero::IsScaledTextureFormat(format) ? Format::GetFormatInfo(format)
+	                                               : Format::BufferFormatInfo {};
+}
+
+uint32_t ScaledChannelMax(EmitterState& state, const Format::BufferFormatInfo& info) {
+	return ConstantF32(
+	    state, std::bit_cast<uint32_t>(static_cast<float>((1u << info.component_bits[0]) - 1u)));
+}
+
+// Value of a descriptor selector that does not read a stored channel.
+uint32_t ScaledConstantComponent(EmitterState& state, uint32_t selector) {
+	const bool one = selector == 1u || selector == 7u;
+	return one ? ConstantF32(state, std::bit_cast<uint32_t>(1.0f)) : ZeroF32(state);
+}
+
+bool ReadsScaledChannel(const Format::BufferFormatInfo& info, uint32_t selector) {
+	return selector >= 4u && selector - 4u < info.component_count;
+}
+
+uint32_t UnpackScaledImageTexel(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t texel,
+                                const Format::BufferFormatInfo& info) {
+	auto&      state   = ctx.state;
+	const auto swizzle = state.program.info.images[mem.resource].shader_swizzle;
+	uint32_t   selected[4] {};
+	for (uint32_t component = 0; component < 4u; component++) {
+		const auto selector = (swizzle >> (component * 3u)) & 7u;
+		if (!ReadsScaledChannel(info, selector)) {
+			selected[component] = ScaledConstantComponent(state, selector);
+			continue;
+		}
+		const auto value = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), value, texel,
+		                          selector - 4u);
+		selected[component] =
+		    Binary(state, spv::OpFMul, TypeF32(state), value, ScaledChannelMax(state, info));
+	}
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 4), result,
+	                          selected[0], selected[1], selected[2], selected[3]);
+	return result;
+}
+
+// Channel a gather reads from the host view: packed conversions keep everything in R, and
+// scaled images resolve the descriptor swizzle in the shader.
+uint32_t GatherSourceComponent(const EmitterState& state, const IR::MemoryInfo& mem) {
+	const auto component = ImageGatherComponent(mem.dmask);
+	const auto scaled    = ScaledImageFormat(state, mem);
+	if (scaled.format != Prospero::BufferFormat::kInvalid) {
+		const auto selector =
+		    (state.program.info.images[mem.resource].shader_swizzle >> (component * 3u)) & 7u;
+		return ReadsScaledChannel(scaled, selector) ? selector - 4u : 0u;
+	}
+	return ImageConversionFormat(state, mem).format == Prospero::BufferFormat::kInvalid ? component
+	                                                                                    : 0u;
+}
+
 uint32_t UnpackImageTexel(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t texel) {
+	const auto scaled = ScaledImageFormat(ctx.state, mem);
+	if (scaled.format != Prospero::BufferFormat::kInvalid) {
+		return UnpackScaledImageTexel(ctx, mem, texel, scaled);
+	}
 	const auto info = ImageConversionFormat(ctx.state, mem);
 	if (info.format == Prospero::BufferFormat::kInvalid) return texel;
 
@@ -399,6 +465,19 @@ uint32_t UnpackImageTexel(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint
 }
 
 uint32_t UnpackImageGather(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t gathered) {
+	const auto scaled = ScaledImageFormat(ctx.state, mem);
+	if (scaled.format != Prospero::BufferFormat::kInvalid) {
+		const auto selector = (ctx.state.program.info.images[mem.resource].shader_swizzle >>
+		                       (ImageGatherComponent(mem.dmask) * 3u)) &
+		                      7u;
+		if (!ReadsScaledChannel(scaled, selector)) {
+			const auto value = ScaledConstantComponent(ctx.state, selector);
+			return ctx.state.builder.Constant(spv::OpConstantComposite, TypeF32Vector(ctx.state, 4),
+			                                  value, value, value, value);
+		}
+		return Binary(ctx.state, spv::OpVectorTimesScalar, TypeF32Vector(ctx.state, 4), gathered,
+		              ScaledChannelMax(ctx.state, scaled));
+	}
 	const auto info = ImageConversionFormat(ctx.state, mem);
 	if (info.format == Prospero::BufferFormat::kInvalid) return gathered;
 
@@ -449,11 +528,8 @@ uint32_t EmitOneDimensionalGatherLz(ValueEmitContext& ctx, const IR::MemoryInfo&
 	const auto sampled     = MakeSampledImage(state, mem.resource, mem.sampler);
 	const auto vector_type = ImageVectorType(state, numeric_class, 4);
 	const auto scalar_type = ImageScalarType(state, numeric_class);
-	const auto component =
-	    ImageConversionFormat(state, mem).format == Prospero::BufferFormat::kInvalid
-	        ? ImageGatherComponent(mem.dmask)
-	        : 0u;
-	uint32_t values[2] {};
+	const auto component   = GatherSourceComponent(state, mem);
+	uint32_t   values[2] {};
 	for (uint32_t index = 0; index < 2u; index++) {
 		const auto sample_coord =
 		    Binary(state, spv::OpFDiv, TypeF32(state),
@@ -686,10 +762,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				         coord,
 				         dref_value};
 			} else {
-				uint32_t component = 0;
-				if (ImageConversionFormat(state, mem).format == Prospero::BufferFormat::kInvalid) {
-					component = ImageGatherComponent(mem.dmask);
-				}
+				const auto component = GatherSourceComponent(state, mem);
 				words = {spv::OpImageGather,
 				         ImageVectorType(state, numeric_class, 4),
 				         sample,

@@ -16403,8 +16403,13 @@ CoverageClass ClassifyOpcode(ShaderOpcode opcode,
   case Opcode::V_DOT2C_F32_F16:
   case Opcode::V_CVT_F64_I32:
   case Opcode::V_CVT_F32_F64:
+  case Opcode::V_CVT_F64_F32:
   case Opcode::V_RCP_F64:
+  case Opcode::V_TRUNC_F64:
+  case Opcode::V_ADD_F64:
   case Opcode::V_MUL_F64:
+  case Opcode::V_MIN_F64:
+  case Opcode::V_MAX_F64:
   case Opcode::V_FMA_F64:
   case Opcode::V_CVT_F32_I32:
   case Opcode::V_CVT_F32_U32:
@@ -21843,6 +21848,114 @@ TestCase VectorF64ModesModifiersAndExec() {
                   O::V_CVT_F64_I32,      O::V_RCP_F64,     O::V_MUL_F64,
                   O::V_FMA_F64,          O::V_CVT_F32_F64, O::V_AND_B32,
                   O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  return test;
+}
+
+TestCase VectorF64ConvertF32AndAdd() {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = "VectorF64ConvertF32AndAdd";
+  const auto store_pair = [&](u32 reg, double value) {
+    const auto bits = std::bit_cast<uint64_t>(value);
+    AppendStoreVgpr(&test.code, reg, static_cast<u32>(test.expected.size()));
+    AppendStoreVgpr(&test.code, reg + 1,
+                    static_cast<u32>(test.expected.size() + 1));
+    test.expected.insert(test.expected.end(), {static_cast<u32>(bits),
+                                               static_cast<u32>(bits >> 32)});
+  };
+  // The sums are exact in FP64 but not representable in FP32.
+  for (const auto [a, b] : {std::pair<float, float>{1.5f, -0.25f},
+                            {16777216.0f, 1.0f},
+                            {3.0e38f, 3.0e38f}}) {
+    AppendVMovLiteral(&test.code, 1, std::bit_cast<u32>(a));
+    AppendVMovLiteral(&test.code, 2, std::bit_cast<u32>(b));
+    test.code.push_back(EncodeVop1(0x10, 4, Vgpr(1)));
+    test.code.push_back(EncodeVop1(0x10, 6, Vgpr(2)));
+    store_pair(4, double(a));
+    AppendVop3(&test.code, 0x164, 8, Vgpr(4), Vgpr(6));
+    store_pair(8, double(a) + double(b));
+    AppendVop3(&test.code, 0x164, 8, Vgpr(4), Vgpr(6), 0, 0, 0, false, 0, 2);
+    store_pair(8, double(a) - double(b));
+  }
+  AppendEnd(&test.code);
+  test.opcodes = {O::V_MOV_B32, O::V_CVT_F64_F32, O::V_ADD_F64,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.required_spirv = {"OpCapability Float64", "OpFConvert", "OpFAdd"};
+  test.ir_counts = {{"ConvertF64F32", 6}, {"FPAdd64", 6}};
+  return test;
+}
+
+TestCase VectorF64MinMax() {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = "VectorF64MinMax";
+  const auto load_pair = [&](u32 reg, double value) {
+    const auto bits = std::bit_cast<uint64_t>(value);
+    AppendVMovLiteral(&test.code, reg, static_cast<u32>(bits));
+    AppendVMovLiteral(&test.code, reg + 1, static_cast<u32>(bits >> 32));
+  };
+  const auto store_pair = [&](u32 reg, double value) {
+    const auto bits = std::bit_cast<uint64_t>(value);
+    AppendStoreVgpr(&test.code, reg, static_cast<u32>(test.expected.size()));
+    AppendStoreVgpr(&test.code, reg + 1,
+                    static_cast<u32>(test.expected.size() + 1));
+    test.expected.insert(test.expected.end(), {static_cast<u32>(bits),
+                                               static_cast<u32>(bits >> 32)});
+  };
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  // A NaN operand yields the other operand, and -0 orders below +0.
+  for (const auto [a, b, min, max] :
+       {std::array<double, 4>{1.5, -2.0, -2.0, 1.5},
+        {0.0, -0.0, -0.0, 0.0},
+        {nan, 3.0, 3.0, 3.0},
+        {3.0, nan, 3.0, 3.0}}) {
+    load_pair(2, a);
+    load_pair(4, b);
+    AppendVop3(&test.code, 0x166, 6, Vgpr(2), Vgpr(4));
+    store_pair(6, min);
+    AppendVop3(&test.code, 0x167, 6, Vgpr(2), Vgpr(4));
+    store_pair(6, max);
+  }
+  // Exact instruction words from the PPSA24156 shader: v[6:7] = max(0.0, v[2:3]).
+  for (const auto [source, expected] :
+       {std::pair<double, double>{-1.0, 0.0}, {2.5, 2.5}}) {
+    load_pair(2, source);
+    test.code.insert(test.code.end(), {0xd5670006u, 0x00020480u});
+    store_pair(6, expected);
+  }
+  AppendEnd(&test.code);
+  test.opcodes = {O::V_MOV_B32, O::V_MIN_F64, O::V_MAX_F64,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.required_spirv = {"OpCapability Float64", "OpIsNan"};
+  test.ir_counts = {{"FPMin64", 4}, {"FPMax64", 6}};
+  return test;
+}
+
+TestCase VectorF64Trunc() {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = "VectorF64Trunc";
+  for (const auto [source, expected] :
+       {std::pair<double, double>{2.75, 2.0},
+        {-2.75, -2.0},
+        {1000000000000000.75, 1000000000000000.0},
+        {-0.5, -0.0}}) {
+    const auto bits = std::bit_cast<uint64_t>(source);
+    AppendVMovLiteral(&test.code, 11, static_cast<u32>(bits));
+    AppendVMovLiteral(&test.code, 12, static_cast<u32>(bits >> 32));
+    // Exact instruction word from the PPSA24156 shader: v[11:12] = trunc(v[11:12]).
+    test.code.push_back(0x7e162f0bu);
+    const auto result = std::bit_cast<uint64_t>(expected);
+    AppendStoreVgpr(&test.code, 11, static_cast<u32>(test.expected.size()));
+    AppendStoreVgpr(&test.code, 12, static_cast<u32>(test.expected.size() + 1));
+    test.expected.insert(test.expected.end(), {static_cast<u32>(result),
+                                               static_cast<u32>(result >> 32)});
+  }
+  AppendEnd(&test.code);
+  test.opcodes = {O::V_MOV_B32, O::V_TRUNC_F64, O::BUFFER_STORE_DWORD,
+                  O::S_ENDPGM};
+  test.required_spirv = {"OpCapability Float64", "Trunc"};
+  test.ir_counts = {{"FPTrunc64", 4}};
   return test;
 }
 
@@ -29033,6 +29146,9 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorRcpIflagF32IntegerReciprocal);
   AddCase(VectorF64CapturedScreenSpaceShadows);
   AddCase(VectorF64ModesModifiersAndExec);
+  AddCase(VectorF64ConvertF32AndAdd);
+  AddCase(VectorF64MinMax);
+  AddCase(VectorF64Trunc);
   AddCase(VectorSinCosMaxFiniteSpecialCases);
   AddCase(VectorCompareOps);
   AddCase(VectorVop3CompareEqI64OnGpu);

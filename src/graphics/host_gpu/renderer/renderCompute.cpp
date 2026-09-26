@@ -364,41 +364,60 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	buffer.EndRendering();
-	auto& pipeline =
-	    m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
-	auto& bindings = m_compute_bindings;
-	PrepareBindings(input_info.stage, bindings);
-	FindBuffers(bindings);
-	if (program.info.uses_dma) {
-		m_context.PrepareBda();
-	}
-	RebindImages(bindings);
-	RebindBuffers(bindings);
+	// Descriptors that depend on the workgroup Z id are materialized for each Z slice, and each
+	// slice is dispatched with its base so that the shader still sees its own workgroup id.
+	const bool     split_z          = program.info.workgroup_z_descriptors;
+	const uint32_t slice_count      = split_z ? thread_group_z : 1u;
+	const auto     dispatch_threads = std::to_array(input_info.dispatch_threads_num);
+	auto           slice_program    = compute_program;
+	for (uint32_t slice = 0; slice < slice_count; slice++) {
+		if (slice != 0) {
+			input_info.workgroup_id_z = slice;
+			slice_program =
+			    m_context.GetPipelineCache().GetComputeProgram(cs_regs, sh_regs, input_info);
+			EXIT_IF(!slice_program);
+			std::ranges::copy(dispatch_threads, input_info.dispatch_threads_num);
+		}
+		const auto& slice_info = input_info.stage.program->info;
+		auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, slice_program);
+		auto& bindings = m_compute_bindings;
+		PrepareBindings(input_info.stage, bindings);
+		FindBuffers(bindings);
+		if (slice_info.uses_dma) {
+			m_context.PrepareBda();
+		}
+		RebindImages(bindings);
+		RebindBuffers(bindings);
 
-	auto              vk_buffer        = buffer.Handle();
-	PreparedBindings* descriptor_stage = &bindings;
-	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	               std::span {&descriptor_stage, 1u});
-	bool has_storage_writes = HasShaderBufferWrites(input_info.stage);
-	has_storage_writes =
-	    std::any_of(program.info.images.begin(), program.info.images.end(),
-	                [](const auto& image) {
-		                return image.written &&
-		                       image.resource_class ==
-		                           ShaderRecompiler::IR::ImageResourceClass::Storage;
-	                }) ||
-	    has_storage_writes;
-	if (has_storage_writes) {
-		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
-		// while allowing the queue to execute asynchronously.
-		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
-	}
-	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+		auto              vk_buffer        = buffer.Handle();
+		PreparedBindings* descriptor_stage = &bindings;
+		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+		               std::span {&descriptor_stage, 1u});
+		bool has_storage_writes = HasShaderBufferWrites(input_info.stage);
+		has_storage_writes =
+		    std::any_of(slice_info.images.begin(), slice_info.images.end(),
+		                [](const auto& image) {
+			                return image.written &&
+			                       image.resource_class ==
+			                           ShaderRecompiler::IR::ImageResourceClass::Storage;
+		                }) ||
+		    has_storage_writes;
+		if (has_storage_writes) {
+			// A host fence used to serialize every dispatch. Preserve its read-before-write
+			// ordering while allowing the queue to execute asynchronously.
+			ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		}
+		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+		if (split_z) {
+			vk_buffer.dispatchBase(0, 0, slice, thread_group_x, thread_group_y, 1);
+		} else {
+			vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+		}
 
-	// The removed host fence also ordered read-only dispatches before later writers.
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
-	ResetBindings();
+		// The removed host fence also ordered read-only dispatches before later writers.
+		ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		ResetBindings();
+	}
 }
 
 void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
@@ -420,6 +439,9 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	if (!compute_program) {
 		// Temporary until RT is implemented.
 		return;
+	}
+	if (input_info.stage.program->info.workgroup_z_descriptors) {
+		EXIT("indirect dispatch cannot select descriptors per workgroup Z slice\n");
 	}
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);

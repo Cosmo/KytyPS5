@@ -39,7 +39,14 @@ Decoder::ImageDimension DescriptorDimension(const DescriptorValue&  descriptor,
 				return Decoder::ImageDimension::Dim1DArray;
 			}
 			return Decoder::ImageDimension::Dim1D;
-		case Prospero::ImageType::kColor3D: return Decoder::ImageDimension::Dim3D;
+		case Prospero::ImageType::kColor3D:
+			// A single-slice volume read by a 2D instruction is a plane. PPSA24156 binds a 1x1x1
+			// volume as a dummy shadow map, and depth comparison has no 3D form.
+			if (requested == Decoder::ImageDimension::Dim2D &&
+			    (descriptor.dwords[4] & 0x1fffu) == 0u) {
+				return Decoder::ImageDimension::Dim2D;
+			}
+			return Decoder::ImageDimension::Dim3D;
 		case Prospero::ImageType::kCube: return Decoder::ImageDimension::Dim2DArray;
 		case Prospero::ImageType::kColor2DArray:
 			if (is_array) {
@@ -106,14 +113,20 @@ Prospero::BufferFormat ImageConversionFormat(Prospero::BufferFormat format) {
 	                                                      : Prospero::BufferFormat::kInvalid;
 }
 
+// Packed integer conversions cannot be filtered; scaled images filter their UNORM backing.
+bool RequiresPointConversion(Prospero::BufferFormat conversion_format) {
+	return conversion_format != Prospero::BufferFormat::kInvalid &&
+	       !Prospero::IsScaledTextureFormat(conversion_format);
+}
+
 bool RequiresPointSampler(const ImageResource& image) {
 	return image.numeric_class == Prospero::TextureNumericClass::Sint ||
-	       image.conversion_format != Prospero::BufferFormat::kInvalid;
+	       RequiresPointConversion(image.conversion_format);
 }
 
 bool RequiresPointSampler(const ResourceSpecialization::Image& image) {
 	return image.numeric_class == Prospero::TextureNumericClass::Sint ||
-	       image.conversion_format != Prospero::BufferFormat::kInvalid;
+	       RequiresPointConversion(image.conversion_format);
 }
 
 bool DescriptorIsCube(const DescriptorValue& descriptor) {
@@ -510,7 +523,8 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		image.numeric_class         = Prospero::SampledTextureNumericClass(format);
 		if (storage) {
 			if ((!raw_sint_storage && image.numeric_class == Prospero::TextureNumericClass::Sint) ||
-			    image.numeric_class == Prospero::TextureNumericClass::Unsupported) {
+			    image.numeric_class == Prospero::TextureNumericClass::Unsupported ||
+			    Prospero::IsScaledTextureFormat(format)) {
 				return SpecializationFail(
 				    fmt::format("storage image descriptor {} uses unsupported format {}", i,
 				                static_cast<uint32_t>(format)));

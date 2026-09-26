@@ -192,8 +192,13 @@ bool TextureCache::SameBacking(const ImageInfo& cached, const ImageInfo& request
 	if (cached.tile_mode != requested.tile_mode) {
 		return false;
 	}
+	// 1x1x1 images of different types may share a backing, except that only a volume can back
+	// a 3D view and a volume cannot back a 2D view.
+	const bool volume_mismatch = (cached.type == Prospero::ImageType::kColor3D) !=
+	                             (requested.type == Prospero::ImageType::kColor3D);
 	if (!ImageViewOps::FormatsCompatible(cached.pixel_format, requested.pixel_format) ||
-	    (cached.type != requested.type && requested.extent != vk::Extent3D {1, 1, 1})) {
+	    (cached.type != requested.type &&
+	     (requested.extent != vk::Extent3D {1, 1, 1} || volume_mismatch))) {
 		return false;
 	}
 	if (exact_format && cached.pixel_format != requested.pixel_format) {
@@ -1273,6 +1278,14 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		int32_t view_layer = -1;
 		if (!result) {
 			for (const auto candidate: candidates) {
+				// A one-texel dummy can be bound as a plane and as a volume in the same draw
+				// (PPSA24156); keep both images instead of converting one into the other.
+				const auto& candidate_info = m_slot_images[candidate].info;
+				if (candidate_info.extent == vk::Extent3D {1, 1, 1} &&
+				    desc.info.extent == vk::Extent3D {1, 1, 1} &&
+				    candidate_info.IsVolume() != desc.info.IsVolume()) {
+					continue;
+				}
 				view_mip                = -1;
 				view_layer              = -1;
 				const auto& merged_info = result ? m_slot_images[result].info : desc.info;

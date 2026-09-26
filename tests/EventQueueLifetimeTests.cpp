@@ -428,6 +428,34 @@ void TestConcurrentDelete() {
 	}
 }
 
+void TestAmprEventUsesAmprFilter() {
+	EventQueue::KernelEqueue queue = EventQueue::KERNEL_EQUEUE_INVALID;
+	Check(EventQueue::KernelCreateEqueue(&queue, "ampr-event") == OK, "create AMPR event queue");
+	Check(EventQueue::KernelAddAmprEvent(queue, 3, reinterpret_cast<void*>(0x3333)) == OK,
+	      "add AMPR event");
+	Check(EventQueue::KernelTriggerEvent(queue, 3, EventQueue::KERNEL_EVFILT_USER, nullptr) ==
+	          KERNEL_ERROR_ENOENT,
+	      "AMPR event is not a user event");
+	Check(EventQueue::KernelTriggerEvent(queue, 3, EventQueue::KERNEL_EVFILT_AMPR,
+	                                     reinterpret_cast<void*>(0x1234)) == OK,
+	      "trigger AMPR event");
+
+	EventQueue::KernelEvent         event {};
+	int                             out     = 0;
+	Libs::LibKernel::KernelUseconds timeout = 0;
+	Check(EventQueue::KernelWaitEqueue(queue, &event, 1, &out, &timeout) == OK && out == 1,
+	      "read AMPR event");
+	Check(event.filter == EventQueue::KERNEL_EVFILT_AMPR && event.data == 0x1234 &&
+	          event.udata == reinterpret_cast<void*>(0x3333),
+	      "AMPR event reports its filter, data and user data");
+
+	Check(EventQueue::KernelDeleteAmprEvent(queue, 3) == OK, "delete AMPR event");
+	Check(EventQueue::KernelTriggerEvent(queue, 3, EventQueue::KERNEL_EVFILT_AMPR, nullptr) ==
+	          KERNEL_ERROR_ENOENT,
+	      "deleted AMPR event is gone");
+	Check(EventQueue::KernelDeleteEqueue(queue) == OK, "delete AMPR event queue");
+}
+
 } // namespace
 
 int main() {
@@ -438,6 +466,7 @@ int main() {
 	TestStaleHandleNeverAliasesNewQueue();
 	TestConcurrentCloseCallback();
 	TestConcurrentDelete();
+	TestAmprEventUsesAmprFilter();
 	std::printf("EventQueueLifetimeTests: all cases passed\n");
 	return 0;
 }

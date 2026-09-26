@@ -509,6 +509,18 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			}
 			return;
 		}
+		case ValueOpcode::BitReverse32: {
+			const auto value = Arg(inst, 0);
+			if (IsImmediate(value, Type::U32)) {
+				auto bits = value.U32();
+				bits      = ((bits >> 1u) & 0x55555555u) | ((bits & 0x55555555u) << 1u);
+				bits      = ((bits >> 2u) & 0x33333333u) | ((bits & 0x33333333u) << 2u);
+				bits      = ((bits >> 4u) & 0x0f0f0f0fu) | ((bits & 0x0f0f0f0fu) << 4u);
+				bits      = ((bits >> 8u) & 0x00ff00ffu) | ((bits & 0x00ff00ffu) << 8u);
+				Replace(inst, Value((bits >> 16u) | (bits << 16u)));
+			}
+			return;
+		}
 		case ValueOpcode::BitCount64: {
 			const auto value = Arg(inst, 0);
 			if (IsImmediate(value, Type::U64)) {

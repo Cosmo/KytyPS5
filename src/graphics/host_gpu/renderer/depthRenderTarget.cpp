@@ -160,10 +160,9 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 			           z.depth_view.slice_max);
 	}
 	// EXPCLEAR permits an HTile acceleration state; the host attachment is already expanded.
-	if (z.z_info.partially_resident ||
-	    z.stencil_info.partially_resident || z.z_info.max_mip_level != 0 ||
-	    z.depth_view.current_mip_level != 0 || unsupported_shading_rate_encoding ||
-	    depth_address == 0 || (depth_address & 0xffffu) != 0) {
+	// Partially resident targets render into a fully backed host image.
+	if (z.z_info.max_mip_level != 0 || z.depth_view.current_mip_level != 0 ||
+	    unsupported_shading_rate_encoding || depth_address == 0 || (depth_address & 0xffffu) != 0) {
 		DepthFatal("unsupported depth register state");
 	}
 	if (has_stencil) {

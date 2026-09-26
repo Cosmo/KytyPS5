@@ -72,8 +72,10 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 
 		return;
 	}
+	// EQAA targets have more coverage samples than stored color fragments; the extra coverage
+	// lives in FMASK, so the color image keeps the fragment count (as in shadPS4).
 	const auto samples = render_sample_count(rt.attrib.num_fragments);
-	if (samples == 0 || rt.attrib.num_samples != rt.attrib.num_fragments) {
+	if (samples == 0 || rt.attrib.num_samples < rt.attrib.num_fragments) {
 		EXIT("unsupported render-target sample configuration: samples=%u fragments=%u\n",
 		     rt.attrib.num_samples, rt.attrib.num_fragments);
 	}

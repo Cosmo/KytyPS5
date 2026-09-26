@@ -511,6 +511,18 @@ void TestOptimizationPipeline() {
         "elimination regressed");
 }
 
+void TestBitReverseFolding() {
+  Fixture fixture;
+  const auto reversed =
+      fixture.Emit(ValueOpcode::BitReverse32, {Value(0x12345678u)});
+  const auto use = fixture.Emit(ValueOpcode::ReferenceU32, {reversed});
+
+  ConstantPropagationPass(fixture.program.blocks);
+
+  Check(use.ResolveInstruction()->Arg(0).Resolve() == Value(0x1e6a2c48u),
+        "immediate bit reverse was not folded");
+}
+
 void TestControlFlowValueSurvivesReadLaneFolding() {
   Fixture fixture(3);
   auto *entry = fixture.program.blocks[0];
@@ -595,6 +607,7 @@ int main() {
     TestConstantBufferBounds();
     TestReadLaneElimination();
     TestOptimizationPipeline();
+    TestBitReverseFolding();
     TestControlFlowValueSurvivesReadLaneFolding();
     TestUndefinedRuntimeValueFails();
     std::cout << "TypedValuePlanningTests: all cases passed\n";

@@ -50,6 +50,11 @@ HostFormatInfo ResolveHostFormat(Prospero::BufferFormat guest_format,
 	}
 	const auto format = VulkanFormat(guest_format);
 	switch (guest_format) {
+		// Vulkan has no 10_11_11 layout. As shadPS4 does (RemapDataFormat/RemapSwizzle,
+		// GPL-2.0-or-later), store it as B10G11R11 with red and blue swapped so that every
+		// channel keeps its width; only the packed bit positions differ.
+		case Prospero::BufferFormat::k10_11_11Float:
+			return {vk::Format::eB10G11R11UfloatPack32, Prospero::ColorMappingBgra};
 		case Prospero::BufferFormat::k5_5_5_1UNorm: return {format, Prospero::ColorMappingBgra};
 		case Prospero::BufferFormat::k1_5_5_5UNorm:
 		case Prospero::BufferFormat::k4_4_4_4UNorm: return {format, Prospero::ColorMappingAbgr};

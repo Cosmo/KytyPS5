@@ -1575,6 +1575,31 @@ void TestSampleAdjustSamplerScratch() {
             descriptor.dwords[3] == 0x80000abcu,
         "SampleAdjust canonicalization lost sampler border fields");
 
+  // Once `0 | scratch` has folded away, the scratch term alone still reads as zero.
+  Fixture lone(ShaderType::Pixel);
+  const auto lone_lane = lone.Emit(
+      ValueOpcode::SelectU32,
+      {lone.Emit(ValueOpcode::IEqual32, {lone.Emit(ValueOpcode::LaneId), Value(0u)}),
+       Value(1u), Value(0u)});
+  const auto lone_scratch = lone.Emit(
+      ValueOpcode::ShiftLeftLogical32,
+      {lone.Emit(ValueOpcode::BitwiseAnd32, {lone_lane, Value(0xffu)}), Value(12u)});
+  const auto lone_image = lone.Image({Value(0u), Value(0u), Value(0u), Value(0u),
+                                      Value(0u), Value(0u), Value(0u), Value(0u)},
+                                     0x1ec);
+  const auto lone_sampler = lone.Sampler(
+      {lone.UserData(0), lone.UserData(1), lone.UserData(2), lone_scratch}, 0x1ec);
+  lone.Emit(ValueOpcode::ImageSampleRaw,
+            {lone_image, lone_sampler, lone.ImageAddress()},
+            lone.AddMemory(memory, 0x1ec));
+  lone.PlanAndTrack();
+  const auto lone_word3 =
+      lone.program.descriptor_sources[lone.program.info.samplers[0].source]
+          .dwords[3]
+          .Resolve();
+  Check(lone_word3.IsImmediate() && lone_word3.U32() == 0u,
+        "SampleAdjust lone reserved scratch remained in sampler identity");
+
   const auto CheckRejected = [](uint32_t flags, uint32_t shift,
                                 const char *message) {
     Fixture rejected(ShaderType::Pixel);
