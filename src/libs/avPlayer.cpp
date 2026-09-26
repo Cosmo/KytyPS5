@@ -1539,11 +1539,14 @@ private:
 			return false;
 		}
 		auto* dst = buffer->Get();
-		std::memset(dst, 0, static_cast<size_t>(size));
+		auto* c   = dst + pitch * h;
+		// PPSA02433 samples the padded columns; zero chroma would turn them green.
+		std::memset(dst, s->codecpar->color_range == AVCOL_RANGE_JPEG ? 0 : 16,
+		            static_cast<size_t>(pitch) * h);
+		std::memset(c, 128, static_cast<size_t>(pitch) * h / 2);
 		for (int y = 0; y < src->height; y++) {
 			std::memcpy(dst + y * pitch, nv12->data[0] + y * nv12->linesize[0], src->width);
 		}
-		auto* c = dst + pitch * h;
 		for (int y = 0; y < src->height / 2; y++) {
 			std::memcpy(c + y * pitch, nv12->data[1] + y * nv12->linesize[1], src->width);
 		}
