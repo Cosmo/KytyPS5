@@ -16634,6 +16634,8 @@ CoverageClass ClassifyOpcode(ShaderOpcode opcode,
   case Opcode::IMAGE_ATOMIC_AND:
   case Opcode::IMAGE_ATOMIC_OR:
   case Opcode::IMAGE_ATOMIC_XOR:
+  case Opcode::IMAGE_ATOMIC_FMIN:
+  case Opcode::IMAGE_ATOMIC_FMAX:
   case Opcode::IMAGE_SAMPLE:
   case Opcode::IMAGE_GATHER4_LZ:
   case Opcode::IMAGE_GATHER4_C:
@@ -28139,6 +28141,124 @@ TestCase ImageAtomicVariants() {
   return test;
 }
 
+template <bool max_value> TestCase ImageAtomicFloatGlcAndExec() {
+  using O = ShaderOpcode;
+  std::vector<u32> code;
+  constexpr u32 atomic_word = max_value ? 0xf07c0108u : 0xf0780108u;
+  code.push_back(EncodeSop1(0x04, 12, 126)); // Preserve active workgroup lanes.
+  AppendVMovU32(&code, 8, 2);
+  AppendVMovU32(&code, 9, 1);
+  AppendVMovLiteral(&code, 5, 0x40000000u); // 2.0
+  // FMAX uses the captured GLC=0 instruction word.
+  code.insert(code.end(), {atomic_word, 0x00010508u});
+  AppendStoreVgpr(&code, 5, 0);
+  AppendVMovLiteral(&code, 5, max_value ? 0x40800000u : 0x3f800000u);
+  code.insert(code.end(), {atomic_word | 0x2000u, 0x00010508u}); // GLC=1.
+  AppendStoreVgpr(&code, 5, 1);
+  AppendVMovLiteral(&code, 5,
+                   max_value ? 0x41000000u : 0x3f000000u); // Inactive lane.
+  code.push_back(EncodeSop1(0x04, 126, InlineU32(0)));
+  code.insert(code.end(), {atomic_word | 0x2000u, 0x00010508u});
+  code.push_back(EncodeSop1(0x04, 126, 12));
+  AppendStoreVgpr(&code, 5, 2);
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = max_value ? "ImageAtomicFMaxCapturedGlcAndExec"
+                       : "ImageAtomicFMinGlcAndExec";
+  test.code = std::move(code);
+  test.expected = {0x40000000u, 0x40000000u,
+                  max_value ? 0x41000000u : 0x3f000000u};
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B64,
+                 max_value ? O::IMAGE_ATOMIC_FMAX : O::IMAGE_ATOMIC_FMIN,
+                 O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  const std::array<u32, 8> descriptor = {
+      0x504a7c00u, 0xc1600000u, 0x0086c0efu, 0x91b80924u,
+      0x00000000u, 0x00700080u, 0x00000000u, 0x00000000u};
+  std::copy_n(descriptor.begin(), 8, test.user_data.begin() + 4);
+  test.has_user_data = true;
+  test.storage_image_r32ui = std::vector<u32>(16, 0);
+  test.storage_image_r32ui[6] = max_value ? 0x3f800000u : 0x40800000u;
+  test.expected_storage_image_r32ui = test.storage_image_r32ui;
+  test.expected_storage_image_r32ui[6] = max_value ? 0x40800000u : 0x3f800000u;
+  test.required_spirv = {"OpImageTexelPointer", "OpAtomicCompareExchange", "R32ui"};
+  return test;
+}
+
+template <bool max_value> TestCase ImageAtomicFloatSpecialValues() {
+  using O = ShaderOpcode;
+  // source, previous texel, expected minimum, expected maximum.
+  const u32 cases[][4] = {
+      {0x40000000u, 0x3f800000u, 0x3f800000u, 0x40000000u},
+      {0xc0000000u, 0xbf800000u, 0xc0000000u, 0xbf800000u},
+      {0x7f800000u, 0x3f800000u, 0x3f800000u, 0x7f800000u},
+      {0xff800000u, 0x3f800000u, 0xff800000u, 0x3f800000u},
+      {0x3f800000u, 0x7fc12345u, 0x7fc12345u, 0x7fc12345u},
+      {0x7fcabcdeu, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+      {0x3f800000u, 0x7fa54321u, 0x7fa54321u, 0x7fa54321u},
+      {0x7faabcdeu, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+      {0x00000000u, 0x80000000u, 0x80000000u, 0x80000000u},
+      {0x80000000u, 0x00000000u, 0x00000000u, 0x00000000u},
+      {0x80000000u, 0x80000001u, 0x80000001u, 0x80000000u},
+      {0x80000001u, 0x80000000u, 0x80000001u, 0x80000000u},
+      {0x00000001u, 0x00000000u, 0x00000000u, 0x00000001u},
+      {0x00000000u, 0x00000001u, 0x00000000u, 0x00000001u},
+  };
+  TestCase test;
+  test.name = max_value ? "ImageAtomicFMaxSpecialValues"
+                       : "ImageAtomicFMinSpecialValues";
+  test.user_data = MakeStorageTextureData(Prospero::BufferFormat::k32UInt);
+  test.has_user_data = true;
+  test.storage_image_r32ui = std::vector<u32>(16, 0);
+  test.expected_storage_image_r32ui = test.storage_image_r32ui;
+  for (u32 i = 0; i < std::size(cases); i++) {
+    AppendVMovU32(&test.code, 20, i & 3u);
+    AppendVMovU32(&test.code, 21, i >> 2u);
+    AppendVMovLiteral(&test.code, 0, cases[i][0]);
+    test.code.push_back(EncodeMimg0(max_value ? 0x1f : 0x1e, 1, 0, true));
+    test.code.push_back(EncodeMimg1(0, 20));
+    AppendStoreVgpr(&test.code, 0, i);
+    test.expected.push_back(cases[i][1]);
+    test.storage_image_r32ui[i] = cases[i][1];
+    test.expected_storage_image_r32ui[i] = cases[i][max_value ? 3 : 2];
+  }
+  AppendEnd(&test.code);
+  test.opcodes = {O::V_MOV_B32,
+                 max_value ? O::IMAGE_ATOMIC_FMAX : O::IMAGE_ATOMIC_FMIN,
+                 O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  return test;
+}
+
+template <bool max_value> TestCase ImageAtomicFloatContendedWorkgroup() {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = max_value ? "ImageAtomicFMaxContendedWorkgroup"
+                       : "ImageAtomicFMinContendedWorkgroup";
+  test.code.push_back(EncodeVop1(0x06, 1, Vgpr(0))); // Float thread_id.x.
+  AppendVMovU32(&test.code, 20, 0);
+  AppendVMovU32(&test.code, 21, 0);
+  test.code.push_back(EncodeMimg0(max_value ? 0x1f : 0x1e, 1));
+  test.code.push_back(EncodeMimg1(1, 20));
+  AppendEnd(&test.code);
+  test.opcodes = {O::V_CVT_F32_U32, O::V_MOV_B32,
+                 max_value ? O::IMAGE_ATOMIC_FMAX : O::IMAGE_ATOMIC_FMIN,
+                 O::S_ENDPGM};
+  test.user_data = MakeStorageTextureData(Prospero::BufferFormat::k32UInt);
+  test.has_user_data = true;
+  test.storage_image_r32ui = std::vector<u32>(16, 0);
+  test.storage_image_r32ui[0] =
+      max_value ? 0xc2c80000u : 0x42c80000u; // -/+100.0
+  test.expected_storage_image_r32ui = test.storage_image_r32ui;
+  test.expected_storage_image_r32ui[0] =
+      max_value ? 0x427c0000u : 0u; // 63.0 / 0.0
+  test.compute_info.threads_num[0] = 64;
+  test.compute_info.threads_num[1] = 1;
+  test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.has_compute_info = true;
+  return test;
+}
+
 TestCase ImageAtomicGlc0DoesNotReturnOldValue() {
   using O = ShaderOpcode;
 
@@ -28951,6 +29071,12 @@ std::vector<TestCase> MakeCases() {
   AddCase(ImageAtomicSwapReturnsPreviousTexel);
   AddCase(ImageStoreAndAtomicUseSeparateBindings);
   AddCase(ImageAtomicVariants);
+  AddCase(ImageAtomicFloatGlcAndExec<true>);
+  AddCase(ImageAtomicFloatGlcAndExec<false>);
+  AddCase(ImageAtomicFloatSpecialValues<true>);
+  AddCase(ImageAtomicFloatSpecialValues<false>);
+  AddCase(ImageAtomicFloatContendedWorkgroup<true>);
+  AddCase(ImageAtomicFloatContendedWorkgroup<false>);
   AddCase(ImageAtomicGlc0DoesNotReturnOldValue);
   AddCase(MultipleWorkitemsGlobalId);
   AddCase(DispatcherIrreducibleControlFlow);
