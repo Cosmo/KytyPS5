@@ -73,9 +73,7 @@ void SetRightStick(int id, int x, int y);
 void SetTouchPad(int id, int finger, bool down, float x, float y);
 void SetSensor(int id, Sensor sensor, const float* data, uint64_t time_us);
 void ResetInputState();
-// While vibration audio plays (libs/padHaptics.h), a DualSense gets no rumble: rumble would switch
-// it to rumble emulation and mute the audio.
-void SetAudioHapticsPlaying(bool playing);
+int  GetActiveControllerId();
 
 int KYTY_SYSV_ABI PadInit();
 int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param);

@@ -7,9 +7,10 @@
 #include "common/threads.h"
 #include "kernel/pthread.h"
 #include "libs/audio_internal.h"
+#include "libs/controller.h"
+#include "libs/dualSenseHaptics.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
-#include "libs/padHaptics.h"
 
 #include <algorithm>
 #include <cstring>
@@ -106,9 +107,8 @@ private:
 		int      channels_num     = 0;
 		int      volume[12]       = {};
 
-		SDL_AudioStream* stream = nullptr;
-		// A vibration port's DualSense output instead of `stream`. It never paces the port.
-		PadHaptics::Stream* haptics = nullptr;
+		SDL_AudioStream*                     stream  = nullptr;
+		Controller::DualSenseHaptics::Stream* haptics = nullptr;
 	};
 
 	struct PortIn {
@@ -271,8 +271,7 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 
 void Audio::CloseSdlDevice(PortOut* port) {
 	EXIT_IF(port == nullptr);
-
-	PadHaptics::Close(port->haptics);
+	Controller::DualSenseHaptics::Close(port->haptics);
 	port->haptics = nullptr;
 
 	if (port->stream != nullptr) {
@@ -442,7 +441,7 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 			}
 
 			if (type == AUDIO_OUT_PORT_TYPE_VIBRATION) {
-				port.haptics = PadHaptics::Open(freq);
+				port.haptics = Controller::DualSenseHaptics::Open(freq);
 			} else {
 				OpenSdlDevice(&port);
 			}
@@ -556,12 +555,11 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 		auto& port = m_out_ports[params[i].handle.GetId()];
 
 		if (port.type == AUDIO_OUT_PORT_TYPE_VIBRATION) {
-			// Unlike QueueSdlAudio this never waits for pacing, so it can hold m_mutex against
-			// AudioOutClose.
+			// Haptics never pace output; keep the stream alive against close and volume changes.
 			Common::LockGuard lock(m_mutex);
-			PadHaptics::Queue(port.haptics, params[i].data, port.samples_num,
-			                  static_cast<uint32_t>(port.channels_num), FormatIsFloat(port.format),
-			                  port.volume);
+			Controller::DualSenseHaptics::Queue(
+			    port.haptics, Controller::GetActiveControllerId(), params[i].data, port.samples_num,
+			    static_cast<uint32_t>(port.channels_num), FormatIsFloat(port.format), port.volume);
 		} else {
 			QueueSdlAudio(&port, params[i].data, blocking);
 		}
