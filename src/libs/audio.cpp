@@ -9,6 +9,7 @@
 #include "libs/audio_internal.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
+#include "libs/padHaptics.h"
 
 #include <algorithm>
 #include <cstring>
@@ -106,6 +107,8 @@ private:
 		int      volume[12]       = {};
 
 		SDL_AudioStream* stream = nullptr;
+		// A vibration port's DualSense output instead of `stream`. It never paces the port.
+		PadHaptics::Stream* haptics = nullptr;
 	};
 
 	struct PortIn {
@@ -268,6 +271,9 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 
 void Audio::CloseSdlDevice(PortOut* port) {
 	EXIT_IF(port == nullptr);
+
+	PadHaptics::Close(port->haptics);
+	port->haptics = nullptr;
 
 	if (port->stream != nullptr) {
 		SDL_DestroyAudioStream(port->stream);
@@ -435,7 +441,9 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 				port.volume[i] = 32768;
 			}
 
-			if (type != AUDIO_OUT_PORT_TYPE_VIBRATION) {
+			if (type == AUDIO_OUT_PORT_TYPE_VIBRATION) {
+				port.haptics = PadHaptics::Open(freq);
+			} else {
 				OpenSdlDevice(&port);
 			}
 
@@ -547,7 +555,16 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 	for (uint32_t i = 0; i < num; i++) {
 		auto& port = m_out_ports[params[i].handle.GetId()];
 
-		QueueSdlAudio(&port, params[i].data, blocking);
+		if (port.type == AUDIO_OUT_PORT_TYPE_VIBRATION) {
+			// Unlike QueueSdlAudio this never waits for pacing, so it can hold m_mutex against
+			// AudioOutClose.
+			Common::LockGuard lock(m_mutex);
+			PadHaptics::Queue(port.haptics, params[i].data, port.samples_num,
+			                  static_cast<uint32_t>(port.channels_num), FormatIsFloat(port.format),
+			                  port.volume);
+		} else {
+			QueueSdlAudio(&port, params[i].data, blocking);
+		}
 	}
 
 	for (uint32_t i = 0; i < num; i++) {

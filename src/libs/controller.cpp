@@ -113,6 +113,7 @@ public:
 	void ReleaseHostPads();
 	void GetConnectionInfo(bool* flag, int* count);
 	void SetVibration(uint8_t large_motor, uint8_t small_motor);
+	void SetAudioHapticsPlaying(bool playing);
 	void SetLightBar(uint8_t r, uint8_t g, uint8_t b);
 	bool SetTriggerEffect(const PadTriggerEffectParam& param);
 	void ReadState(ControllerState* state, bool* flag, int* count);
@@ -123,6 +124,7 @@ private:
 
 	void CheckActive();
 	void AddState();
+	void ApplyRumble(); // Caller holds m_mutex.
 
 	Common::Mutex    m_mutex;
 	std::vector<int> m_connected_ids;
@@ -137,6 +139,9 @@ private:
 	uint32_t         m_states_num    = 0;
 	uint32_t         m_first_state   = 0;
 	uint8_t          m_next_touch_id = 1;
+	uint8_t          m_large_motor   = 0;
+	uint8_t          m_small_motor   = 0;
+	bool             m_audio_haptics = false;
 };
 
 static GameController* g_controller = nullptr;
@@ -552,6 +557,21 @@ void GameController::ReleaseHostPads() {
 void GameController::SetVibration(uint8_t large_motor, uint8_t small_motor) {
 	Common::LockGuard lock(m_mutex);
 
+	m_large_motor = large_motor;
+	m_small_motor = small_motor;
+	ApplyRumble();
+}
+
+void GameController::SetAudioHapticsPlaying(bool playing) {
+	Common::LockGuard lock(m_mutex);
+
+	if (m_audio_haptics != playing) {
+		m_audio_haptics = playing;
+		ApplyRumble();
+	}
+}
+
+void GameController::ApplyRumble() {
 	if (m_active_id == HOST_INPUT_CONTROLLER_ID) {
 		return;
 	}
@@ -561,8 +581,9 @@ void GameController::SetVibration(uint8_t large_motor, uint8_t small_motor) {
 		return;
 	}
 
-	const auto large = static_cast<uint16_t>(large_motor * 0x101U);
-	const auto small = static_cast<uint16_t>(small_motor * 0x101U);
+	const bool muted = m_audio_haptics && SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5;
+	const auto large = static_cast<uint16_t>(muted ? 0U : m_large_motor * 0x101U);
+	const auto small = static_cast<uint16_t>(muted ? 0U : m_small_motor * 0x101U);
 	if (!SDL_RumbleGamepad(pad, large, small, RUMBLE_DURATION_MS)) {
 		LOGF("\t rumble failed: %s\n", SDL_GetError());
 	}
@@ -690,6 +711,10 @@ void SetSensor(int id, Sensor sensor, const float* data, uint64_t time_us) {
 
 void ResetInputState() {
 	g_controller->ResetInputState();
+}
+
+void SetAudioHapticsPlaying(bool playing) {
+	g_controller->SetAudioHapticsPlaying(playing);
 }
 
 int KYTY_SYSV_ABI PadInit() {
