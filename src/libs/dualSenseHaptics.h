@@ -7,12 +7,15 @@ namespace Libs::Controller::DualSenseHaptics {
 
 struct Stream;
 
-Stream* Open(uint32_t freq);
+// A speaker stream plays a pad speaker port and routes the speaker to it; the others play vibration
+// ports on the actuators.
+Stream* Open(uint32_t freq, bool speaker);
 void    Close(Stream* stream);
 void    Queue(Stream* stream, int controller, const void* data, uint32_t frames, uint32_t channels,
               bool is_float, const int* volume);
 // Returns false for other gamepad types, which retain the normal rumble path.
 bool SetVibration(int controller, uint8_t large_motor, uint8_t small_motor);
+// Also returns the speaker to the firmware's headphone routing.
 void Shutdown();
 
 } // namespace Libs::Controller::DualSenseHaptics

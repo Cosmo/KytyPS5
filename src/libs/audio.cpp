@@ -440,8 +440,9 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 				port.volume[i] = 32768;
 			}
 
-			if (type == AUDIO_OUT_PORT_TYPE_VIBRATION) {
-				port.haptics = Controller::DualSenseHaptics::Open(freq);
+			if (type == AUDIO_OUT_PORT_TYPE_VIBRATION || type == AUDIO_OUT_PORT_TYPE_PADSPK) {
+				port.haptics =
+				    Controller::DualSenseHaptics::Open(freq, type == AUDIO_OUT_PORT_TYPE_PADSPK);
 			} else {
 				OpenSdlDevice(&port);
 			}
@@ -554,7 +555,7 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 	for (uint32_t i = 0; i < num; i++) {
 		auto& port = m_out_ports[params[i].handle.GetId()];
 
-		if (port.type == AUDIO_OUT_PORT_TYPE_VIBRATION) {
+		if (port.haptics != nullptr) {
 			// Haptics never pace output; keep the stream alive against close and volume changes.
 			Common::LockGuard lock(m_mutex);
 			Controller::DualSenseHaptics::Queue(
