@@ -253,7 +253,13 @@ void TestDiscoveryAndHotplug() {
 
 void TestSpeaker() {
 	Fixture f;
-	auto    speaker = Open(true);
+	devices      = {{10, "DualSense Wireless Controller", 2}};
+	auto speaker = Open(true);
+	Check(Haptics::Queue(speaker.get(), 1, pcm.data(), 2, 2, true, unity.data()) == 0 &&
+	          streams.empty(),
+	      "speaker played without a quad DualSense device");
+	devices = {{10, "Speakers (DualSense Wireless Controller)", 4}};
+	now += 2001;
 	Check(Haptics::SetVibration(1, 100, 50), "set rumble failed");
 	const std::array<float, 4> stereo {0.5f, -0.25f, 1.0f, 0.0f};
 	Queue(speaker, stereo.data());
@@ -263,12 +269,47 @@ void TestSpeaker() {
 	Check(routed.size() == 38 && routed[0] == 0xa0 && routed[1] == 0x80 && routed[5] == 0x64 &&
 	          routed[7] == 0x30 && routed[37] == 0x02,
 	      "speaker not routed like the Linux driver");
+	Check(Haptics::Queue(speaker.get(), 1, stereo.data(), 2, 2, true, unity.data()) ==
+	          2 * 1000000 / 48000,
+	      "queued speaker playback time is wrong");
 	auto other = Open(true);
 	Haptics::Queue(other.get(), 3, pcm.data(), 2, 2, true, unity.data());
 	Check(effects[1][0] == 0x80 && effects[1][1] == 0 && effects[1][7] == 0 && effects[3] == routed,
 	      "switching pads left the old speaker routed");
+	speaker.reset();
+	Check(effects[3] == routed, "closing one speaker port unrouted the other");
+	other.reset();
+	Check(effects[3][0] == 0x80 && effects[3][7] == 0, "closing the last speaker port left it routed");
+	auto last = Open(true);
+	Haptics::Queue(last.get(), 3, pcm.data(), 2, 2, true, unity.data());
+	Check(effects[3] == routed, "reopened speaker port was not routed");
 	Haptics::Shutdown();
 	Check(effects[3][0] == 0x80 && effects[3][7] == 0, "shutdown left the speaker routed");
+}
+
+void TestSpeakerUnplug() {
+	Fixture f;
+	auto    speaker = Open(true);
+	Check(Haptics::Queue(speaker.get(), 1, pcm.data(), 2, 2, true, unity.data()) != 0,
+	      "speaker did not play on the DualSense");
+	const auto routed = effects[1];
+	// Unplugged: another controller becomes active, and the port must fall back to the main output.
+	Check(Haptics::Queue(speaker.get(), 2, pcm.data(), 2, 2, true, unity.data()) == 0 &&
+	          streams.empty(),
+	      "unplugged pad kept the speaker port");
+	Check(effects[1][0] == 0x80 && effects[1][7] == 0, "unplugging left the speaker routed");
+	// Plugged back in: the port returns to the controller at once.
+	effects = {};
+	Check(Haptics::Queue(speaker.get(), 1, pcm.data(), 2, 2, true, unity.data()) != 0 &&
+	          streams.size() == 1 && effects[1] == routed,
+	      "replugged pad did not take the speaker back");
+	// The audio endpoint vanishes while a DualSense stays active (e.g. it reconnects over Bluetooth).
+	devices.clear();
+	now += 2001;
+	Check(Haptics::Queue(speaker.get(), 1, pcm.data(), 2, 2, true, unity.data()) == 0 &&
+	          streams.empty(),
+	      "lost audio endpoint kept the speaker port");
+	Check(effects[1][0] == 0x80 && effects[1][7] == 0, "lost audio endpoint left the speaker routed");
 }
 
 void TestFailuresAndBoundedQueue() {
@@ -361,6 +402,7 @@ int main() {
 	TestFormatsAndVolume();
 	TestDiscoveryAndHotplug();
 	TestSpeaker();
+	TestSpeakerUnplug();
 	TestFailuresAndBoundedQueue();
 	TestRumbleLeaseAndDuration();
 	TestSwitchStopsOldRumble();

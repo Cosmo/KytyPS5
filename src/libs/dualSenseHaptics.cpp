@@ -28,7 +28,7 @@ int           g_controller       = -1;
 int           g_playback_streams = 0;
 uint8_t       g_large_motor = 0, g_small_motor = 0;
 uint64_t      g_rumble_until = 0, g_haptics_until = 0;
-int           g_speaker = -1;
+int           g_speaker = -1, g_speaker_streams = 0;
 
 void ApplyRumble() { // Caller holds g_mutex; no calls into Audio or Controller.
 	SDL_LockJoysticks();
@@ -99,6 +99,10 @@ void CloseDevice(Stream* stream) {
 			g_haptics_until = 0;
 			ApplyRumble();
 		}
+		// Give the headphone jack back once no speaker port plays.
+		if (stream->speaker && --g_speaker_streams == 0) {
+			SelectSpeaker(-1);
+		}
 	}
 }
 
@@ -135,14 +139,15 @@ void Close(Stream* stream) {
 	}
 }
 
-void Queue(Stream* stream, int controller, const void* data, uint32_t frames, uint32_t channels,
-           bool is_float, const int* volume) {
+uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames, uint32_t channels,
+               bool is_float, const int* volume) {
 	if (stream == nullptr || data == nullptr || frames == 0 || channels == 0 || volume == nullptr) {
-		return;
+		return 0;
 	}
 	if (SDL_GetGamepadTypeForID(static_cast<SDL_JoystickID>(controller)) != SDL_GAMEPAD_TYPE_PS5) {
 		CloseDevice(stream);
-		return;
+		stream->next_check = 0; // Look for the device as soon as a DualSense is active again.
+		return 0;
 	}
 	const auto now = SDL_GetTicks();
 	if (now >= stream->next_check) {
@@ -163,6 +168,7 @@ void Queue(Stream* stream, int controller, const void* data, uint32_t frames, ui
 						Common::LockGuard lock(g_mutex);
 						g_playback_streams++;
 						if (stream->speaker) {
+							g_speaker_streams++;
 							SelectSpeaker(controller);
 						}
 					}
@@ -175,7 +181,7 @@ void Queue(Stream* stream, int controller, const void* data, uint32_t frames, ui
 		}
 	}
 	if (stream->sdl == nullptr) {
-		return;
+		return 0;
 	}
 	stream->buffer.assign(static_cast<size_t>(frames) * 4, 0.0f);
 	bool audible = false;
@@ -201,7 +207,7 @@ void Queue(Stream* stream, int controller, const void* data, uint32_t frames, ui
 		Common::LockGuard lock(g_mutex);
 		if (SDL_GetGamepadTypeForID(static_cast<SDL_JoystickID>(controller)) !=
 		    SDL_GAMEPAD_TYPE_PS5) {
-			return;
+			return 0;
 		}
 		SelectController(controller);
 		const auto playback_now = SDL_GetTicks();
@@ -215,7 +221,9 @@ void Queue(Stream* stream, int controller, const void* data, uint32_t frames, ui
 	}
 	if (!SDL_PutAudioStreamData(stream->sdl, stream->buffer.data(), bytes)) {
 		CloseDevice(stream);
+		return 0;
 	}
+	return static_cast<uint64_t>(queued + bytes) * 1000000 / (stream->freq * FRAME_BYTES);
 }
 
 bool SetVibration(int controller, uint8_t large_motor, uint8_t small_motor) {
