@@ -24,15 +24,17 @@ struct Rumble {
 	Uint16 large, small;
 	Uint32 duration;
 };
-std::vector<Device>           devices;
-std::vector<SDL_AudioStream*> streams;
-Rumble                        rumble {};
-Uint64                        now        = 1000;
-int                           audio_refs = 0, opens = 0, rumble_calls = 0;
-bool                          fail_open = false, fail_resume = false;
-int                           actual_channels = 4;
-SDL_AudioDeviceID             opened_device   = 0;
-SDL_AudioSpec                 opened_spec {};
+std::vector<Device>                 devices;
+std::vector<SDL_AudioStream*>       streams;
+Rumble                              rumble {};
+Uint64                              now        = 1000;
+int                                 audio_refs = 0, opens = 0, rumble_calls = 0;
+bool                                fail_open = false, fail_resume = false;
+int                                 actual_channels = 4;
+SDL_AudioDeviceID                   opened_device   = 0;
+SDL_AudioSpec                       opened_spec {};
+std::array<Rumble, 4>               pad_rumble {};
+std::array<std::vector<uint8_t>, 4> effects;
 } // namespace
 
 namespace Fake {
@@ -112,15 +114,23 @@ void DestroyAudioStream(SDL_AudioStream* stream) {
 SDL_AudioDeviceID GetAudioStreamDevice(SDL_AudioStream*) {
 	return 999;
 }
+// Pads 1 and 3 are DualSenses.
 SDL_GamepadType GetGamepadTypeForID(SDL_JoystickID id) {
-	return id == 1 ? SDL_GAMEPAD_TYPE_PS5 : SDL_GAMEPAD_TYPE_UNKNOWN;
+	return id == 1 || id == 3 ? SDL_GAMEPAD_TYPE_PS5 : SDL_GAMEPAD_TYPE_UNKNOWN;
 }
 SDL_Gamepad* GetGamepadFromID(SDL_JoystickID id) {
-	return id == 1 ? reinterpret_cast<SDL_Gamepad*>(static_cast<uintptr_t>(id)) : nullptr;
+	return id == 1 || id == 3 ? reinterpret_cast<SDL_Gamepad*>(static_cast<uintptr_t>(id))
+	                          : nullptr;
 }
-bool RumbleGamepad(SDL_Gamepad*, Uint16 large, Uint16 small, Uint32 duration) {
-	rumble = {large, small, duration};
+bool RumbleGamepad(SDL_Gamepad* pad, Uint16 large, Uint16 small, Uint32 duration) {
+	rumble                                       = {large, small, duration};
+	pad_rumble[reinterpret_cast<uintptr_t>(pad)] = rumble;
 	rumble_calls++;
+	return true;
+}
+bool SendGamepadEffect(SDL_Gamepad* pad, const void* data, int size) {
+	effects[reinterpret_cast<uintptr_t>(pad)].assign(static_cast<const uint8_t*>(data),
+	                                                 static_cast<const uint8_t*>(data) + size);
 	return true;
 }
 } // namespace Fake
@@ -138,6 +148,7 @@ bool RumbleGamepad(SDL_Gamepad*, Uint16 large, Uint16 small, Uint32 duration) {
 #define SDL_GetGamepadTypeForID     Fake::GetGamepadTypeForID
 #define SDL_GetGamepadFromID        Fake::GetGamepadFromID
 #define SDL_RumbleGamepad           Fake::RumbleGamepad
+#define SDL_SendGamepadEffect       Fake::SendGamepadEffect
 #include "libs/dualSenseHaptics.cpp"
 #undef SDL_GetTicks
 #undef SDL_InitSubSystem
@@ -152,6 +163,7 @@ bool RumbleGamepad(SDL_Gamepad*, Uint16 large, Uint16 small, Uint32 duration) {
 #undef SDL_GetGamepadTypeForID
 #undef SDL_GetGamepadFromID
 #undef SDL_RumbleGamepad
+#undef SDL_SendGamepadEffect
 
 namespace {
 namespace Haptics = Libs::Controller::DualSenseHaptics;
@@ -161,9 +173,11 @@ constexpr std::array<float, 4> pcm {0.5f, 0.5f, 0.5f, 0.5f};
 
 struct Fixture {
 	Fixture() {
-		devices = {{10, "Speakers (DualSense Wireless Controller)", 4}};
-		rumble  = {};
-		now     = 1000;
+		devices    = {{10, "Speakers (DualSense Wireless Controller)", 4}};
+		rumble     = {};
+		pad_rumble = {};
+		effects    = {};
+		now        = 1000;
 		opens = rumble_calls = 0;
 		fail_open = fail_resume = false;
 		actual_channels         = 4;
@@ -174,8 +188,8 @@ struct Fixture {
 	}
 };
 
-Port Open() {
-	auto* stream = Haptics::Open(48000);
+Port Open(bool speaker = false) {
+	auto* stream = Haptics::Open(48000, speaker);
 	Check(stream != nullptr, "port open failed");
 	return Port(stream, Haptics::Close);
 }
@@ -237,6 +251,69 @@ void TestDiscoveryAndHotplug() {
 	Check(streams.empty(), "disconnected endpoint retained its stream");
 }
 
+void TestSpeaker() {
+	Fixture f;
+	devices      = {{10, "DualSense Wireless Controller", 2}};
+	auto speaker = Open(true);
+	Check(Haptics::Queue(speaker.get(), 1, pcm.data(), 2, 2, true, unity.data()) == 0 &&
+	          streams.empty(),
+	      "speaker played without a quad DualSense device");
+	devices = {{10, "Speakers (DualSense Wireless Controller)", 4}};
+	now += 2001;
+	Check(Haptics::SetVibration(1, 100, 50), "set rumble failed");
+	const std::array<float, 4> stereo {0.5f, -0.25f, 1.0f, 0.0f};
+	Queue(speaker, stereo.data());
+	ExpectPcm({0.5f, -0.25f, 0, 0, 1.0f, 0, 0, 0});
+	Check(rumble.large == 100 * 0x101, "speaker audio stopped the rumble");
+	const auto routed = effects[1];
+	Check(routed.size() == 38 && routed[0] == 0xa0 && routed[1] == 0x80 && routed[5] == 0x64 &&
+	          routed[7] == 0x30 && routed[37] == 0x02,
+	      "speaker not routed like the Linux driver");
+	Check(Haptics::Queue(speaker.get(), 1, stereo.data(), 2, 2, true, unity.data()) ==
+	          2 * 1000000 / 48000,
+	      "queued speaker playback time is wrong");
+	auto other = Open(true);
+	Haptics::Queue(other.get(), 3, pcm.data(), 2, 2, true, unity.data());
+	Check(effects[1][0] == 0x80 && effects[1][1] == 0 && effects[1][7] == 0 && effects[3] == routed,
+	      "switching pads left the old speaker routed");
+	speaker.reset();
+	Check(effects[3] == routed, "closing one speaker port unrouted the other");
+	other.reset();
+	Check(effects[3][0] == 0x80 && effects[3][7] == 0,
+	      "closing the last speaker port left it routed");
+	auto last = Open(true);
+	Haptics::Queue(last.get(), 3, pcm.data(), 2, 2, true, unity.data());
+	Check(effects[3] == routed, "reopened speaker port was not routed");
+	Haptics::Shutdown();
+	Check(effects[3][0] == 0x80 && effects[3][7] == 0, "shutdown left the speaker routed");
+}
+
+void TestSpeakerUnplug() {
+	Fixture f;
+	auto    speaker = Open(true);
+	Check(Haptics::Queue(speaker.get(), 1, pcm.data(), 2, 2, true, unity.data()) != 0,
+	      "speaker did not play on the DualSense");
+	const auto routed = effects[1];
+	// Unplugged: another controller becomes active, and the port must fall back to the main output.
+	Check(Haptics::Queue(speaker.get(), 2, pcm.data(), 2, 2, true, unity.data()) == 0 &&
+	          streams.empty(),
+	      "unplugged pad kept the speaker port");
+	Check(effects[1][0] == 0x80 && effects[1][7] == 0, "unplugging left the speaker routed");
+	// Plugged back in: the port returns to the controller at once.
+	effects = {};
+	Check(Haptics::Queue(speaker.get(), 1, pcm.data(), 2, 2, true, unity.data()) != 0 &&
+	          streams.size() == 1 && effects[1] == routed,
+	      "replugged pad did not take the speaker back");
+	// The audio endpoint vanishes while a DualSense stays active.
+	devices.clear();
+	now += 2001;
+	Check(Haptics::Queue(speaker.get(), 1, pcm.data(), 2, 2, true, unity.data()) == 0 &&
+	          streams.empty(),
+	      "lost audio endpoint kept the speaker port");
+	Check(effects[1][0] == 0x80 && effects[1][7] == 0,
+	      "lost audio endpoint left the speaker routed");
+}
+
 void TestFailuresAndBoundedQueue() {
 	Fixture                f;
 	auto                   port = Open();
@@ -295,6 +372,18 @@ void TestRumbleLeaseAndDuration() {
 	Check(rumble_calls == calls, "audio pull touched rumble after shutdown");
 }
 
+void TestSwitchStopsOldRumble() {
+	Fixture f;
+	auto    port = Open();
+	Haptics::SetVibration(1, 100, 50);
+	Queue(port, pcm.data());
+	Check(pad_rumble[1].large == 0, "haptics did not suppress rumble");
+	Haptics::SetVibration(3, 10, 10);
+	Check(pad_rumble[1].large == 0 && pad_rumble[1].small == 0,
+	      "switching controllers restarted the old pad's rumble");
+	Check(pad_rumble[3].large == 10 * 0x101, "new pad did not rumble");
+}
+
 void TestCloseRestoresRumble() {
 	Fixture f;
 	auto    first = Open(), second = Open();
@@ -314,8 +403,11 @@ int main() {
 	SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
 	TestFormatsAndVolume();
 	TestDiscoveryAndHotplug();
+	TestSpeaker();
+	TestSpeakerUnplug();
 	TestFailuresAndBoundedQueue();
 	TestRumbleLeaseAndDuration();
+	TestSwitchStopsOldRumble();
 	TestCloseRestoresRumble();
 	std::printf("PadHapticsTests: all cases passed\n");
 }
