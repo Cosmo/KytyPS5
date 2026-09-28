@@ -12,7 +12,8 @@ struct Stream;
 Stream* Open(uint32_t freq, bool speaker);
 void    Close(Stream* stream);
 // Returns how long the queued audio still plays, in microseconds, or 0 when no DualSense took it
-// (the active pad is another type, or has no audio device, e.g. after being unplugged).
+// (the active pad has no usable USB audio device or its speaker cannot be routed).
+// Multiple DualSenses or matching audio endpoints are ambiguous and are not selected.
 uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames, uint32_t channels,
                bool is_float, const int* volume);
 // Returns false for other gamepad types, which retain the normal rumble path.

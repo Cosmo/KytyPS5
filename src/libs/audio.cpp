@@ -441,13 +441,13 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 				port.volume[i] = 32768;
 			}
 
-			if (type == AUDIO_OUT_PORT_TYPE_VIBRATION || type == AUDIO_OUT_PORT_TYPE_PADSPK) {
-				port.haptics =
-				    Controller::DualSenseHaptics::Open(freq, type == AUDIO_OUT_PORT_TYPE_PADSPK);
-			}
 			// Pad speaker ports keep the main output too; it plays them whenever no DualSense does.
 			if (type != AUDIO_OUT_PORT_TYPE_VIBRATION) {
 				OpenSdlDevice(&port);
+			}
+			if (type == AUDIO_OUT_PORT_TYPE_VIBRATION || type == AUDIO_OUT_PORT_TYPE_PADSPK) {
+				port.haptics =
+				    Controller::DualSenseHaptics::Open(freq, type == AUDIO_OUT_PORT_TYPE_PADSPK);
 			}
 
 			return Id::Create(id);
@@ -558,22 +558,22 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 	for (uint32_t i = 0; i < num; i++) {
 		auto& port = m_out_ports[params[i].handle.GetId()];
 
-		uint64_t haptics_us = 0;
+		uint64_t controller_queued_us = 0;
 		if (port.haptics != nullptr) {
 			// Keep the stream alive against close and volume changes.
 			Common::LockGuard lock(m_mutex);
-			haptics_us = Controller::DualSenseHaptics::Queue(
+			controller_queued_us = Controller::DualSenseHaptics::Queue(
 			    port.haptics, Controller::GetActiveControllerId(), params[i].data, port.samples_num,
 			    static_cast<uint32_t>(port.channels_num), FormatIsFloat(port.format), port.volume);
 		}
-		if (haptics_us == 0) {
+		if (controller_queued_us == 0) {
 			// No DualSense took it (e.g. it was unplugged); a pad speaker port plays on the main
 			// output instead, and a vibration port has none.
 			QueueSdlAudio(&port, params[i].data, blocking);
 		} else if (blocking && port.type == AUDIO_OUT_PORT_TYPE_PADSPK &&
-		           haptics_us > AUDIO_OUT_TARGET_LATENCY_US) {
+		           controller_queued_us > AUDIO_OUT_TARGET_LATENCY_US) {
 			// Vibration never paces output; the speaker is audible, so pace it like other ports.
-			Common::Thread::SleepMicro(haptics_us - AUDIO_OUT_TARGET_LATENCY_US);
+			Common::Thread::SleepMicro(controller_queued_us - AUDIO_OUT_TARGET_LATENCY_US);
 		}
 	}
 
