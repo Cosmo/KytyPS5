@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -78,6 +79,10 @@ struct DualSenseEffects {
 
 static_assert(sizeof(DualSenseEffects) == 32);
 
+struct PadTriggerEffectStateInformation {
+	int32_t state[2];
+};
+
 struct ControllerState {
 	struct Touch {
 		uint8_t  id   = 0;
@@ -117,6 +122,7 @@ public:
 	int  GetActiveControllerId();
 	void SetLightBar(uint8_t r, uint8_t g, uint8_t b);
 	bool SetTriggerEffect(const PadTriggerEffectParam& param);
+	void GetTriggerEffectState(int32_t* state);
 	void ReadState(ControllerState* state, bool* flag, int* count);
 	int  ReadStates(ControllerState* states, int states_num, bool* flag, int* count);
 
@@ -142,6 +148,9 @@ private:
 	uint32_t         m_states_num    = 0;
 	uint32_t         m_first_state   = 0;
 	uint8_t          m_next_touch_id = 1;
+	// The effects sent to the triggers (L2, R2), and whether a weapon effect has fired.
+	std::array<std::array<uint8_t, 11>, 2> m_trigger_effects {};
+	std::array<bool, 2>                    m_weapon_fired {};
 };
 
 static GameController* g_controller = nullptr;
@@ -206,6 +215,40 @@ static bool trigger_effect_zones(uint8_t* effect, const uint8_t* strengths, uint
 	effect[6] = static_cast<uint8_t>(packed >> 24u);
 	effect[9] = frequency;
 	return true;
+}
+
+// Mirrors the DualSense's trigger status: where the trigger is relative to its effect's zones.
+// A weapon effect reports fired from its end zone until the trigger is back before its start.
+static int32_t trigger_effect_state(const std::array<uint8_t, 11>& effect, int value, bool& fired) {
+	enum State : int32_t {
+		FeedbackNoForce = 1,
+		FeedbackIsPushing,
+		WeaponNotPressed,
+		WeaponAlmostPressed,
+		WeaponFullyPressed,
+		VibrationNotFiring,
+		VibrationIsFiring,
+	};
+
+	const auto zones = static_cast<uint16_t>(effect[1] | (effect[2] << 8u));
+	if (zones == 0) {
+		return 0;
+	}
+	const int zone  = value * 10 / 256;
+	const int start = std::countr_zero(zones);
+	switch (effect[0]) {
+		case 0x21: return zone >= start ? FeedbackIsPushing : FeedbackNoForce;
+		case 0x26: return zone >= start ? VibrationIsFiring : VibrationNotFiring;
+		case 0x25: {
+			if (zone < start) {
+				fired = false;
+				return WeaponNotPressed;
+			}
+			fired = fired || zone >= 15 - std::countl_zero(zones);
+			return fired ? WeaponFullyPressed : WeaponAlmostPressed;
+		}
+		default: return 0;
+	}
 }
 
 static bool trigger_effect_to_dualsense(const PadTriggerEffectCommand& command, uint8_t* effect) {
@@ -665,11 +708,28 @@ bool GameController::SetTriggerEffect(const PadTriggerEffectParam& param) {
 	}
 
 	Common::LockGuard lock(m_mutex);
+	if ((param.trigger_mask & 0x01u) != 0) {
+		std::copy_n(effect.left_trigger, 11, m_trigger_effects[0].begin());
+		m_weapon_fired[0] = false;
+	}
+	if ((param.trigger_mask & 0x02u) != 0) {
+		std::copy_n(effect.right_trigger, 11, m_trigger_effects[1].begin());
+		m_weapon_fired[1] = false;
+	}
 	auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(m_active_id));
 	if (pad != nullptr && SDL_GetGamepadType(pad) == SDL_GAMEPAD_TYPE_PS5) {
 		(void)SDL_SendGamepadEffect(pad, &effect, sizeof(effect));
 	}
 	return true;
+}
+
+void GameController::GetTriggerEffectState(int32_t* state) {
+	Common::LockGuard lock(m_mutex);
+	state[0] = trigger_effect_state(
+	    m_trigger_effects[0], m_state.axes[static_cast<int>(Axis::TriggerLeft)], m_weapon_fired[0]);
+	state[1] =
+	    trigger_effect_state(m_trigger_effects[1],
+	                         m_state.axes[static_cast<int>(Axis::TriggerRight)], m_weapon_fired[1]);
 }
 
 void GameController::GetConnectionInfo(bool* flag, int* count) {
@@ -966,6 +1026,20 @@ int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param) {
 
 	g_controller->SetVibration(param->large_motor, param->small_motor);
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInformation* info) {
+	PRINT_NAME();
+
+	if (handle != 1) {
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	if (info == nullptr) {
+		return -2137653243; /* 0x80960005 */
+	}
+
+	g_controller->GetTriggerEffectState(info->state);
 	return OK;
 }
 
