@@ -572,7 +572,7 @@ void TestScaledRumbleDuration() {
 	for (bool bluetooth: {false, true}) {
 		Fixture f;
 		wireless = hid_available = bluetooth;
-		auto port = Open();
+		auto               port  = Open();
 		std::vector<float> sound(2048, 0.5f);
 		Haptics::SetVibration(1, 100, 50, 1000);
 		Queue(port, sound.data(), 1024, 2, true, unity.data(), 0.0f);
@@ -587,8 +587,7 @@ void TestScaledRumbleDuration() {
 		} else {
 			Pull();
 		}
-		Check(rumble.large == 50 * 0x101 && rumble.small == 25 * 0x101 &&
-		          rumble.duration == 700,
+		Check(rumble.large == 50 * 0x101 && rumble.small == 25 * 0x101 && rumble.duration == 700,
 		      "scaled rumble lost its strength or extended its original expiry");
 		Haptics::SetVibration(1, 50, 25, 0);
 		Check(rumble.large == 0 && rumble.small == 0 && rumble.duration == 0,
@@ -1148,35 +1147,38 @@ void TestAudioSpeakerRouting() {
 	audio.AudioOutOutputs(&output, 1, false);
 	std::array<float, 4> fallback {};
 	Check(SDL_GetAudioStreamData(default_stream, fallback.data(), sizeof(fallback)) ==
-	              sizeof(fallback) && fallback == std::array<float, 4> {},
+	              sizeof(fallback) &&
+	          fallback == std::array<float, 4> {},
 	      "unplugging the controller unmuted its speaker fallback");
 }
 
 void TestAudioFallbackGain() {
 	for (bool is_float: {false, true}) {
-		Fixture f;
+		Fixture            f;
 		Libs::Audio::Audio audio;
 		active_controller = 2;
-		speaker_scale = 0.5f;
+		speaker_scale     = 0.5f;
 		const std::array<int16_t, 4> integer_pcm {16384, 16384, 16384, 16384};
-		const auto format = is_float ? Libs::Audio::Audio::Format::FloatStereo
-		                             : Libs::Audio::Audio::Format::Signed16bitStereo;
-		const void* data = is_float ? static_cast<const void*>(pcm.data()) : integer_pcm.data();
+		const auto  format = is_float ? Libs::Audio::Audio::Format::FloatStereo
+		                              : Libs::Audio::Audio::Format::Signed16bitStereo;
+		const void* data   = is_float ? static_cast<const void*>(pcm.data()) : integer_pcm.data();
 		for (int type: {0, 4}) {
-			const auto port = audio.AudioOutOpen(type, 2, 48000, format);
+			const auto               port = audio.AudioOutOpen(type, 2, 48000, format);
 			const std::array<int, 2> volume {16384, 16384};
 			audio.AudioOutSetVolume(port, 3, volume.data());
 			Libs::Audio::Audio::OutputParam output {port, data};
 			audio.AudioOutOutputs(&output, 1, false);
-			const float expected = type == 4 ? 0.125f : 0.25f;
+			const float          expected = type == 4 ? 0.125f : 0.25f;
 			std::array<float, 4> actual {};
 			if (is_float) {
 				Check(SDL_GetAudioStreamData(default_stream, actual.data(), sizeof(actual)) ==
-				          sizeof(actual), "float fallback output is missing");
+				          sizeof(actual),
+				      "float fallback output is missing");
 			} else {
 				std::array<int16_t, 4> integers {};
 				Check(SDL_GetAudioStreamData(default_stream, integers.data(), sizeof(integers)) ==
-				          sizeof(integers), "integer fallback output is missing");
+				          sizeof(integers),
+				      "integer fallback output is missing");
 				std::transform(integers.begin(), integers.end(), actual.begin(),
 				               [](int16_t value) { return value / 32768.0f; });
 			}
@@ -1194,9 +1196,10 @@ void TestAudioVibrationGain() {
 		wireless = hid_available = bluetooth;
 		Libs::Audio::Audio audio;
 		vibration_scale = 0.5f;
-		speaker_scale = 0.0f;
-		const auto port = audio.AudioOutOpen(10, 1024, 48000, Libs::Audio::Audio::Format::FloatStereo);
-		std::vector<float> sound(2048, 0.5f);
+		speaker_scale   = 0.0f;
+		const auto port =
+		    audio.AudioOutOpen(10, 1024, 48000, Libs::Audio::Audio::Format::FloatStereo);
+		std::vector<float>              sound(2048, 0.5f);
 		Libs::Audio::Audio::OutputParam output {port, sound.data()};
 		audio.AudioOutOutputs(&output, 1, false);
 		Check(default_stream == nullptr, "vibration port opened ordinary audio");

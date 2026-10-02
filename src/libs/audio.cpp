@@ -160,7 +160,7 @@ private:
 	static void            CloseSdlDevice(PortIn* port);
 	static const void*     PrepareOutputBuffer(const PortOut& port, const void* data,
 	                                           std::vector<uint8_t>* buffer, float gain);
-	static bool            QueueSdlAudio(PortOut* port, const void* data, bool blocking, float gain);
+	static bool QueueSdlAudio(PortOut* port, const void* data, bool blocking, float gain);
 };
 
 static Audio* g_audio = nullptr;
@@ -558,9 +558,9 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 		const float gain =
 		    port.type == AUDIO_OUT_PORT_TYPE_PADSPK
 		        ? Controller::GetSettingScale(Controller::Setting::SpeakerVolume)
-		        : port.type == AUDIO_OUT_PORT_TYPE_VIBRATION
-		              ? Controller::GetSettingScale(Controller::Setting::VibrationIntensity)
-		              : 1.0f;
+		    : port.type == AUDIO_OUT_PORT_TYPE_VIBRATION
+		        ? Controller::GetSettingScale(Controller::Setting::VibrationIntensity)
+		        : 1.0f;
 
 		uint64_t controller_queued_us = 0;
 		bool controller_uses_bluetooth = false;
@@ -569,7 +569,8 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 			Common::LockGuard lock(m_mutex);
 			controller_queued_us = Controller::DualSenseHaptics::Queue(
 			    port.haptics, Controller::GetActiveControllerId(), params[i].data, port.samples_num,
-			    static_cast<uint32_t>(port.channels_num), FormatIsFloat(port.format), port.volume, gain);
+			    static_cast<uint32_t>(port.channels_num), FormatIsFloat(port.format), port.volume,
+			    gain);
 			controller_uses_bluetooth =
 			    Controller::DualSenseHaptics::UsesBluetooth(port.haptics);
 		}

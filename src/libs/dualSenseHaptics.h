@@ -20,7 +20,7 @@ uint64_t Queue(Stream* stream, int controller, const void* data, uint32_t frames
                bool is_float, const int* volume, float gain = 1.0f);
 // Returns false for other gamepad types, which retain the normal rumble path.
 bool SetVibration(int controller, uint8_t large_motor, uint8_t small_motor,
-                   uint32_t duration_ms = 0xffff);
+                  uint32_t duration_ms = 0xffff);
 // Also restores the headphone routing.
 void Shutdown();
 

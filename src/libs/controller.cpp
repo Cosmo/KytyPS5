@@ -118,7 +118,7 @@ public:
 	int  GetActiveControllerId();
 	void SetLightBar(uint8_t r, uint8_t g, uint8_t b);
 	bool SetTriggerEffect(const PadTriggerEffectParam& param);
-	void CycleSetting(Setting setting);
+	void  CycleSetting(Setting setting);
 	float GetSettingScale(Setting setting) const;
 	void ReadState(ControllerState* state, bool* flag, int* count);
 	int  ReadStates(ControllerState* states, int states_num, bool* flag, int* count);
@@ -150,7 +150,7 @@ private:
 	uint8_t          m_next_touch_id = 1;
 	// The game's last requests, re-sent when their intensity setting changes.
 	std::array<uint8_t, 2> m_vibration {};
-	uint64_t              m_vibration_until = 0;
+	uint64_t               m_vibration_until = 0;
 	PadTriggerEffectParam  m_trigger_effect {};
 	// Setting changes share the output lock; audio only needs an atomic scale snapshot.
 	std::array<std::atomic<uint32_t>, 3> m_setting_steps {};
@@ -211,7 +211,7 @@ float GetSettingScale(Setting setting) {
 
 void GameController::CycleSetting(Setting setting) {
 	Common::LockGuard lock(m_mutex);
-	auto&      step  = m_setting_steps[static_cast<size_t>(setting)];
+	auto&             step = m_setting_steps[static_cast<size_t>(setting)];
 	const auto count = setting == Setting::SpeakerVolume ? SPEAKER_VOLUME.size() : INTENSITY.size();
 	step.store((step.load(std::memory_order_relaxed) + 1) % count, std::memory_order_relaxed);
 	if (setting == Setting::VibrationIntensity) {
@@ -233,8 +233,8 @@ static uint8_t Scale(uint8_t value, float scale) {
 	return static_cast<uint8_t>(std::max(1L, std::lround(value * scale)));
 }
 
-static bool trigger_effect_zones(uint8_t* effect, const uint8_t* strengths, float scale, uint8_t type,
-                                 uint8_t frequency = 0) {
+static bool trigger_effect_zones(uint8_t* effect, const uint8_t* strengths, float scale,
+                                 uint8_t type, uint8_t frequency = 0) {
 	uint16_t active = 0;
 	uint32_t packed = 0;
 	for (int i = 0; i < 10; i++) {
@@ -260,7 +260,7 @@ static bool trigger_effect_zones(uint8_t* effect, const uint8_t* strengths, floa
 }
 
 static bool trigger_effect_to_dualsense(const PadTriggerEffectCommand& command, uint8_t* effect,
-                                       float scale) {
+                                        float scale) {
 	std::memset(effect, 0, 11);
 	effect[0] = 0x05;
 
@@ -408,9 +408,9 @@ void GameController::CheckActive() {
 	m_states_num    = 0;
 	m_first_state   = 0;
 	m_next_touch_id = 1;
-	m_vibration       = {};
-	m_vibration_until = 0;
-	m_trigger_effect  = {};
+	m_vibration          = {};
+	m_vibration_until    = 0;
+	m_trigger_effect     = {};
 }
 
 void GameController::AddState() {

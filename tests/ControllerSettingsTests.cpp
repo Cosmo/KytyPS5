@@ -15,19 +15,14 @@ void Check(bool condition, const char* text) {
 }
 
 struct Rumble {
-	int    pad;
 	Uint16 large, small;
 	Uint32 duration;
 };
-struct Effect {
-	int                   pad;
-	std::array<Uint8, 32> data;
-};
-Uint64              now = 1000;
-std::vector<Rumble> rumble;
-std::vector<Rumble> haptics;
-std::vector<Effect> effects;
-bool                haptics_handles_rumble = false;
+Uint64                             now = 1000;
+std::vector<Rumble>                rumble;
+std::vector<Rumble>                haptics;
+std::vector<std::array<Uint8, 32>> effects;
+bool                               haptics_handles_rumble = false;
 } // namespace
 
 namespace Fake {
@@ -41,14 +36,14 @@ SDL_Gamepad* GetGamepadFromID(SDL_JoystickID id) {
 SDL_GamepadType GetGamepadType(SDL_Gamepad*) {
 	return SDL_GAMEPAD_TYPE_PS5;
 }
-bool RumbleGamepad(SDL_Gamepad* pad, Uint16 large, Uint16 small, Uint32 duration) {
-	rumble.push_back({static_cast<int>(reinterpret_cast<uintptr_t>(pad)), large, small, duration});
+bool RumbleGamepad(SDL_Gamepad*, Uint16 large, Uint16 small, Uint32 duration) {
+	rumble.push_back({large, small, duration});
 	return true;
 }
-bool SendGamepadEffect(SDL_Gamepad* pad, const void* data, int size) {
+bool SendGamepadEffect(SDL_Gamepad*, const void* data, int size) {
 	Check(size == 32, "unexpected DualSense effect size");
-	Effect effect {static_cast<int>(reinterpret_cast<uintptr_t>(pad)), {}};
-	std::memcpy(effect.data.data(), data, effect.data.size());
+	std::array<Uint8, 32> effect {};
+	std::memcpy(effect.data(), data, effect.size());
 	effects.push_back(effect);
 	return true;
 }
@@ -88,8 +83,8 @@ void Delay(Uint32) {}
 #undef SDL_Delay
 
 namespace Libs::Controller::DualSenseHaptics {
-bool SetVibration(int controller, uint8_t large_motor, uint8_t small_motor, uint32_t duration_ms) {
-	haptics.push_back({controller, large_motor, small_motor, duration_ms});
+bool SetVibration(int, uint8_t large_motor, uint8_t small_motor, uint32_t duration_ms) {
+	haptics.push_back({large_motor, small_motor, duration_ms});
 	return haptics_handles_rumble;
 }
 void Shutdown() {}
@@ -130,7 +125,7 @@ struct Controller {
 DualSenseEffects LastEffect() {
 	Check(!effects.empty(), "missing trigger output");
 	DualSenseEffects effect {};
-	std::memcpy(&effect, effects.back().data.data(), sizeof(effect));
+	std::memcpy(&effect, effects.back().data(), sizeof(effect));
 	return effect;
 }
 
