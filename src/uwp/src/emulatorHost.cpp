@@ -41,10 +41,6 @@ bool IsAmdCpu() {
 
 } // namespace
 
-std::optional<ShaderStatistics> CurrentShaderStatistics() {
-	return std::nullopt; // the renderer makes no shaders yet
-}
-
 EmulatorHost& EmulatorHost::Get() {
 	static EmulatorHost host;
 	return host;

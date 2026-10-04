@@ -64,6 +64,12 @@ Presenter& WindowInit(uint32_t width, uint32_t height) {
             if (now - last_logged >= 5000) {
                 Kyty::Uwp::Log("frame: %llu, fps: %llu\n", static_cast<unsigned long long>(frames),
                                static_cast<unsigned long long>(second_frames * 1000 / (now - second_start)));
+                if (const auto shaders = Kyty::Uwp::CurrentShaderStatistics()) {
+                    Kyty::Uwp::Log("shaders: %llu drawing, %llu compute; pipelines: %llu (%llu from the cache, %llu saved)\n",
+                                   static_cast<unsigned long long>(shaders->drawing_shaders), static_cast<unsigned long long>(shaders->compute_shaders),
+                                   static_cast<unsigned long long>(shaders->pipelines), static_cast<unsigned long long>(shaders->cached_pipelines),
+                                   static_cast<unsigned long long>(shaders->saved_pipelines));
+                }
                 last_logged = now;
             }
             second_start  = now;
@@ -98,3 +104,23 @@ void WindowShutdown() {
 }
 
 } // namespace Libs::Graphics
+
+namespace Kyty::Uwp {
+
+// The shaders and pipelines the renderer has made so far (the overlay shows them); none before the game's renderer exists.
+std::optional<ShaderStatistics> CurrentShaderStatistics() {
+	const auto* window = Libs::Graphics::g_window.get();
+	if (window == nullptr || window->render_context == nullptr) {
+		return std::nullopt;
+	}
+	const auto counts = window->render_context->GetPipelineCache().GetStatistics();
+	ShaderStatistics statistics;
+	statistics.drawing_shaders  = counts.drawing_shaders;
+	statistics.compute_shaders  = counts.compute_shaders;
+	statistics.pipelines        = counts.graphics_pipelines + counts.compute_pipelines;
+	statistics.cached_pipelines = counts.cached_pipelines;
+	statistics.saved_pipelines  = counts.saved_pipelines;
+	return statistics;
+}
+
+} // namespace Kyty::Uwp
