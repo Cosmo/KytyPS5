@@ -1,6 +1,7 @@
 #include "gameLibrary.h"
 
 #include "fileAccess.h"
+#include "gameSource.h"
 #include "log.h"
 #include "settings.h"
 
@@ -51,6 +52,14 @@ void ScanFolder(const std::filesystem::path& folder, int depth, std::vector<Game
 		games.push_back(ReadGame(folder));
 		return;
 	}
+	// .zar archives: a game dump the emulator reads in place
+	for (const auto& archive: ArchivesIn(folder)) {
+		if (GameFileExists(archive / L"eboot.bin")) {
+			games.push_back(ReadGame(archive));
+		} else {
+			Log("archive %ls has no eboot.bin at its root\n", archive.c_str());
+		}
+	}
 	if (depth == 0) {
 		return;
 	}
@@ -83,8 +92,8 @@ void SaveLibrary(const std::vector<GameEntry>& games) {
 GameEntry ReadGame(const std::filesystem::path& folder) {
 	GameEntry game;
 	game.folder = folder;
-	game.name   = winrt::to_string(folder.filename().wstring());
-	if (const auto text = ReadTextFile(folder / L"sce_sys" / L"param.json")) {
+	game.name   = winrt::to_string((IsArchivePath(folder) ? folder.stem() : folder.filename()).wstring());
+	if (const auto text = ReadGameText(folder / L"sce_sys" / L"param.json")) {
 		const auto param = nlohmann::json::parse(*text, nullptr, false);
 		if (!param.is_discarded() && param.is_object()) {
 			game.title_id = JsonString(param, "titleId");

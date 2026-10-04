@@ -88,7 +88,9 @@ function Invoke-Configure {
         $(if ($env:KYTY_JSON_INCLUDE) { "-DKYTY_JSON_INCLUDE_DIR=$env:KYTY_JSON_INCLUDE" }) `
         $(if ($env:KYTY_UWP_PACKAGE_NAME) { "-DKYTY_UWP_PACKAGE_NAME=$env:KYTY_UWP_PACKAGE_NAME" }) `
         $(if ($env:KYTY_UWP_DISPLAY_NAME) { "-DKYTY_UWP_DISPLAY_NAME=$env:KYTY_UWP_DISPLAY_NAME" }) `
-        $(if ($env:KYTY_UWP_PROTOCOL) { "-DKYTY_UWP_PROTOCOL=$env:KYTY_UWP_PROTOCOL" })
+        $(if ($env:KYTY_UWP_PROTOCOL) { "-DKYTY_UWP_PROTOCOL=$env:KYTY_UWP_PROTOCOL" }) `
+        $(if ($env:KYTY_ZSTD_SOURCE) { "-DKYTY_ZSTD_SOURCE_DIR=$env:KYTY_ZSTD_SOURCE" }) `
+        $(if ($env:KYTY_ZARCHIVE_SOURCE) { "-DKYTY_ZARCHIVE_SOURCE_DIR=$env:KYTY_ZARCHIVE_SOURCE" })
     if ($LASTEXITCODE -ne 0) { Fail 'configure' }
 }
 

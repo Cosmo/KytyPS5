@@ -29,6 +29,50 @@ if(NOT EXISTS "${KYTY_JSON_INCLUDE_DIR}/nlohmann/json.hpp")
 	message(FATAL_ERROR "nlohmann/json.hpp not found: run 'git submodule update --init 3rdparty/nlohmann_json' or set KYTY_JSON_INCLUDE_DIR")
 endif()
 
+# ZArchive reads the .zar game archives, with zstd. The same versions and the same patch as upstream's 3rdparty/CMakeLists.txt; a folder with
+# the sources can be given instead of fetching them (KYTY_ZSTD_SOURCE_DIR, KYTY_ZARCHIVE_SOURCE_DIR; the ZArchive one must be patched already).
+include(FetchContent)
+set(KYTY_ZSTD_SOURCE_DIR "" CACHE PATH "zstd sources (optional)")
+set(KYTY_ZARCHIVE_SOURCE_DIR "" CACHE PATH "ZArchive sources, with upstream's patch applied (optional)")
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+if(KYTY_ZSTD_SOURCE_DIR)
+	set(FETCHCONTENT_SOURCE_DIR_ZSTD "${KYTY_ZSTD_SOURCE_DIR}")
+endif()
+if(KYTY_ZARCHIVE_SOURCE_DIR)
+	set(FETCHCONTENT_SOURCE_DIR_ZARCHIVE_SOURCE "${KYTY_ZARCHIVE_SOURCE_DIR}")
+endif()
+FetchContent_Declare(
+	zstd
+	GIT_REPOSITORY https://github.com/facebook/zstd.git
+	GIT_TAG f8745da6ff1ad1e7bab384bd1f9d742439278e99
+	GIT_SHALLOW FALSE
+	SOURCE_SUBDIR build/cmake
+)
+FetchContent_Declare(
+	zarchive_source
+	GIT_REPOSITORY https://github.com/Exzap/ZArchive.git
+	GIT_TAG d2c717730092c7bf8cbb033b12fd4001b7c4d932
+	GIT_SHALLOW FALSE
+	PATCH_COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/patches/zarchive-reader.patch"
+	SOURCE_SUBDIR kyty-library-only
+)
+FetchContent_MakeAvailable(zstd zarchive_source)
+add_library(zarchive STATIC
+	"${zarchive_source_SOURCE_DIR}/src/zarchivereader.cpp"
+	"${zarchive_source_SOURCE_DIR}/src/zarchivewriter.cpp"
+	"${zarchive_source_SOURCE_DIR}/src/sha_256.c"
+)
+target_include_directories(zarchive SYSTEM PUBLIC "${zarchive_source_SOURCE_DIR}/include")
+target_include_directories(zarchive PRIVATE "${zstd_SOURCE_DIR}/lib")
+target_link_libraries(zarchive PRIVATE libzstd_static)
+target_compile_features(zarchive PRIVATE cxx_std_20)
+target_compile_options(zarchive PRIVATE /W0)
+
 # C++/WinRT projection headers for the Windows SDK and WinUI 2, generated with the SDK's cppwinrt.
 string(REGEX REPLACE "[\\/]$" "" kyty_uwp_sdk_version "$ENV{WindowsSDKVersion}")
 find_program(KYTY_CPPWINRT cppwinrt PATHS "$ENV{WindowsSdkVerBinPath}/x64" NO_DEFAULT_PATH)
@@ -64,7 +108,7 @@ target_include_directories(kyty_uwp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 # the WindowsApp umbrella library, which comes before the desktop system libraries.
 target_link_options(kyty_uwp PRIVATE "/APPCONTAINER" "/LIBPATH:$ENV{VCToolsInstallDir}lib/x64/store"
 	"/DEBUG:FULL" "/PDB:${CMAKE_CURRENT_BINARY_DIR}/kyty_uwp.pdb")
-target_link_libraries(kyty_uwp PRIVATE WindowsApp.lib)
+target_link_libraries(kyty_uwp PRIVATE WindowsApp.lib zarchive)
 
 # The package layout next to the executable: register it with `uwp.ps1 deploy`.
 set(KYTY_UWP_LAYOUT "${CMAKE_BINARY_DIR}/uwp-layout")

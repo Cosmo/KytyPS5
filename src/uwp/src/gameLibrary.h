@@ -12,14 +12,14 @@ struct GameEntry {
 	std::string           title_id; // e.g. PPSA00000; empty when param.json has none
 	std::string           name;
 	std::string           version;
-	std::filesystem::path folder;
+	std::filesystem::path folder; // the game's folder, or its .zar archive
 };
 
-// The game in `folder` (which has an eboot.bin), described by its sce_sys\param.json.
+// The game in `folder` (a folder with an eboot.bin, or a .zar archive), described by its sce_sys\param.json.
 [[nodiscard]] GameEntry ReadGame(const std::filesystem::path& folder);
 
 // Finds the games in the game folders (GameFolders): folders with an eboot.bin, the game folder
-// itself or up to two levels below it, described by sce_sys\param.json. Saves the result to
+// itself or up to two levels below it, and .zar archives in those folders, described by sce_sys\param.json. Saves the result to
 // LocalState\library.json.
 std::vector<GameEntry> ScanGames();
 

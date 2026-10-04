@@ -2,13 +2,13 @@
 
 `src/uwp` is the KytyPS5 app for UWP: the launcher, the settings, the game menu, the overlay and the controller input. It runs on Windows with Developer Mode and is packaged for Xbox Dev Mode.
 
-**Status:** the emulator is not part of this build yet. The launcher shows the games of the game folders as a row of covers over the selected game's background and takes controller, keyboard or mouse input. Starting a game shows its launch screen and the game menu; nothing runs behind it. `kyty://run?title=<title ID>` (or `?game=<folder>`) starts a game the same way.
+**Status:** the emulator is not part of this build yet. The launcher shows the games of the game folders and archives as a row of covers over the selected game's background and takes controller, keyboard or mouse input. Starting a game shows its launch screen and the game menu; nothing runs behind it. `kyty://run?title=<title ID>` (or `?game=<folder>`) starts a game the same way.
 
 ## Design
 
 - **One XAML app.** WinUI 2.8 (the newest UI stack UWP and Xbox run), written in C++/WinRT. The markup is loaded at runtime (`XamlReader`), so there is no XAML compiler and no MSBuild project: the app is a CMake target built with clang-cl. `src/uwp` is its own CMake project (`uwp.ps1 configure`).
 - **UWP APIs only.** The Xbox has none of the desktop-only DLLs, and an import it cannot resolve stops the app from starting while Windows still runs it. The target links `WindowsApp.lib` and the store C++ runtime ahead of the desktop libraries, and `uwp.ps1 build` checks every import of the package's binaries against `WindowsApp.lib`.
-- **Game library.** The app searches its game folders for games (folders with `eboot.bin`, up to two levels deep) and indexes them by title ID from `sce_sys\param.json`, in `LocalState\library.json`. The library is read from that file at start; Y (or F5) in the launcher scans again.
+- **Game library.** The app searches its game folders for games (folders with `eboot.bin`, up to two levels deep, and `.zar` archives in those folders) and indexes them by title ID from `sce_sys\param.json`, in `LocalState\library.json`. Archives are read in place with ZArchive (the same library and patch as upstream); the covers and backgrounds come out of the archive too. The library is read from that file at start; Y (or F5) in the launcher scans again.
 - **Files** outside the package are opened with the `*FromApp` functions. Game folders must grant UWP apps read access (below), so files are read directly. The `broadFileSystemAccess` capability goes through a file broker at about 20 ms per file call and is not used.
 - **Pad host** (`padHost.h`). The input code maps Xbox controllers to a PS5 pad state per player and hands it to the pad host, which in this build only keeps it. With the emulator in the build, the same calls go to the emulator's controller library.
 - **Emulator host** (`emulatorHost.*`). The page, the exit and restart logic and the frame statistics the overlay shows. The emulator thread is not started in this build.
@@ -61,6 +61,7 @@ Requirements:
 - Windows SDK 10.0.26100 or newer (C++/WinRT and the packaging tools) and the store C++ runtime from Visual Studio's C++ workload, with clang-cl.
 - The WinUI 2 NuGet package `Microsoft.UI.Xaml` 2.8.7 and its declared dependency `Microsoft.Web.WebView2` 1.0.2849.39, extracted (a `.nupkg` is a zip). Only WebView2's metadata is used, to generate the C++ headers; nothing of it is packaged. `$env:KYTY_DEPS` is the folder that holds `nuget\<package>` (default `build\deps`), or pass `-WinUIRoot` and `-WebView2Root`.
 - The `nlohmann/json` header: the submodule `3rdparty/nlohmann_json`, or another folder in `$env:KYTY_JSON_INCLUDE`.
+- zstd and ZArchive, fetched at configure time like upstream does (`$env:KYTY_ZSTD_SOURCE` and `$env:KYTY_ZARCHIVE_SOURCE` name existing source folders instead; the ZArchive one patched with `3rdparty/patches/zarchive-reader.patch`).
 - Developer Mode (Settings > System > For developers) to register the unsigned package.
 
 `uwp.ps1` runs each step and builds into `build\uwp` (or `$env:KYTY_UWP_BUILD`):

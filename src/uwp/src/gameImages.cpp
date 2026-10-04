@@ -1,6 +1,6 @@
 #include "gameImages.h"
 
-#include "fileAccess.h"
+#include "gameSource.h"
 
 #include <winrt/Windows.Storage.Streams.h>
 
@@ -22,7 +22,7 @@ LoadImageAsync(winrt::Windows::UI::Core::CoreDispatcher dispatcher, std::filesys
 	namespace streams = winrt::Windows::Storage::Streams;
 
 	co_await winrt::resume_background();
-	const auto bytes = ReadBinaryFile(path);
+	const auto bytes = ReadGameBinary(path);
 	co_await winrt::resume_foreground(dispatcher);
 	if (!bytes || bytes->empty()) {
 		co_return nullptr;

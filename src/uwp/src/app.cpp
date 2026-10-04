@@ -4,6 +4,7 @@
 #include "fileAccess.h"
 #include "gameImages.h"
 #include "gameLibrary.h"
+#include "gameSource.h"
 #include "input.h"
 #include "launcher.h"
 #include "log.h"
@@ -200,6 +201,17 @@ struct GameProblem {
 std::optional<GameProblem> CheckGame(const std::filesystem::path& game) {
 	const auto                eboot = game / L"eboot.bin";
 	WIN32_FILE_ATTRIBUTE_DATA attributes {};
+	if (IsArchivePath(game)) {
+		// the archive itself must be readable and hold the game
+		if (GetFileAttributesExFromAppW(game.c_str(), GetFileExInfoStandard, &attributes) == 0) {
+			Log("cannot read %ls (error %lu)\n", game.c_str(), GetLastError());
+			return GameProblem {L"The archive can't be read", winrt::hstring(game.wstring())};
+		}
+		if (GameFileExists(eboot)) {
+			return std::nullopt;
+		}
+		return GameProblem {L"No game in this archive", L"The archive has no eboot.bin at its root."};
+	}
 	if (GetFileAttributesExFromAppW(eboot.c_str(), GetFileExInfoStandard, &attributes)) {
 		return std::nullopt;
 	}
