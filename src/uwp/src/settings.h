@@ -23,6 +23,7 @@ struct AppSettings {
 	uint32_t                           console_language = 1; // English (United States)
 	bool                               debug_layer      = false; // the D3D12 debug layer
 	bool                               game_output      = false; // the game's printf in the log
+	bool                               d3d12_selftest   = false; // translate and sign built-in shaders at start (not on the settings page)
 	// The overlay's size: 0 small, 1 medium, 2 large (OverlaySizes in overlay.cpp).
 	uint32_t overlay_size = 1;
 };
