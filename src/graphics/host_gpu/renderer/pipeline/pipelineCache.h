@@ -6,6 +6,7 @@
 #include "common/common.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/shader/programCache.h"
 #include "graphics/shader/shader.h"
 
 #include <cstddef>
@@ -146,7 +147,7 @@ public:
 	                             const ShaderProgram&          compute_program);
 
 private:
-	struct ProgramCache;
+	[[nodiscard]] ShaderProgram Module(const CompiledProgram& program);
 
 	struct GraphicsPipelineKey {
 		PipelineRenderingState   rendering;
@@ -173,9 +174,10 @@ private:
 		std::size_t operator()(const GraphicsPipelineKey& key) const;
 	};
 
-	GraphicContext&               m_graphics;
-	std::unique_ptr<ProgramCache> m_program_cache;
-	vk::PipelineCache             m_driver_cache = nullptr;
+	GraphicContext&                                  m_graphics;
+	ShaderProgramCache                               m_programs;
+	std::unordered_map<uint64_t, vk::ShaderModule>   m_modules;
+	vk::PipelineCache                                m_driver_cache = nullptr;
 	std::filesystem::path         m_driver_cache_path;
 	std::unordered_map<GraphicsPipelineKey, std::unique_ptr<Pipeline>, GraphicsPipelineKeyHash>
 	                                                        m_graphics_pipelines;

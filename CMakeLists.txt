@@ -274,6 +274,8 @@ if(KYTY_GPU_BACKEND STREQUAL "D3D12")
 	list(APPEND kyty_emulator_src ${kyty_d3d12_src}
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/sync.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/imageInfo.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/textureCommon.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/blendMapping.cpp"
 	)
 elseif(NOT KYTY_GPU_BACKEND STREQUAL "Vulkan")
 	message(FATAL_ERROR "Unknown KYTY_GPU_BACKEND '${KYTY_GPU_BACKEND}'")
