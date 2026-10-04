@@ -31,20 +31,6 @@ namespace Libs::Graphics::ShaderRecompiler {
 
 namespace {
 
-HostShaderFeatures g_host_shader_features;
-
-} // namespace
-
-void SetHostShaderFeatures(const HostShaderFeatures& features) {
-	g_host_shader_features = features;
-}
-
-const HostShaderFeatures& GetHostShaderFeatures() {
-	return g_host_shader_features;
-}
-
-namespace {
-
 const char* GetDumpLabel(const CompileOptions& options) {
 	return options.dump_label != nullptr ? options.dump_label : "ShaderRecompiler";
 }

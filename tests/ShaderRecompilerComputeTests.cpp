@@ -25,6 +25,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptorCommit.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -11159,7 +11160,7 @@ public:
         Require(name, "clamped buffer rebind",
                 binding.buffer == owner.Handle() &&
                     binding.offset == owner.Offset(buffer_address) &&
-                    binding.range == 0x5000,
+                    binding.size == 0x5000,
                 "descriptor rebind lost its clamped guest range or retained a stale host owner");
       }
 
@@ -13068,7 +13069,7 @@ public:
         const auto &buffer = buffer_bindings.buffers[0];
         Require(name, "rediscovered target formatted-buffer read",
                 target.image_id == expanded_array_id &&
-                    buffer.range == buffer_size &&
+                    buffer.size == buffer_size &&
                     buffer_bindings.images.empty() &&
                     texture_cache.GetImage(target.image_id).backing.state.layout ==
                         vk::ImageLayout::eTransferSrcOptimal,
