@@ -11,6 +11,8 @@
 
 #include <D3D12MemAlloc.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <fmt/format.h>
 #include <utility>
@@ -69,6 +71,38 @@ static std::string AllocationList(const D3D12_DRED_ALLOCATION_NODE* node) {
 	return text.empty() ? "    none\n" : text;
 }
 
+std::string UnfinishedWorkReport() {
+	std::string report;
+	if (g_device != nullptr) {
+		// S_OK while the device works; a GPU hang shows here before anything fails.
+		report += fmt::format("  device removed reason: HRESULT=0x{:08x}\n",
+		                      static_cast<uint32_t>(g_device->GetDeviceRemovedReason()));
+	}
+	// The pipeline the GPU was stuck in, from the GPU trace; its shaders are saved.
+	const auto unfinished = GetGpuTrace().Unfinished(4);
+	for (size_t i = 0; i < unfinished.size(); i++) {
+		const auto&       pipeline = *unfinished[i];
+		const std::string name(pipeline.name.begin(), pipeline.name.end());
+		if (i == 0) {
+			std::vector<std::span<const uint8_t>>  dxil;
+			std::vector<std::span<const uint32_t>> spirv;
+			for (const auto* shader: pipeline.dxil) {
+				dxil.emplace_back(shader->bytecode);
+			}
+			for (const auto& program: pipeline.spirv) {
+				spirv.emplace_back(*program);
+			}
+			const auto file = "pipeline_" + name.substr(9, name.find(':') - 9);
+			report += fmt::format("GPU stopped in {}: shaders saved to {}\\{}.*\n", name,
+			                      SaveShaderDump(file, dxil, spirv), file);
+		} else {
+			report += fmt::format("  also started, not finished: {}\n", name);
+		}
+	}
+
+	return report;
+}
+
 std::string DeviceRemovedReport() {
 	if (g_device == nullptr) {
 		return {};
@@ -111,27 +145,7 @@ std::string DeviceRemovedReport() {
 		}
 	}
 
-	// The pipeline the GPU was stuck in, from the GPU trace; its shaders are saved.
-	const auto unfinished = GetGpuTrace().Unfinished(4);
-	for (size_t i = 0; i < unfinished.size(); i++) {
-		const auto&       pipeline = *unfinished[i];
-		const std::string name(pipeline.name.begin(), pipeline.name.end());
-		if (i == 0) {
-			std::vector<std::span<const uint8_t>>  dxil;
-			std::vector<std::span<const uint32_t>> spirv;
-			for (const auto* shader: pipeline.dxil) {
-				dxil.emplace_back(shader->bytecode);
-			}
-			for (const auto& program: pipeline.spirv) {
-				spirv.emplace_back(*program);
-			}
-			const auto file = "pipeline_" + name.substr(9, name.find(':') - 9);
-			report += fmt::format("GPU stopped in {}: shaders saved to {}\\{}.*\n", name,
-			                      SaveShaderDump(file, dxil, spirv), file);
-		} else {
-			report += fmt::format("  also started, not finished: {}\n", name);
-		}
-	}
+	report += UnfinishedWorkReport();
 
 	D3D12_DRED_PAGE_FAULT_OUTPUT page_fault {};
 	if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&page_fault)) && page_fault.PageFaultVA != 0) {
@@ -197,13 +211,14 @@ static void LogCapabilities(ID3D12Device* device) {
 	(void)device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7));
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "D3D12 features: level {:x}.{:x}, shader model {}.{}, binding tier {}, tiled resources tier "
-	    "{}, typed UAV loads {}, wave ops {}, 16-bit ops {}, barycentrics {}, mesh shaders {}\n",
+	    "{}, typed UAV loads {}, wave ops {} ({}-{} lanes), 16-bit ops {}, barycentrics {}, mesh shaders {}\n",
 	    static_cast<unsigned>(feature_levels.MaxSupportedFeatureLevel) >> 12u,
 	    (static_cast<unsigned>(feature_levels.MaxSupportedFeatureLevel) >> 8u) & 0xfu,
 	    static_cast<unsigned>(model.HighestShaderModel) >> 4u,
 	    static_cast<unsigned>(model.HighestShaderModel) & 0xfu,
 	    static_cast<int>(options.ResourceBindingTier), static_cast<int>(options.TiledResourcesTier),
 	    options.TypedUAVLoadAdditionalFormats ? "yes" : "no", options1.WaveOps ? "yes" : "no",
+	    options1.WaveLaneCountMin, options1.WaveLaneCountMax,
 	    options4.Native16BitShaderOpsSupported ? "yes" : "no",
 	    options3.BarycentricsSupported ? "yes" : "no",
 	    options7.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED ? "yes" : "no"));
@@ -380,7 +395,32 @@ void GraphicContext::LogMemoryBudget() const {
 	     info.Budget);
 }
 
+void GraphicContext::LogAllocatorMemory() const {
+	static std::atomic<int64_t> last_log {0};
+	const auto                  now = std::chrono::duration_cast<std::chrono::seconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+	                                  .count();
+	auto expected = last_log.load();
+	if (now - expected < 10 || !last_log.compare_exchange_strong(expected, now) || allocator == nullptr) {
+		return;
+	}
+	D3D12MA::TotalStatistics stats {};
+	allocator->CalculateStatistics(&stats);
+	const auto heap = [&](size_t type) {
+		const auto& s = stats.HeapType[type];
+		return fmt::format("{} MB in {} heaps, {} MB used by {} allocations (largest {} MB)",
+		                   s.Stats.BlockBytes >> 20u, s.Stats.BlockCount,
+		                   s.Stats.AllocationBytes >> 20u, s.Stats.AllocationCount,
+		                   s.Stats.AllocationCount != 0 ? s.AllocationSizeMax >> 20u : 0);
+	};
+	const auto info = LocalMemory(adapter);
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "GPU memory: usage {} MB, budget {} MB; default {}; upload {}; readback {}; custom {}\n",
+	    info.CurrentUsage >> 20u, info.Budget >> 20u, heap(0), heap(1), heap(2), heap(3)));
+}
+
 uint64_t GraphicContext::GetDeviceMemoryUsage() const {
+	LogAllocatorMemory();
 	return LocalMemory(adapter).CurrentUsage;
 }
 

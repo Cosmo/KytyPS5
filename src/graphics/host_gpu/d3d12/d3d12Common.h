@@ -27,6 +27,9 @@ void Check(HRESULT result, const char* operation);
 // After the device was removed: why, the GPU operations that didn't finish and, for a page fault,
 // the address and the resources around it (DRED, enabled when the device is created).
 [[nodiscard]] std::string DeviceRemovedReport();
+// The pipelines of the draws and dispatches the GPU started but didn't finish, from the GPU trace;
+// the first one's shaders are saved. Also while the GPU still runs (a hang).
+[[nodiscard]] std::string UnfinishedWorkReport();
 
 } // namespace Libs::Graphics::D3D12
 

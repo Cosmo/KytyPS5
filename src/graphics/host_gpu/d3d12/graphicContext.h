@@ -32,6 +32,8 @@ struct GraphicContext {
 	[[nodiscard]] const char* DeviceName() const { return device_name.c_str(); }
 
 	void                   LogMemoryBudget() const;
+	// Debugging: where the GPU memory goes (the allocator's heaps by type); at most every 10 s.
+	void                   LogAllocatorMemory() const;
 	[[nodiscard]] bool     CanReportMemoryUsage() const noexcept { return adapter != nullptr; }
 	// GPU memory used by this process.
 	[[nodiscard]] uint64_t GetDeviceMemoryUsage() const;
