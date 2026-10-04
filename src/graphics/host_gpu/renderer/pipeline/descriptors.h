@@ -9,6 +9,12 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/shaderBindings.h"
 
+#if defined(KYTY_GPU_BACKEND_D3D12)
+#include "graphics/host_gpu/d3d12/samplerCache.h"
+#else
+#include "graphics/host_gpu/renderer/cache/samplerCache.h"
+#endif
+
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
@@ -18,12 +24,21 @@ namespace Libs::Graphics {
 
 struct ShaderStageRuntime;
 
+// A host buffer range bound to a shader. A size of UINT64_MAX extends to the buffer end.
+struct BufferBinding {
+	BufferHandle buffer {};
+	uint64_t     offset = 0;
+	uint64_t     size   = 0;
+};
+
 struct TextureBinding {
-	ImageId                    image_id;
-	vk::ImageView              image_view = nullptr;
-	TextureCache::ImageDesc    desc;
-	vk::ImageLayout            layout = vk::ImageLayout::eUndefined;
-	std::vector<vk::ImageView> mip_views;
+	ImageId                      image_id;
+	ImageViewHandle              image_view {};
+	TextureCache::ImageDesc      desc;
+#if !defined(KYTY_GPU_BACKEND_D3D12)
+	vk::ImageLayout              layout = vk::ImageLayout::eUndefined;
+#endif
+	std::vector<ImageViewHandle> mip_views;
 };
 
 struct PreparedBindings {
@@ -37,22 +52,18 @@ struct PreparedBindings {
 	const ShaderStageRuntime* runtime = nullptr;
 	// Keep the resolved guest range through cache preparation; only the host buffer ID may
 	// become stale and need resolving again when bindings are rebound.
-	std::vector<BufferSource>             buffer_sources;
-	std::vector<vk::DescriptorBufferInfo> buffers;
-	std::vector<TextureBinding>           images;
-	std::vector<vk::Sampler>              samplers;
-	vk::DescriptorBufferInfo              gds {nullptr, 0, VK_WHOLE_SIZE};
-	vk::DescriptorBufferInfo              flattened_srt;
-	vk::DescriptorBufferInfo              shader_data_buffer;
-	std::vector<uint32_t>                 shader_data;
+	std::vector<BufferSource>   buffer_sources;
+	std::vector<BufferBinding>  buffers;
+	std::vector<TextureBinding> images;
+	std::vector<SamplerHandle>  samplers;
+	BufferBinding               gds {{}, 0, UINT64_MAX};
+	BufferBinding               flattened_srt;
+	BufferBinding               shader_data_buffer;
+	std::vector<uint32_t>       shader_data;
 };
 
-[[nodiscard]] vk::DescriptorType
-NativeDescriptorType(ShaderRecompiler::IR::DescriptorBindingKind kind);
 [[nodiscard]] uint32_t
 NativeDescriptorCount(const ShaderRecompiler::IR::DescriptorBinding& binding);
-[[nodiscard]] vk::DescriptorImageInfo MakeImageInfo(const TextureBinding& texture,
-                                                    uint32_t              element = 0);
 
 template <typename T>
 [[nodiscard]] T DecodeNativeDescriptor(const ShaderRecompiler::IR::DescriptorValue& value) {

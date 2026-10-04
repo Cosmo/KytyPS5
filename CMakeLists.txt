@@ -297,6 +297,7 @@ set(gpu_tiler_shader_names
 	promote_d16
 	demote_d16
 	swap_bgra16
+	copy_rows
 )
 file(GLOB gpu_tiler_shader_includes CONFIGURE_DEPENDS "${gpu_tiler_shader_dir}/gpu_tiler_*.inc")
 foreach(shader_name IN LISTS gpu_tiler_shader_names)
@@ -338,6 +339,7 @@ set(gpu_blit_generated_dir "${PROJECT_BINARY_DIR}/gpu_blit_shaders")
 set(gpu_blit_shader_sources
 	"${gpu_tiler_shader_dir}/gpu_blit_fs_triangle.vert"
 	"${gpu_tiler_shader_dir}/gpu_blit_color_to_ms_depth.frag"
+	"${gpu_tiler_shader_dir}/gpu_blit_present.frag"
 	"${gpu_tiler_shader_dir}/gpu_video_out_overlay.frag"
 )
 foreach(shader_source IN LISTS gpu_blit_shader_sources)

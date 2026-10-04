@@ -172,6 +172,13 @@ private:
 	[[nodiscard]] bool TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
 	                                              CommandBuffer& command, uint32_t group_x,
 	                                              uint32_t group_y, uint32_t group_z, uint32_t mode);
+	void RecordDispatch(CommandBuffer& buffer, const PipelineCache::Pipeline& pipeline,
+	                    PreparedBindings& bindings, const ShaderComputeInputInfo& input_info,
+	                    uint32_t groups_x, uint32_t groups_y, uint32_t groups_z);
+	// Group counts come from `args` (a VkDispatchIndirectCommand at `args_offset`).
+	void RecordDispatchIndirect(CommandBuffer& buffer, const PipelineCache::Pipeline& pipeline,
+	                            PreparedBindings& bindings, const ShaderComputeInputInfo& input_info,
+	                            const Buffer& args, uint64_t args_offset);
 
 	RenderContext&                        m_context;
 	GraphicsBindings                     m_graphics_bindings;
