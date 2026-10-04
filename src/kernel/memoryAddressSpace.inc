@@ -633,6 +633,14 @@ public:
 		m_granularity = info.dwAllocationGranularity;
 #endif
 		ReserveGuestRegions();
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		// Xbox fork (T3): lazily committed regions instead of the committed section and its host alias
+		m_lazy_enabled = Xbox::Tunables::LazyMemory();
+		if (m_lazy_enabled) {
+			LOGF_COLOR(Log::Color::Green, "\t lazy guest memory: direct and flexible memory are committed on first touch, no backing section\n");
+			return;
+		}
+#endif
 		m_backing = new GuestBackingStore(backing_size);
 		if (!m_backing->IsAvailable()) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -680,10 +688,14 @@ public:
 	KYTY_CLASS_NO_COPY(GuestAddressSpace);
 
 	[[nodiscard]] uint64_t GetGranularity() const { return m_granularity; }
-	[[nodiscard]] uint64_t GetBackingBase() const { return m_backing->GetBackingBase(); }
-	[[nodiscard]] uint64_t GetBackingSize() const { return m_backing->GetBackingSize(); }
+	[[nodiscard]] uint64_t GetBackingBase() const { return m_backing != nullptr ? m_backing->GetBackingBase() : 0; }
+	[[nodiscard]] uint64_t GetBackingSize() const { return m_backing != nullptr ? m_backing->GetBackingSize() : 0; }
+	[[nodiscard]] bool     LazyEnabled() const { return m_lazy_enabled; }
 
 	bool ZeroBacking(uint64_t backing_offset, uint64_t size) {
+		if (m_lazy_enabled) {
+			return true; // a lazily committed page starts as zero, and unmapping decommits it
+		}
 		return m_backing->ZeroRange(backing_offset, size);
 	}
 
@@ -708,16 +720,37 @@ public:
 	}
 
 	bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
+		if (m_lazy_enabled) {
+			return LazyCopyIn(vaddr, data, size);
+		}
 		return m_backing->TryWriteBacking(vaddr, data, size);
 	}
 
 	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
+		if (m_lazy_enabled) {
+			return LazyCopyOut(vaddr, data, size, false);
+		}
 		return m_backing->TryReadBacking(vaddr, data, size);
 	}
 
 	bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
 		if (!Owns(vaddr, size)) {
 			return false;
+		}
+		if (m_lazy_enabled) {
+			{
+				std::lock_guard lock(m_mutex);
+				auto            mapping = m_mapped.upper_bound(vaddr);
+				if (mapping != m_mapped.begin()) {
+					--mapping;
+				}
+				for (; mapping != m_mapped.end() && mapping->second.vaddr < vaddr + size; ++mapping) {
+					if (mapping->second.type == MappingType::Private && mapping->second.vaddr + mapping->second.size > vaddr) {
+						return false;
+					}
+				}
+			}
+			return LazyCopyOut(vaddr, data, size, true);
 		}
 		std::lock_guard lock(m_mutex);
 		auto            mapping = m_mapped.upper_bound(vaddr);
@@ -733,7 +766,262 @@ public:
 		return m_backing->TryReadSparseBacking(vaddr, data, size);
 	}
 
-	bool BackingContains(uint64_t vaddr, uint64_t size) { return m_backing->Contains(vaddr, size); }
+	bool BackingContains(uint64_t vaddr, uint64_t size) {
+		if (m_lazy_enabled) {
+			std::lock_guard lock(m_mutex);
+			return ContainsMappedUnlocked(vaddr, size, MappingType::Backing);
+		}
+		return m_backing->Contains(vaddr, size);
+	}
+
+	// ---- Xbox fork (T3): lazily committed guest memory. The bookkeeping is Xbox::Lazy::Regions (tested on the CPU); this is the Windows side.
+	// Locks, in this order: m_copy_lock (shared for host copies, exclusive for unmap), m_mutex (the address space), m_lazy_mutex. The commit fault
+	// handler takes only m_lazy_mutex and nothing under m_lazy_mutex touches guest memory, so a fault can never wait for a lock its own
+	// thread holds. m_copy_lock keeps host copies and unmapping apart (a copy never runs on decommitted pages).
+
+	// Access violation at an address: commit its window when it is a page of a lazy region that is not committed yet.
+	// Returns false when the fault is not ours (a page watcher, a bad pointer), so the next handler sees it.
+	bool HandleCommitFault(uint64_t address, bool is_write) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (!m_lazy_enabled) {
+			return false;
+		}
+		// Fast path without any lock: a fault on a page that is committed cannot be a commit fault. It is a page watcher or a bad access, and
+		// those are frequent; they must not queue up behind the lock below. (Unless another thread committed this window an instant ago.)
+		{
+			MEMORY_BASIC_INFORMATION info {};
+			if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != 0) {
+				if (info.State == MEM_COMMIT) {
+					const DWORD protect = info.Protect & 0xFF;
+					return protect == PAGE_READWRITE || (protect == PAGE_READONLY && !is_write);
+				}
+				if (info.State != MEM_RESERVE) {
+					return false;
+				}
+			}
+		}
+		std::lock_guard lock(m_lazy_mutex);
+		LazyHost        host;
+		switch (m_lazy.CommitAt(address, host)) {
+			case Xbox::Lazy::Regions::CommitResult::Committed: return true;
+			case Xbox::Lazy::Regions::CommitResult::NotLazy: return false;
+			case Xbox::Lazy::Regions::CommitResult::AlreadyCommitted: {
+				// committed by another thread an instant ago: retry when the page allows the access now, else it is a watcher fault
+				MEMORY_BASIC_INFORMATION info {};
+				if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT) {
+					return false;
+				}
+				const DWORD protect = info.Protect & 0xFF;
+				return protect == PAGE_READWRITE || (protect == PAGE_READONLY && !is_write);
+			}
+			case Xbox::Lazy::Regions::CommitResult::Failed:
+				EXIT("Memory: out of commit while committing guest memory at 0x%016" PRIx64 "\n", address);
+		}
+#else
+		(void)address;
+		(void)is_write;
+#endif
+		return false;
+	}
+
+	// Commits the windows of a range before a host call (file read, network receive) writes into it. Parts that are not lazy are ignored.
+	bool EnsureCommitted(uint64_t address, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (!m_lazy_enabled || size == 0) {
+			return true;
+		}
+		std::lock_guard lock(m_lazy_mutex);
+		LazyHost        host;
+		auto            cursor = address;
+		const auto      end    = address + size;
+		while (cursor < end) {
+			const auto length = m_lazy.ContainedLength(cursor, end - cursor);
+			if (length == 0) {
+				cursor = std::min(end, m_lazy.NextStart(cursor));
+				continue;
+			}
+			if (!m_lazy.EnsureCommitted(cursor, length, host)) {
+				return false;
+			}
+			cursor += length;
+		}
+#else
+		(void)address;
+		(void)size;
+#endif
+		return true;
+	}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	struct LazyHost final: Xbox::Lazy::HostOps {
+		static VirtualMemory::Mode Native(Xbox::Lazy::Mode mode) {
+			switch (mode) {
+				case Xbox::Lazy::Mode::NoAccess: return VirtualMemory::Mode::NoAccess;
+				case Xbox::Lazy::Mode::Read: return VirtualMemory::Mode::Read;
+				case Xbox::Lazy::Mode::ReadWrite: break;
+			}
+			return VirtualMemory::Mode::ReadWrite;
+		}
+		bool Commit(uint64_t address, uint64_t size) override {
+			if (!VirtualMemory::Windows::CommitLazy(address, size)) {
+				LOGF_COLOR(Log::Color::Red, "\t lazy guest memory: commit of 0x%016" PRIx64 " bytes at 0x%016" PRIx64 " failed, error %u\n", size, address,
+				           static_cast<uint32_t>(GetLastError()));
+				return false;
+			}
+			Xbox::Lazy::AddCommitted(size);
+			return true;
+		}
+		void Decommit(uint64_t address, uint64_t size) override {
+			EXIT_IF(!VirtualMemory::Windows::DecommitLazy(address, size));
+			Xbox::Lazy::SubCommitted(size);
+		}
+		bool Protect(uint64_t address, uint64_t size, Xbox::Lazy::Mode mode) override {
+			return VirtualMemory::Windows::ProtectLazy(address, size, Native(mode));
+		}
+	};
+
+	// A guest protection for lazy memory: reads and writes are all the host distinguishes (the guest never gets execute rights here).
+	bool LazyProtect(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
+		Xbox::Lazy::Mode lazy_mode = Xbox::Lazy::Mode::ReadWrite;
+		switch (mode) {
+			case VirtualMemory::Mode::NoAccess:
+			case VirtualMemory::Mode::Execute: lazy_mode = Xbox::Lazy::Mode::NoAccess; break;
+			case VirtualMemory::Mode::Read:
+			case VirtualMemory::Mode::ExecuteRead: lazy_mode = Xbox::Lazy::Mode::Read; break;
+			default: break;
+		}
+		std::lock_guard lock(m_lazy_mutex);
+		LazyHost        host;
+		return m_lazy.Protect(vaddr, size, lazy_mode, host);
+	}
+
+	// Host copy of committed guest pages that may be read-only or no-access (page watchers): make them readable for the copy and restore.
+	// A guest thread that touches such a page during the copy does not fault; see the T3 design note, "the known race".
+	static void HostCopyFromGuest(uint64_t address, uint8_t* destination, uint64_t size) {
+		auto       cursor = address;
+		const auto end    = address + size;
+		while (cursor < end) {
+			MEMORY_BASIC_INFORMATION info {};
+			if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0) {
+				std::memset(destination + (cursor - address), 0, end - cursor);
+				return;
+			}
+			const auto run_end = std::min<uint64_t>(end, reinterpret_cast<uint64_t>(info.BaseAddress) + info.RegionSize);
+			const auto bytes   = run_end - cursor;
+			const DWORD protect = info.Protect & 0xFF;
+			if (info.State != MEM_COMMIT) {
+				std::memset(destination + (cursor - address), 0, bytes);
+			} else if (protect == PAGE_NOACCESS) {
+				EXIT_IF(!VirtualMemory::Windows::ProtectLazy(cursor, bytes, VirtualMemory::Mode::Read));
+				std::memcpy(destination + (cursor - address), reinterpret_cast<const void*>(cursor), bytes);
+				// not "back to what it was": the page manager may have changed these pages meanwhile
+				RestoreHostProtection(cursor, bytes, VirtualMemory::Mode::NoAccess);
+			} else {
+				std::memcpy(destination + (cursor - address), reinterpret_cast<const void*>(cursor), bytes);
+			}
+			cursor = run_end;
+		}
+	}
+
+	static void HostCopyToGuest(uint64_t address, const uint8_t* source, uint64_t size) {
+		auto       cursor = address;
+		const auto end    = address + size;
+		while (cursor < end) {
+			MEMORY_BASIC_INFORMATION info {};
+			EXIT_IF(VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT);
+			const auto  run_end = std::min<uint64_t>(end, reinterpret_cast<uint64_t>(info.BaseAddress) + info.RegionSize);
+			const auto  bytes   = run_end - cursor;
+			const DWORD protect = info.Protect & 0xFF;
+			if (protect == PAGE_READWRITE) {
+				std::memcpy(reinterpret_cast<void*>(cursor), source + (cursor - address), bytes);
+			} else {
+				EXIT_IF(!VirtualMemory::Windows::ProtectLazy(cursor, bytes, VirtualMemory::Mode::ReadWrite));
+				std::memcpy(reinterpret_cast<void*>(cursor), source + (cursor - address), bytes);
+				// not "back to what it was": the page manager may have changed these pages meanwhile
+				RestoreHostProtection(cursor, bytes, protect == PAGE_READONLY ? VirtualMemory::Mode::Read : VirtualMemory::Mode::NoAccess);
+			}
+			cursor = run_end;
+		}
+	}
+#endif
+
+	// Copy guest memory to the host: uncommitted pages read as zero without being committed. With `sparse`, gaps between regions read as zero too.
+	bool LazyCopyOut(uint64_t vaddr, void* data, uint64_t size, bool sparse) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (data == nullptr || size == 0 || UINT64_MAX - vaddr < size) {
+			return false;
+		}
+		std::shared_lock copy_lock(m_copy_lock);
+		struct Segment {
+			uint64_t address, bytes;
+			int      kind; // 0 gap, 1 not committed, 2 committed
+		};
+		std::vector<Segment> segments;
+		{
+			std::shared_lock lock(m_lazy_mutex);
+			auto            cursor = vaddr;
+			const auto      end    = vaddr + size;
+			while (cursor < end) {
+				const auto length = m_lazy.ContainedLength(cursor, end - cursor);
+				if (length == 0) {
+					if (!sparse) {
+						return false;
+					}
+					const auto next = std::min(end, m_lazy.NextStart(cursor));
+					segments.push_back({cursor, next - cursor, 0});
+					cursor = next;
+					continue;
+				}
+				m_lazy.ForEachSegment(cursor, length, [&](uint64_t address, uint64_t bytes, bool committed) {
+					segments.push_back({address, bytes, committed ? 2 : 1});
+				});
+				cursor += length;
+			}
+		}
+		auto* destination = static_cast<uint8_t*>(data);
+		for (const auto& segment: segments) {
+			if (segment.kind != 2) {
+				std::memset(destination + (segment.address - vaddr), 0, segment.bytes);
+			} else {
+				HostCopyFromGuest(segment.address, destination + (segment.address - vaddr), segment.bytes);
+			}
+		}
+		return true;
+#else
+		(void)vaddr;
+		(void)data;
+		(void)size;
+		(void)sparse;
+		return false;
+#endif
+	}
+
+	// Copy host data into guest memory: the windows of the range are committed first (the data has to live somewhere).
+	bool LazyCopyIn(uint64_t vaddr, const void* data, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (data == nullptr || size == 0 || UINT64_MAX - vaddr < size) {
+			return false;
+		}
+		std::shared_lock copy_lock(m_copy_lock);
+		{
+			std::lock_guard lock(m_lazy_mutex);
+			if (!m_lazy.Contains(vaddr, size)) {
+				return false;
+			}
+			LazyHost host;
+			if (!m_lazy.EnsureCommitted(vaddr, size, host)) {
+				return false;
+			}
+		}
+		HostCopyToGuest(vaddr, static_cast<const uint8_t*>(data), size);
+		return true;
+#else
+		(void)vaddr;
+		(void)data;
+		(void)size;
+		return false;
+#endif
+	}
 
 	bool Protect(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
 		if (size == 0 || UINT64_MAX - vaddr < size) {
@@ -762,6 +1050,29 @@ public:
 			}
 			return false;
 		}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (m_lazy_enabled) {
+			// Xbox fork (T3): reserve the range as private memory without committing it; windows are committed on first touch
+			if (VirtualMemory::IsExecute(mode)) {
+				LOGF_COLOR(Log::Color::Red, "\t lazy guest memory: an executable mapping is not supported (vaddr=0x%016" PRIx64 ")\n", vaddr);
+				AddFreeUnlocked(vaddr, size);
+				return false;
+			}
+			if (!VirtualMemory::Windows::ReserveLazy(vaddr, size)) {
+				if (failure_reason != nullptr) {
+					*failure_reason = GuestBackingStore::FailureReason::PlaceholderMapFailed;
+				}
+				AddFreeUnlocked(vaddr, size);
+				return false;
+			}
+			{
+				std::lock_guard lazy_lock(m_lazy_mutex);
+				EXIT_IF(!m_lazy.Map(vaddr, size));
+			}
+			EXIT_IF(!AddMappedUnlocked(vaddr, size, MappingType::Backing));
+			return true;
+		}
+#endif
 		const auto host_mode = VirtualMemory::IsExecute(mode)
 		                           ? VirtualMemory::Mode::ExecuteReadWrite
 		                           : VirtualMemory::Mode::ReadWrite;
@@ -775,10 +1086,45 @@ public:
 	}
 
 	bool UnmapBacking(uint64_t vaddr, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		// lock order: m_copy_lock before m_mutex (a host copy may be waiting for the page manager, which waits for m_mutex)
+		std::unique_lock<std::shared_mutex> copy_lock;
+		if (m_lazy_enabled) {
+			copy_lock = std::unique_lock<std::shared_mutex>(m_copy_lock);
+		}
+#endif
 		std::lock_guard lock(m_mutex);
 		if (!ContainsMappedUnlocked(vaddr, size, MappingType::Backing)) {
 			return false;
 		}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (m_lazy_enabled) {
+			{
+				std::lock_guard  lazy_lock(m_lazy_mutex);
+				LazyHost         host;
+				if (!m_lazy.Unmap(vaddr, size, host)) {
+					return false;
+				}
+			}
+			// give the range back as placeholders, one mapped region at a time (as ReleaseCommitted does)
+			std::vector<std::pair<uint64_t, uint64_t>> pieces;
+			const auto                                 end     = vaddr + size;
+			auto                                       current = vaddr;
+			while (current < end) {
+				const auto it       = FindMappedContainingUnlocked(current);
+				const auto part_end = std::min(end, it->second.vaddr + it->second.size);
+				pieces.emplace_back(current, part_end - current);
+				current = part_end;
+			}
+			for (const auto& [piece_vaddr, piece_size]: pieces) {
+				EXIT_IF(VirtualFree(reinterpret_cast<void*>(piece_vaddr), piece_size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) == 0);
+			}
+			EXIT_IF(pieces.size() > 1 && !CoalescePlaceholders(vaddr, size));
+			EXIT_IF(!RemoveMappedUnlocked(vaddr, size, MappingType::Backing));
+			AddFreeUnlocked(vaddr, size);
+			return true;
+		}
+#endif
 		bool placeholder_preserved = false;
 		if (!m_backing->Unmap(vaddr, size, &placeholder_preserved)) {
 			return false;
@@ -964,6 +1310,12 @@ private:
 			const auto& region      = it->second;
 			const auto  range_start = std::max(vaddr, region.vaddr);
 			const auto  range_end   = std::min(end, region.vaddr + region.size);
+			if (range_start < range_end && m_lazy_enabled && region.type == MappingType::Backing) {
+				if (!LazyProtect(range_start, range_end - range_start, mode)) {
+					return false;
+				}
+				continue;
+			}
 			if (range_start < range_end &&
 			    !VirtualMemory::Protect(range_start, range_end - range_start, mode)) {
 				return false;
@@ -1317,4 +1669,10 @@ private:
 	std::vector<std::pair<uint64_t, uint64_t>> m_owned;
 	uint64_t                                   m_granularity = 0x10000;
 	GuestBackingStore*                         m_backing     = nullptr;
+	bool                                       m_lazy_enabled = false;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	Xbox::Lazy::Regions                        m_lazy;
+	std::shared_mutex                          m_lazy_mutex; // shared: lookups for host copies; exclusive: every change and the commit itself
+	std::shared_mutex                          m_copy_lock;
+#endif
 };

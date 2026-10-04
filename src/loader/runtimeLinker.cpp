@@ -673,6 +673,10 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			case CoreAccess::Execute: access = GpuAccess::Execute; break;
 			case CoreAccess::Unknown: return false;
 		}
+		if (access != GpuAccess::Execute &&
+		    Libs::LibKernel::Memory::HandleCommitFault(info->access_violation_vaddr, access == GpuAccess::Write)) {
+			return true; // Xbox fork (T3): the first touch of lazily committed guest memory
+		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			return true;
 		}

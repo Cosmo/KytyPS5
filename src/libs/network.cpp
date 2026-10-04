@@ -23,6 +23,7 @@
 #endif
 
 #include "common/assert.h"
+#include "kernel/memory.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -2254,6 +2255,8 @@ int64_t KYTY_SYSV_ABI Send(int s, const void* buf, uint64_t len, int flags) {
 int64_t KYTY_SYSV_ABI Sendto(int s, const void* buf, uint64_t len, int flags, const void* addr,
                              uint32_t addrlen) {
 	PRINT_NAME();
+	// Xbox fork (T3): the host reads the data from this guest buffer; a lazily committed page would fail the call instead of faulting
+	::Libs::LibKernel::Memory::EnsureGuestCommitted(reinterpret_cast<uint64_t>(buf), len);
 
 	LOGF("\t s     = %d\n"
 	     "\t buf   = 0x%016" PRIx64 "\n"
@@ -2377,6 +2380,12 @@ int64_t KYTY_SYSV_ABI Recv(int s, void* buf, uint64_t len, int flags) {
 int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* addr,
                                uint32_t* addrlen) {
 	PRINT_NAME();
+	// Xbox fork (T3): the host writes the received data into these guest buffers; a lazily committed page would fail the call instead of faulting
+	::Libs::LibKernel::Memory::EnsureGuestCommitted(reinterpret_cast<uint64_t>(buf), len);
+	if (addr != nullptr) {
+		::Libs::LibKernel::Memory::EnsureGuestCommitted(reinterpret_cast<uint64_t>(addr), 128);
+		::Libs::LibKernel::Memory::EnsureGuestCommitted(reinterpret_cast<uint64_t>(addrlen), sizeof(uint32_t));
+	}
 
 	LOGF("\t s     = %d\n"
 	     "\t buf   = 0x%016" PRIx64 "\n"
