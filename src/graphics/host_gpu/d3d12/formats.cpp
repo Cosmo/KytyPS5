@@ -96,12 +96,10 @@ FormatInfo GetFormatInfo(vk::Format format) {
 		case F::eR32G32Sint: return Color(DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_SINT);
 		case F::eR32G32Sfloat: return Color(DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_FLOAT);
 
+		// 96-bit textures are not created: on the Xbox it removes the device (guard G1). Vertex input of these formats is fine (VertexFormat).
 		case F::eR32G32B32Uint:
-			return Color(DXGI_FORMAT_R32G32B32_TYPELESS, DXGI_FORMAT_R32G32B32_UINT);
 		case F::eR32G32B32Sint:
-			return Color(DXGI_FORMAT_R32G32B32_TYPELESS, DXGI_FORMAT_R32G32B32_SINT);
-		case F::eR32G32B32Sfloat:
-			return Color(DXGI_FORMAT_R32G32B32_TYPELESS, DXGI_FORMAT_R32G32B32_FLOAT);
+		case F::eR32G32B32Sfloat: return {};
 
 		case F::eR32G32B32A32Uint:
 			return Color(DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_UINT);

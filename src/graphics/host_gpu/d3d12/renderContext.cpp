@@ -13,7 +13,9 @@ namespace Libs::Graphics {
 
 RenderContext::RenderContext(GraphicContext& graphics)
     : m_graphics(graphics), m_render_executor(*this), m_command_scheduler(*this, graphics), m_descriptor_heap(graphics, m_command_scheduler),
-      m_pipeline_cache(graphics), m_buffer_cache(graphics, m_command_scheduler, m_page_manager, m_texture_cache) {
+      m_pipeline_cache(graphics), m_compute_kernels(graphics, m_pipeline_cache.GetCompiler()), m_sampler_cache(graphics, m_descriptor_heap),
+      m_buffer_cache(graphics, m_command_scheduler, m_page_manager, m_texture_cache),
+      m_texture_cache(graphics, m_command_scheduler, m_page_manager, m_buffer_cache) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 }
 
@@ -168,11 +170,6 @@ void RenderContext::TriggerInterrupt(int event_id, uint32_t context_id) {
 		}
 		EXIT_NOT_IMPLEMENTED(result != OK);
 	}
-}
-
-// There are no images yet to copy buffer contents from (the shared texture cache defines this).
-bool BufferCache::SynchronizeBufferFromImage(Buffer& /*buffer*/, uint64_t /*vaddr*/, uint64_t /*size*/) {
-	return false;
 }
 
 } // namespace Libs::Graphics

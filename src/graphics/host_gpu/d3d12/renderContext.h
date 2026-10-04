@@ -4,14 +4,16 @@
 #include "common/common.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/d3d12/commandScheduler.h"
+#include "graphics/host_gpu/d3d12/computeKernels.h"
 #include "graphics/host_gpu/d3d12/descriptorHeap.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
 #include "graphics/host_gpu/d3d12/pipelineCache.h"
 #include "graphics/host_gpu/d3d12/render.h"
-#include "graphics/host_gpu/d3d12/textureCache.h"
+#include "graphics/host_gpu/d3d12/samplerCache.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "kernel/eventQueue.h"
 
 #include <memory>
@@ -42,6 +44,8 @@ public:
 	Common::Mutex&    GetMutex() { return m_mutex; }
 	CommandScheduler& GetCommandScheduler() { return m_command_scheduler; }
 	DescriptorHeap&   GetDescriptorHeap() { return m_descriptor_heap; }
+	ComputeKernels&   GetComputeKernels() { return m_compute_kernels; }
+	SamplerCache&     GetSamplerCache() { return m_sampler_cache; }
 	RenderExecutor&   GetRenderExecutor() { return m_render_executor; }
 	BufferCache&      GetBufferCache() { return m_buffer_cache; }
 	TextureCache&     GetTextureCache() { return m_texture_cache; }
@@ -76,6 +80,8 @@ private:
 	CommandScheduler          m_command_scheduler;
 	DescriptorHeap            m_descriptor_heap;
 	PipelineCache             m_pipeline_cache;
+	ComputeKernels            m_compute_kernels;
+	SamplerCache              m_sampler_cache;
 	PageManager               m_page_manager;
 	BufferCache               m_buffer_cache;
 	TextureCache              m_texture_cache;
