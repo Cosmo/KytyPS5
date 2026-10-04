@@ -159,6 +159,12 @@ function Invoke-Deploy {
     }
     Install-Framework 'Microsoft.UI.Xaml.2.8' "$WinUIRoot\tools\AppX\x64\Release\Microsoft.UI.Xaml.2.8.appx"
     Get-Process kyty_uwp -ErrorAction SilentlyContinue | Stop-Process -Force
+    # A package of this identity registered from another folder (an older build directory) is replaced, keeping the app's data.
+    $registered = Get-AppxPackage -Name $packageName
+    if ($registered -and $registered.InstallLocation -ne $layout) {
+        Step "registered from $($registered.InstallLocation): replacing the registration (app data kept)"
+        $registered | Remove-AppxPackage -PreserveApplicationData
+    }
     # Registering in place: the app runs from the layout, so a rebuild needs no new deploy
     # unless the manifest changed. A changed manifest with the same version is refused; the
     # old registration is then removed first, keeping the app's data (LocalState).

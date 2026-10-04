@@ -13,7 +13,10 @@
 #include "graphics/presentation/presenter.h"
 #include "kernel/memory.h"
 
+#include <windows.h>
+
 #include <memory>
+#include <string>
 
 namespace Libs::Graphics {
 
@@ -43,7 +46,21 @@ Presenter& WindowInit(uint32_t width, uint32_t height) {
 	window->graphic_ctx.screen_height = height;
 	window->surface_size              = [] { return EmulatorHost::Get().PanelPixelSize(); };
 	window->attach_swapchain          = [](IDXGISwapChain1* swapchain) { EmulatorHost::Get().AttachSwapChain(swapchain); };
-	window->frame_presented           = [] { EmulatorHost::Get().FramePresented(); };
+	window->frame_presented           = [] {
+        EmulatorHost::Get().FramePresented();
+        // The window title shows the progress (`uwp.ps1 run` reads it): the frame count and the frames of the last second.
+        static uint64_t frames        = 0;
+        static uint64_t second_start  = GetTickCount64();
+        static uint64_t second_frames = 0;
+        frames++;
+        second_frames++;
+        const auto now = GetTickCount64();
+        if (now - second_start >= 1000) {
+            EmulatorHost::Get().SetTitle("KytyPS5 frame: " + std::to_string(frames) + ", fps: " + std::to_string(second_frames * 1000 / (now - second_start)));
+            second_start  = now;
+            second_frames = 0;
+        }
+	};
 
 	window->graphic_ctx.Create(Config::VulkanValidationEnabled());
 	window->render_context = std::make_unique<RenderContext>(window->graphic_ctx);
