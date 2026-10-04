@@ -6,6 +6,9 @@
 #include "common/threads.h"
 #include "kernel/pthread.h"
 #include "libs/audio_internal.h"
+#if defined(KYTY_PLATFORM_UWP)
+#include "libs/audioOutput.h"
+#endif
 #include "libs/controller.h"
 #include "libs/dualSenseHaptics.h"
 #include "libs/errno.h"
@@ -129,6 +132,9 @@ private:
 
 		SDL_AudioStream*                      stream  = nullptr;
 		Controller::DualSenseHaptics::Stream* haptics = nullptr;
+#if defined(KYTY_PLATFORM_UWP)
+		Output::Stream* host_stream = nullptr; // The UWP app's output, instead of an SDL stream.
+#endif
 	};
 
 	struct PortIn {
@@ -261,6 +267,11 @@ SDL_AudioFormat Audio::SdlFormat(Format format) {
 bool Audio::OpenSdlDevice(PortOut* port) {
 	EXIT_IF(port == nullptr);
 
+#if defined(KYTY_PLATFORM_UWP)
+	// The stream plays the port's format as it is (no conversion).
+	port->host_stream = Output::Open(port->freq, OutputChannels(*port), FormatIsFloat(port->format));
+	return port->host_stream != nullptr;
+#else
 	if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
 		LOGF("AudioOut: SDL audio init failed: %s\n", SDL_GetError());
 		return false;
@@ -287,12 +298,18 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 	LOGF("AudioOut: opened SDL stream (%d Hz, %d ch, format 0x%04x)\n", desired.freq,
 	     desired.channels, static_cast<unsigned>(desired.format));
 	return true;
+#endif
 }
 
 void Audio::CloseSdlDevice(PortOut* port) {
 	EXIT_IF(port == nullptr);
 	Controller::DualSenseHaptics::Close(port->haptics);
 	port->haptics = nullptr;
+
+#if defined(KYTY_PLATFORM_UWP)
+	Output::Close(port->host_stream);
+	port->host_stream = nullptr;
+#endif
 
 	if (port->stream != nullptr) {
 		SDL_DestroyAudioStream(port->stream);
@@ -377,9 +394,27 @@ const void* Audio::PrepareOutputBuffer(const PortOut& port, const void* data,
 bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float gain) {
 	EXIT_IF(port == nullptr);
 
+#if defined(KYTY_PLATFORM_UWP)
+	if (port->host_stream == nullptr || data == nullptr) {
+		return false;
+	}
+	const auto queued_size = [port] { return static_cast<int>(Output::QueuedSize(port->host_stream)); };
+	const auto clear_queue = [port] { Output::Clear(port->host_stream); };
+	const auto put_data    = [port](const void* samples, uint32_t size) { return Output::Queue(port->host_stream, samples, size); };
+#else
 	if (port->stream == nullptr || data == nullptr) {
 		return false;
 	}
+	const auto queued_size = [port] { return SDL_GetAudioStreamQueued(port->stream); };
+	const auto clear_queue = [port] { SDL_ClearAudioStream(port->stream); };
+	const auto put_data    = [port](const void* samples, uint32_t size) {
+		if (!SDL_PutAudioStreamData(port->stream, samples, static_cast<int>(size))) {
+			LOGF("AudioOut: SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
+			return false;
+		}
+		return true;
+	};
+#endif
 
 	std::vector<uint8_t> prepared_buffer;
 	const void*          prepared_data   = PrepareOutputBuffer(*port, data, &prepared_buffer, gain);
@@ -396,23 +431,22 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 		        : 2u;
 		min_queued_size           = prepared_size * std::clamp(buffers, 2u, 16u);
 		const auto wait_start      = LibKernel::KernelGetProcessTime();
-		auto       queued          = SDL_GetAudioStreamQueued(port->stream);
+		auto       queued          = queued_size();
 		while (queued > static_cast<int>(min_queued_size)) {
 			if (LibKernel::KernelGetProcessTime() - wait_start > 200000) {
-				SDL_ClearAudioStream(port->stream);
+				clear_queue();
 				port->queue_primed = false;
 				break;
 			}
 			Common::Thread::SleepMicro(1000);
-			queued = SDL_GetAudioStreamQueued(port->stream);
+			queued = queued_size();
 		}
 		if (queued < static_cast<int>(prepared_size)) {
 			port->queue_primed = false;
 		}
 	}
 
-	if (!SDL_PutAudioStreamData(port->stream, prepared_data, static_cast<int>(prepared_size))) {
-		LOGF("AudioOut: SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
+	if (!put_data(prepared_data, prepared_size)) {
 		port->queue_primed = false;
 		return false;
 	}
@@ -421,7 +455,7 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 		port->clock = {};
 	}
 	if (blocking && !port->queue_primed &&
-	    SDL_GetAudioStreamQueued(port->stream) >= static_cast<int>(min_queued_size)) {
+	    queued_size() >= static_cast<int>(min_queued_size)) {
 		port->queue_primed = true;
 	}
 
@@ -504,7 +538,11 @@ bool Audio::AudioOutHasDevice(Id handle) {
 	Common::LockGuard lock(m_mutex);
 
 	return (handle.GetId() >= 0 && handle.GetId() < OUT_PORTS_MAX &&
+#if defined(KYTY_PLATFORM_UWP)
+	        m_out_ports[handle.GetId()].used && m_out_ports[handle.GetId()].host_stream != nullptr);
+#else
 	        m_out_ports[handle.GetId()].used && m_out_ports[handle.GetId()].stream != nullptr);
+#endif
 }
 
 bool Audio::AudioOutGetStatus(Id handle, int* type, int* channels_num) {
