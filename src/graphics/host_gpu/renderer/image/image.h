@@ -170,13 +170,6 @@ private:
 	bool              m_buffer_modified  = false;
 };
 
-namespace ImageOps {
-
-void                                 Validate(const ImageInfo& info);
-[[nodiscard]] Prospero::BufferFormat RenderTargetTransferFormat(uint32_t bytes_per_element);
-
-} // namespace ImageOps
-
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_IMAGE_H_

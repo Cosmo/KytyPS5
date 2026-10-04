@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/host_gpu/renderArgs.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
@@ -34,45 +35,6 @@ struct DrawRenderState;
 class RenderContext;
 class CommandScheduler;
 struct RenderExecutorTestAccess;
-
-enum class CommandBufferDebugOp : uint32_t {
-	DispatchDirect,
-	DrawIndex,
-	DrawIndexAuto,
-	EopWrite,
-	EopInterrupt,
-	EopWriteBack,
-	EopFlip,
-	EopWriteBackFlip,
-	EopOnlyFlip,
-	DispatchIndirect,
-	Unknown,
-};
-
-enum class DrawOffsetSource : uint8_t {
-	DrawState,
-	IndirectArgs,
-};
-
-struct DrawIndexArgs {
-	uint32_t         index_count                = 0;
-	const void*      index_addr                 = nullptr;
-	uint32_t         instance_count             = 0;
-	uint32_t         index_type_and_size        = 0;
-	int32_t          base_vertex                = 0;
-	uint32_t         first_instance             = 0;
-	DrawOffsetSource offset_source              = DrawOffsetSource::DrawState;
-	uint32_t         render_target_slice_offset = 0;
-};
-
-struct DrawAutoArgs {
-	uint32_t         vertex_count               = 0;
-	uint32_t         instance_count             = 0;
-	uint32_t         first_vertex               = 0;
-	uint32_t         first_instance             = 0;
-	DrawOffsetSource offset_source              = DrawOffsetSource::DrawState;
-	uint32_t         render_target_slice_offset = 0;
-};
 
 struct SubmitInfo {
 	static constexpr uint32_t MaxSemaphores = 3;
@@ -112,6 +74,8 @@ public:
 	                  uint32_t arg2 = 0, uint32_t arg3 = 0, uint64_t arg4 = 0);
 	void BeginRendering(const RenderState& state) const;
 	void EndRendering() const;
+	// Makes all prior writes visible to all later reads and writes.
+	void GlobalMemoryBarrier() const;
 
 	[[nodiscard]] vk::CommandBuffer Handle() const;
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }

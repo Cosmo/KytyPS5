@@ -1174,7 +1174,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer.IsInvalid());
-	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
+	EXIT_IF(args.offset_source == DrawOffsetSource::DrawRegisters && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
@@ -1285,7 +1285,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer.IsInvalid());
-	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
+	EXIT_IF(args.offset_source == DrawOffsetSource::DrawRegisters && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();

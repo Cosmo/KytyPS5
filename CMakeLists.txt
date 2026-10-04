@@ -250,6 +250,35 @@ file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
 	"${KYTY_SOURCE_DIR}/loader/*.h"
 )
 
+# Host GPU backend. Each build contains exactly one renderer; shared code reaches it through graphics/host_gpu/gpuBackend.h. The UWP app uses D3D12.
+set(KYTY_GPU_BACKEND "Vulkan" CACHE STRING "Host GPU backend: Vulkan or D3D12")
+set_property(CACHE KYTY_GPU_BACKEND PROPERTY STRINGS Vulkan D3D12)
+if(KYTY_BUILD_UWP)
+	set(KYTY_GPU_BACKEND "D3D12" CACHE STRING "Host GPU backend: Vulkan or D3D12" FORCE)
+endif()
+if(KYTY_GPU_BACKEND STREQUAL "D3D12")
+	if(NOT WIN32)
+		message(FATAL_ERROR "KYTY_GPU_BACKEND=D3D12 requires Windows")
+	endif()
+	add_compile_definitions(KYTY_GPU_BACKEND_D3D12=1)
+	# The Vulkan renderer and the presentation code that is Vulkan only are replaced by host_gpu/d3d12. The guest image validation and the end-of-pipe sync
+	# logic are shared by both backends.
+	list(FILTER kyty_emulator_src EXCLUDE REGEX "/graphics/host_gpu/renderer/")
+	list(FILTER kyty_emulator_src EXCLUDE REGEX "/graphics/host_gpu/vma\\.cpp$")
+	list(FILTER kyty_emulator_src EXCLUDE REGEX "/graphics/presentation/(renderDoc|systemOverlay)\\.cpp$")
+	list(FILTER kyty_emulator_src EXCLUDE REGEX "/graphics/presentation/window/(vulkanWindow|swapchain)\\.cpp$")
+	file(GLOB kyty_d3d12_src CONFIGURE_DEPENDS
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/d3d12/*.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/d3d12/*.h"
+	)
+	list(APPEND kyty_emulator_src ${kyty_d3d12_src}
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/sync.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/imageInfo.cpp"
+	)
+elseif(NOT KYTY_GPU_BACKEND STREQUAL "Vulkan")
+	message(FATAL_ERROR "Unknown KYTY_GPU_BACKEND '${KYTY_GPU_BACKEND}'")
+endif()
+
 find_program(KYTY_GLSLANG_VALIDATOR glslangValidator REQUIRED)
 set(gpu_tiler_shader_dir "${KYTY_SOURCE_DIR}/graphics/host_gpu/shaders")
 set(gpu_tiler_generated_dir "${PROJECT_BINARY_DIR}/gpu_tiler_shaders")
@@ -339,6 +368,10 @@ if (KYTY_CLANG_CL)
 endif()
 
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus)
+
+if(KYTY_GPU_BACKEND STREQUAL "D3D12")
+	list(APPEND kyty_emulator_link_libraries d3d12 dxgi dxguid)
+endif()
 
 # Linux system libraries.
 if(LINUX)

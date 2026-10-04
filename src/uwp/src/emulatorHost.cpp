@@ -1,7 +1,15 @@
 #include "emulatorHost.h"
 
+#include "common/archive.h"
+#include "common/systemInfo.h"
+#include "common/threads.h"
+#include "common/virtualMemory.h"
+#include "emulator.h"
+#include "fileAccess.h"
 #include "gameLibrary.h"
+#include "gameSource.h"
 #include "log.h"
+#include "settings.h"
 
 #include <windows.h>
 
@@ -9,22 +17,31 @@
 #include <windows.ui.xaml.media.dxinterop.h>
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Storage.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 #include <winrt/Windows.UI.Xaml.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <future>
 
-// This build has no emulator: starting a game only shows its launch screen. The rest of the host (the panel, the exit and restart logic, the
-// frame statistics the overlay shows) is what the emulator needs, so that the app around it does not change when the emulator is linked in.
+#include <io.h>
 
 namespace Kyty::Uwp {
 
 namespace core = winrt::Windows::UI::Core;
 
+namespace {
+
+bool IsAmdCpu() {
+	return Common::GetSystemInfo().ProcessorName.find("AMD") != std::string::npos;
+}
+
+} // namespace
+
 std::optional<ShaderStatistics> CurrentShaderStatistics() {
-	return std::nullopt; // no renderer in this build
+	return std::nullopt; // the renderer makes no shaders yet
 }
 
 EmulatorHost& EmulatorHost::Get() {
@@ -39,8 +56,60 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 	m_start_ms   = GetTickCount64();
 	m_panel      = winrt::make_agile(panel);
 	m_dispatcher = core::CoreWindow::GetForCurrentThread().Dispatcher();
-	Log("start requested for %ls\n", game_dir.c_str());
-	Log("this build has no emulator: the game does not run; View + Menu opens the game menu\n");
+	Log("starting %ls\n", game_dir.c_str());
+
+	// The emulator writes its data folders (_SaveData, ...) relative to the working directory, and its messages to stdout and stderr: both go to
+	// LocalState.
+	const std::wstring local_state(winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path());
+	if (!SetCurrentDirectoryW(local_state.c_str())) {
+		Log("could not change to LocalState: %lu\n", GetLastError());
+	}
+	if (_wfreopen((local_state + L"\\kyty-emulator.txt").c_str(), L"w", stdout) != nullptr) {
+		setvbuf(stdout, nullptr, _IONBF, 0);
+		_dup2(_fileno(stdout), _fileno(stderr));
+	}
+	m_log_generation++;
+
+	// The game's patches, as with the desktop launcher's _Patches folder: LocalState\_Patches\<title ID>.json.
+	std::filesystem::path game_patch;
+	if (const auto title_id = ReadGame(game_dir).title_id; !title_id.empty()) {
+		const auto patch = std::filesystem::path(local_state) / L"_Patches" / (winrt::to_hstring(title_id) + L".json").c_str();
+		if (IsFile(patch)) {
+			game_patch = patch;
+			Log("patches: %ls\n", patch.c_str());
+		}
+	}
+
+	// The settings page's choices (LocalState\kyty-uwp.json).
+	const auto settings = LoadSettings();
+
+	m_thread = std::thread([this, game_dir = std::move(game_dir), game_patch, settings] {
+		// The emulator's main thread: the window logic runs here, not on the UI thread.
+		Common::VirtualMemory::Init();
+		Common::InitializeThreads();
+
+		Emulator::RunOptions options;
+		options.app0_dir   = IsArchivePath(game_dir) ? Common::MakeArchivePath(game_dir) : game_dir;
+		options.elf        = "/app0/eboot.bin";
+		options.game_patch = game_patch;
+		auto& config         = options.config;
+		config.screen_width  = settings.screen_width;
+		config.screen_height = settings.screen_height;
+		config.present_mode  = settings.vsync ? Config::PresentMode::Fifo : Config::PresentMode::Mailbox;
+		if (!settings.user_name.empty() && settings.user_name.size() <= Config::MAX_USER_NAME_LENGTH) {
+			config.user_name = settings.user_name;
+		}
+		config.console_language          = std::min(settings.console_language, Config::MAX_CONSOLE_LANGUAGE);
+		config.vulkan_validation_enabled = settings.debug_layer; // the D3D12 debug layer
+		config.printf_direction          = settings.game_output ? Config::LogDirection::Console : Config::LogDirection::Silent;
+		// The guest uses instructions only AMD CPUs have: on another CPU the emulator patches them (its --amd-cpu option).
+		config.amd_cpu_enabled = !IsAmdCpu();
+		Emulator::Run(options);
+
+		Log("emulator stopped\n");
+		(void)m_dispatcher.RunAsync(core::CoreDispatcherPriority::Normal, [] { winrt::Windows::UI::Xaml::Application::Current().Exit(); });
+	});
+	m_thread.detach();
 }
 
 void EmulatorHost::SetPanelSize(float width, float height, float scale_x, float scale_y) {
@@ -62,8 +131,6 @@ void EmulatorHost::RequestExit() {
 void EmulatorHost::QuitToLibrary() {
 	m_restart = true;
 	RequestExit();
-	// No emulator thread to wind down: restart into the launcher right away (off the UI thread, the call waits for the restart).
-	std::thread([this] { Finish(); }).detach();
 }
 
 void EmulatorHost::Finish() {
