@@ -95,6 +95,11 @@ void WindowRun() {
 	// The app's UI thread runs the window; this thread only waits for the end of the game.
 	while (!Kyty::Uwp::EmulatorHost::Get().WaitForExit(250)) {
 	}
+	// What the renderer made is kept for the next start (a dirty build, or a change since the last save, saves nothing).
+	if (g_window->render_context != nullptr) {
+		Common::LockGuard lock(g_window->render_context->GetMutex());
+		g_window->render_context->GetPipelineCache().Save();
+	}
 	// Back to the launcher if the player asked for it (the process ends right after).
 	Kyty::Uwp::EmulatorHost::Get().Finish();
 }
