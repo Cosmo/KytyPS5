@@ -169,6 +169,13 @@ FormatInfo GetFormatInfo(vk::Format format) {
 }
 
 DXGI_FORMAT VertexFormat(vk::Format format) {
+	// The 96-bit formats are no textures (see GetFormatInfo) but fine as vertex input.
+	switch (format) {
+		case vk::Format::eR32G32B32Uint: return DXGI_FORMAT_R32G32B32_UINT;
+		case vk::Format::eR32G32B32Sint: return DXGI_FORMAT_R32G32B32_SINT;
+		case vk::Format::eR32G32B32Sfloat: return DXGI_FORMAT_R32G32B32_FLOAT;
+		default: break;
+	}
 	const auto info = GetFormatInfo(format);
 	// Swizzled formats rely on view component mappings, which vertex fetch lacks.
 	return info.Supported() && info.Writable() && !info.IsDepth() && vk::blockExtent(format)[0] == 1

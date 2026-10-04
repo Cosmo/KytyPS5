@@ -64,6 +64,8 @@ struct GraphicContext {
 	bool                debug_layer = false;
 	// The device runs mesh shaders (tier 1); they also need shader model 6.5 (DxilCompiler).
 	bool                mesh_shaders = false;
+	// 64-bit image atomics (shaderImageInt64Atomics in Vulkan) are not available in D3D12 at feature level 11_0.
+	bool                shader_image_int64_atomics_enabled = false;
 
 	uint32_t screen_width  = 0;
 	uint32_t screen_height = 0;

@@ -284,6 +284,13 @@ if(KYTY_GPU_BACKEND STREQUAL "D3D12")
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/imageView.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/tileDispatch.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/debug.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/colorRenderTarget.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/depthRenderTarget.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/renderCompute.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/renderDraw.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineState.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineCacheFile.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/descriptors.cpp"
 		"${KYTY_THIRD_PARTY_DIR}/D3D12MemoryAllocator/src/D3D12MemAlloc.cpp"
 	)
 elseif(NOT KYTY_GPU_BACKEND STREQUAL "Vulkan")

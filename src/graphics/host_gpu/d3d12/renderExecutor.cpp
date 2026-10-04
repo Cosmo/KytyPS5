@@ -2,78 +2,307 @@
 #include "common/logging/log.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/d3d12/gpuTrace.h"
 #include "graphics/host_gpu/d3d12/renderContext.h"
-#include "graphics/host_gpu/drawState.h"
+#include "graphics/shader/recompiler/ir/ShaderIR.h"
 
-#include <atomic>
-#include <cinttypes>
+#include <algorithm>
+#include <cstring>
+#include <optional>
+#include <span>
+#include <vector>
 
 namespace Libs::Graphics {
 
-// Milestone 2: guest work is translated to DXIL and compute pipelines are created; nothing is
-// recorded or executed yet.
+namespace IR = ShaderRecompiler::IR;
 
-void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
-                                    uint32_t thread_group_x, uint32_t thread_group_y,
-                                    uint32_t thread_group_z, uint32_t mode) {
-	EXIT_IF(buffer.IsInvalid());
-	m_statistics.dispatches++;
-	auto&       shaders = buffer.GetShaders();
-	const auto& cs      = shaders.GetCs();
-	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DispatchDirect), submit_id,
-	                    thread_group_x, thread_group_y, thread_group_z, mode,
-	                    cs.cs_regs.data_addr);
-	if (thread_group_x == 0 || thread_group_y == 0 || thread_group_z == 0 ||
-	    cs.cs_regs.data_addr == 0) {
+namespace {
+
+// A raw view of `binding`: a UAV, or an SRV used in `read_state` for buffers the shader only
+// reads.
+void WriteRawView(ID3D12Device* device, const BufferBinding& binding,
+                  D3D12_CPU_DESCRIPTOR_HANDLE destination, CommandBuffer& command,
+                  std::optional<D3D12_RESOURCE_STATES> read_state = {}) {
+	EXIT_IF(binding.buffer == nullptr || binding.offset % 16 != 0);
+	const auto& buffer    = *binding.buffer;
+	const auto  available = buffer.Size() - binding.offset;
+	const auto  size = binding.size == UINT64_MAX ? available : std::min(binding.size, available);
+	const auto  first = binding.offset / 4;
+	const auto  count = static_cast<UINT>((size + 3) / 4);
+	if (read_state) {
+		buffer.Use(command, *read_state);
+		D3D12_SHADER_RESOURCE_VIEW_DESC view {};
+		view.Format                  = DXGI_FORMAT_R32_TYPELESS;
+		view.ViewDimension           = D3D12_SRV_DIMENSION_BUFFER;
+		view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		view.Buffer.FirstElement     = first;
+		view.Buffer.NumElements      = count;
+		view.Buffer.Flags            = D3D12_BUFFER_SRV_FLAG_RAW;
+		device->CreateShaderResourceView(buffer.Resource(), &view, destination);
 		return;
 	}
-
-	constexpr uint32_t DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS = 1u << 5u;
-	Common::LockGuard  lock(m_context.GetMutex());
-	ShaderComputeInputInfo input_info {};
-	input_info.dispatch_thread_dimensions = (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
-	auto&       cache  = m_context.GetPipelineCache();
-	const auto& shader = cache.GetComputeProgram(cs, buffer.GetRegisters().GetShaderRegisters(),
-	                                             input_info);
-	(void)cache.GetComputePipeline(input_info, shader);
+	buffer.Use(command, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	D3D12_UNORDERED_ACCESS_VIEW_DESC view {};
+	view.Format              = DXGI_FORMAT_R32_TYPELESS;
+	view.ViewDimension       = D3D12_UAV_DIMENSION_BUFFER;
+	view.Buffer.FirstElement = first;
+	view.Buffer.NumElements  = count;
+	view.Buffer.Flags        = D3D12_BUFFER_UAV_FLAG_RAW;
+	device->CreateUnorderedAccessView(buffer.Resource(), nullptr, &view, destination);
 }
 
-static void PrepareGraphicsPrograms(RenderContext& context, CommandBuffer& buffer) {
-	const auto& registers = buffer.GetRegisters();
-	const auto& shaders   = buffer.GetShaders();
-	if (!DrawHasValidVertexShader(shaders)) {
+[[nodiscard]] uint32_t DescriptorCount(const std::vector<RootLayout::Range>& ranges) {
+	uint32_t count = 0;
+	for (const auto& range: ranges) {
+		count += range.count;
+	}
+	return count;
+}
+
+} // namespace
+
+void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
+                                    const PipelineCache::Pipeline&     pipeline,
+                                    std::span<PreparedBindings* const> stages,
+                                    std::span<const uint8_t>           runtime_data) {
+	auto*       list   = buffer.Handle();
+	auto*       device = m_context.GetGraphics().device;
+	auto&       heap   = m_context.GetDescriptorHeap();
+	auto&       cache  = m_context.GetTextureCache();
+	const auto& layout = pipeline.layout;
+
+	const auto      view_count    = DescriptorCount(layout.views);
+	const auto      sampler_count = DescriptorCount(layout.samplers);
+	DescriptorRange views {};
+	DescriptorRange samplers {};
+	if (view_count != 0) {
+		views = heap.AllocateViews(buffer, view_count);
+	}
+	if (sampler_count != 0) {
+		samplers = heap.AllocateSamplers(buffer, sampler_count);
+	}
+	uint32_t     view_index    = 0;
+	uint32_t     sampler_index = 0;
+	IR::PushData push {};
+	bool         has_push = false;
+
+	const auto sampled_state =
+	    graphics ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+	                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+	             : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	// Descriptors follow the root layout: stages in order, their bindings in declaration order.
+	for (auto* prepared: stages) {
+		EXIT_IF(prepared == nullptr || prepared->runtime == nullptr || !*prepared->runtime);
+		const auto& program = *prepared->runtime->program;
+		auto&       images  = prepared->images;
+		for (auto& binding: images) {
+			auto&       image   = cache.GetImage(binding.image_id);
+			const auto& view    = binding.desc.view_info;
+			const bool  storage = binding.desc.type == TextureCache::BindingType::Storage;
+			const auto  state   = storage                             ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+			                      : binding.image_id == m_read_only_depth ? ReadOnlyDepthState
+			                                                            : sampled_state;
+			image.Use(buffer, state,
+			          ImageSubresourceRange {view.base_level, view.level_count, view.base_layer,
+			                                 view.layer_count},
+			          binding.image_view);
+		}
+
+		std::vector<uint32_t> occurrences(images.size(), 0);
+		for (const auto& binding: program.bindings.descriptors) {
+			if (binding.kind == IR::DescriptorBindingKind::Samplers) {
+				// The comparison range holds the same samplers; the guest sets compare modes.
+				const uint32_t ranges = HasComparisonSamplers(program, binding) ? 2 : 1;
+				for (uint32_t range = 0; range < ranges; range++) {
+					for (const auto resource: binding.resources) {
+						device->CopyDescriptorsSimple(1, samplers.Cpu(sampler_index++),
+						                              prepared->samplers.at(resource),
+						                              D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+					}
+				}
+				continue;
+			}
+			if (IR::ImageBindingResourceClass(binding.kind) != IR::ImageResourceClass::None) {
+				for (const auto resource: binding.resources) {
+					auto&      texture = images.at(resource);
+					auto&      image   = cache.GetImage(texture.image_id);
+					const auto element = occurrences.at(resource)++;
+					const auto view    = texture.mip_views.empty() ? texture.image_view
+					                                               : texture.mip_views.at(element);
+					const auto source = texture.desc.type == TextureCache::BindingType::Storage
+					                        ? image.UnorderedAccessView(view)
+					                        : image.ShaderResourceView(view);
+					device->CopyDescriptorsSimple(1, views.Cpu(view_index++), source,
+					                              D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+				}
+				continue;
+			}
+			const auto read_state = IR::IsReadOnlyBufferBinding(program.info, binding)
+			                            ? std::optional {sampled_state}
+			                            : std::nullopt;
+			switch (binding.kind) {
+				case IR::DescriptorBindingKind::Buffers:
+					for (const auto resource: binding.resources) {
+						WriteRawView(device, prepared->buffers.at(resource), views.Cpu(view_index++),
+						             buffer, read_state);
+					}
+					break;
+				case IR::DescriptorBindingKind::Gds:
+					WriteRawView(device, prepared->gds, views.Cpu(view_index++), buffer);
+					break;
+				case IR::DescriptorBindingKind::BdaPagetable:
+				case IR::DescriptorBindingKind::FaultBuffer: {
+					auto*       cache = &m_context.GetBufferCache();
+					const auto* table = binding.kind == IR::DescriptorBindingKind::BdaPagetable
+					                        ? cache->GetBdaPageTableBuffer()
+					                        : cache->GetFaultBuffer();
+					WriteRawView(device, {table->Handle(), 0, table->Size()},
+					             views.Cpu(view_index++), buffer);
+					break;
+				}
+				case IR::DescriptorBindingKind::FlattenedSrt:
+					WriteRawView(device, prepared->flattened_srt, views.Cpu(view_index++), buffer,
+					             read_state);
+					break;
+				case IR::DescriptorBindingKind::ShaderData:
+					WriteRawView(device, prepared->shader_data_buffer, views.Cpu(view_index++),
+					             buffer, read_state);
+					break;
+				default:
+					EXIT("D3D12: unsupported descriptor binding kind %u\n",
+					     static_cast<uint32_t>(binding.kind));
+			}
+		}
+		if (program.bindings.UsesPushData()) {
+			std::ranges::copy(prepared->shader_data,
+			                  push.dwords.begin() + program.bindings.push_data_start_dword);
+		}
+		has_push = has_push || UsesPushConstants(program);
+	}
+	EXIT_IF(view_index != view_count || sampler_index != sampler_count ||
+	        has_push != layout.push_constants);
+
+	UINT parameter = 0;
+	if (graphics) {
+		list->SetGraphicsRootSignature(pipeline.root_signature);
+	} else {
+		list->SetComputeRootSignature(pipeline.root_signature);
+	}
+	if (layout.push_constants) {
+		if (graphics) {
+			list->SetGraphicsRoot32BitConstants(parameter++, IR::PushData::DwordCount,
+			                                    push.dwords.data(), 0);
+		} else {
+			list->SetComputeRoot32BitConstants(parameter++, IR::PushData::DwordCount,
+			                                   push.dwords.data(), 0);
+		}
+	}
+	if (layout.runtime_data) {
+		EXIT_IF(runtime_data.empty() || runtime_data.size() > D3D12::RuntimeDataDwords * 4);
+		uint32_t constants[D3D12::RuntimeDataDwords] {};
+		std::memcpy(constants, runtime_data.data(), runtime_data.size());
+		if (graphics) {
+			list->SetGraphicsRoot32BitConstants(parameter++, D3D12::RuntimeDataDwords, constants, 0);
+		} else {
+			list->SetComputeRoot32BitConstants(parameter++, D3D12::RuntimeDataDwords, constants, 0);
+		}
+	}
+	for (const auto& [count, table]: {std::pair {view_count, views.gpu},
+	                                  std::pair {sampler_count, samplers.gpu}}) {
+		if (count == 0) {
+			continue;
+		}
+		if (graphics) {
+			list->SetGraphicsRootDescriptorTable(parameter++, table);
+		} else {
+			list->SetComputeRootDescriptorTable(parameter++, table);
+		}
+	}
+}
+
+void RenderExecutor::RecordDispatch(CommandBuffer& buffer, const PipelineCache::Pipeline& pipeline,
+                                    PreparedBindings&             bindings,
+                                    const ShaderComputeInputInfo& /*input_info*/,
+                                    uint32_t groups_x, uint32_t groups_y, uint32_t groups_z) {
+	if (pipeline.pipeline == nullptr) {
+		return; // could not be made (reported where it failed)
+	}
+	m_statistics.dispatches++;
+	// spirv_to_dxil's compute runtime data: group counts, padding, base group.
+	const uint32_t    runtime[7] = {groups_x, groups_y, groups_z, 0, 0, 0, 0};
+	PreparedBindings* stage      = &bindings;
+	CommitBindings(buffer, false, pipeline, {&stage, 1},
+	               {reinterpret_cast<const uint8_t*>(runtime), sizeof(runtime)});
+	auto&      trace = D3D12::GetGpuTrace();
+	const auto slot  = trace.Begin(buffer.Handle(), &pipeline.trace);
+	buffer.Handle()->SetPipelineState(pipeline.pipeline);
+	buffer.Handle()->Dispatch(groups_x, groups_y, groups_z);
+	trace.End(buffer.Handle(), slot);
+	// Later work reads what this dispatch wrote.
+	buffer.GlobalMemoryBarrier();
+}
+
+ID3D12CommandSignature* RenderExecutor::DispatchSignature(const PipelineCache::Pipeline& pipeline) {
+	const bool constants = pipeline.layout.runtime_data;
+	auto&      signature = m_dispatch_signatures[constants ? pipeline.root_signature : nullptr];
+	if (signature == nullptr) {
+		D3D12_INDIRECT_ARGUMENT_DESC arguments[2] {};
+		UINT                         count = 0;
+		if (constants) {
+			arguments[count].Type                             = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+			arguments[count].Constant.RootParameterIndex      = pipeline.layout.RuntimeDataParameter();
+			arguments[count].Constant.DestOffsetIn32BitValues = 0;
+			arguments[count].Constant.Num32BitValuesToSet     = 3;
+			count++;
+		}
+		arguments[count++].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+		D3D12_COMMAND_SIGNATURE_DESC desc {};
+		desc.ByteStride       = count * 3 * sizeof(uint32_t);
+		desc.NumArgumentDescs = count;
+		desc.pArgumentDescs   = arguments;
+		D3D12::Check(m_context.GetGraphics().device->CreateCommandSignature(
+		                 &desc, constants ? pipeline.root_signature : nullptr,
+		                 IID_PPV_ARGS(&signature)),
+		             "create dispatch command signature");
+	}
+	return signature.Get();
+}
+
+void RenderExecutor::RecordDispatchIndirect(CommandBuffer&                 buffer,
+                                            const PipelineCache::Pipeline& pipeline,
+                                            PreparedBindings&              bindings,
+                                            const ShaderComputeInputInfo& /*input_info*/,
+                                            const Buffer& args, uint64_t args_offset) {
+	if (pipeline.pipeline == nullptr) {
 		return;
 	}
-	const bool pixel_active  = DrawHasActivePixelShader(registers, shaders);
-	const auto export_mapping = RenderTargetExportMapping(registers);
-
-	Common::LockGuard                    lock(context.GetMutex());
-	std::array<ShaderVertexInputInfo, 3> vertex_info {};
-	ShaderPixelInputInfo                 pixel_info {};
-	(void)context.GetPipelineCache().GetGraphicsPrograms(
-	    shaders.GetVs(), shaders.GetPs(), registers.GetShaderRegisters(), registers,
-	    buffer.GetUserConfig(), export_mapping, pixel_active, vertex_info, pixel_info);
-}
-
-void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer, uint64_t args_addr, uint32_t /*mode*/) {
-	// The group counts are read from guest memory when a dispatch is recorded (a later milestone); until then the shader is not translated.
 	m_statistics.dispatches++;
-	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DispatchIndirect), submit_id, 0, 0, 0, 0, args_addr);
-}
+	// spirv_to_dxil reads the group counts from its runtime data. The command signature sets
+	// them from arguments that precede the dispatch's own: [x y z][x y z].
+	constexpr uint64_t CountsSize = 3 * sizeof(uint32_t);
+	const bool         constants  = pipeline.layout.runtime_data;
+	if (m_indirect_args == nullptr) {
+		m_indirect_args = std::make_unique<Buffer>(m_context.GetGraphics(),
+		                                           m_context.GetCommandScheduler(),
+		                                           MemoryUsage::DeviceLocal, 0, 2 * CountsSize);
+	}
+	m_indirect_args->CopyFrom(buffer, args, args_offset, 0, CountsSize);
+	if (constants) {
+		m_indirect_args->CopyFrom(buffer, args, args_offset, CountsSize, CountsSize);
+	}
+	m_indirect_args->Use(buffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 
-void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
-                               const DrawIndexArgs& args) {
-	m_statistics.draws++;
-	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DrawIndex), submit_id,
-	                    args.index_count, args.instance_count);
-	PrepareGraphicsPrograms(m_context, buffer);
-}
-
-void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args) {
-	m_statistics.draws++;
-	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DrawIndexAuto), submit_id,
-	                    args.vertex_count, args.instance_count);
-	PrepareGraphicsPrograms(m_context, buffer);
+	const uint32_t    runtime[7] = {}; // the counts come from the arguments
+	PreparedBindings* stage      = &bindings;
+	CommitBindings(buffer, false, pipeline, {&stage, 1},
+	               {reinterpret_cast<const uint8_t*>(runtime), sizeof(runtime)});
+	auto&      trace = D3D12::GetGpuTrace();
+	const auto slot  = trace.Begin(buffer.Handle(), &pipeline.trace);
+	buffer.Handle()->SetPipelineState(pipeline.pipeline);
+	buffer.Handle()->ExecuteIndirect(DispatchSignature(pipeline), 1, m_indirect_args->Resource(), 0,
+	                                 nullptr, 0);
+	trace.End(buffer.Handle(), slot);
+	buffer.GlobalMemoryBarrier();
 }
 
 } // namespace Libs::Graphics
