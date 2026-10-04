@@ -3,6 +3,7 @@
 
 #include "common/common.h"
 #include "graphics/guest_gpu/tile.h"
+#include "graphics/host_gpu/renderer/image/tileDispatch.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
@@ -18,26 +19,6 @@ class Image;
 class StreamBuffer;
 struct GraphicContext;
 struct TileManagerTestAccess;
-
-struct GpuTileInfo {
-	TileBlockFamily family              = TileBlockFamily::Count;
-	uint32_t        bytes_per_element   = 0;
-	uint64_t        linear_offset       = 0;
-	uint64_t        linear_size         = 0;
-	uint64_t        tiled_offset        = 0;
-	uint64_t        tiled_size          = 0;
-	uint64_t        linear_slice_stride = 0;
-	uint32_t        width               = 0;
-	uint32_t        height              = 0;
-	uint32_t        depth               = 1;
-	uint32_t        pitch               = 0;
-	uint32_t        tail_x              = 0;
-	uint32_t        tail_y              = 0;
-	bool            tail                = false;
-	uint32_t        tiled_width         = 0;
-	uint32_t        tiled_height        = 0;
-	uint32_t        surface_z           = 0;
-};
 
 class TileManager final {
 public:
@@ -81,26 +62,9 @@ public:
 private:
 	friend struct TileManagerTestAccess;
 
-	static constexpr uint32_t FamilyCount          = static_cast<uint32_t>(TileBlockFamily::Count);
-	static constexpr uint32_t BytesPerElementCount = 5;
-	static constexpr uint32_t DirectionCount       = 2;
-	static constexpr uint32_t PipelineCount = FamilyCount * BytesPerElementCount * DirectionCount;
+	static constexpr uint32_t PipelineCount = TileShaders::PipelineCount;
 
-	struct Push {
-		uint32_t src_base;
-		uint32_t dst_base;
-		uint32_t width;
-		uint32_t height;
-		uint32_t depth;
-		uint32_t surface_z;
-		uint32_t pitch_bytes;
-		uint32_t slice_bytes;
-		uint32_t blocks_per_row;
-		uint32_t blocks_per_slice;
-		uint32_t tail_x;
-		uint32_t tail_y;
-		uint32_t tail;
-	};
+	using Push = TileShaderParams;
 	struct Dispatch {
 		Push     push {};
 		uint32_t pipeline_slot = 0;

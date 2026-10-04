@@ -1,4 +1,6 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 
 #include "common/assert.h"
@@ -26,6 +28,20 @@
 #include <utility>
 
 namespace Libs::Graphics::ShaderRecompiler {
+
+namespace {
+
+HostShaderFeatures g_host_shader_features;
+
+} // namespace
+
+void SetHostShaderFeatures(const HostShaderFeatures& features) {
+	g_host_shader_features = features;
+}
+
+const HostShaderFeatures& GetHostShaderFeatures() {
+	return g_host_shader_features;
+}
 
 namespace {
 

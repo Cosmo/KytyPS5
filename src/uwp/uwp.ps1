@@ -97,6 +97,9 @@ function Invoke-Configure {
     if (-not $env:KYTY_WINPTHREAD_DLL -or -not (Test-Path $env:KYTY_WINPTHREAD_DLL)) {
         Fail '$env:KYTY_WINPTHREAD_DLL must name the UCRT build of libwinpthread-1.dll (see README.md)'
     }
+    if (-not $env:KYTY_SPIRV_TO_DXIL_ROOT -or -not (Test-Path (Join-Path $env:KYTY_SPIRV_TO_DXIL_ROOT 'include\spirv_to_dxil.h'))) {
+        Fail '$env:KYTY_SPIRV_TO_DXIL_ROOT must name a spirv_to_dxil build (include, lib, bin; see README.md)'
+    }
     Enter-DevShell
     # Sources of the libraries upstream fetches, when they are kept in $env:KYTY_DEPS\<name>-src instead of being downloaded.
     $fetched = foreach ($name in 'opus', 'xbyak', 'zydis', 'zstd') {
@@ -105,6 +108,7 @@ function Invoke-Configure {
     cmake -S $root -B $BuildDir -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl `
         -DCMAKE_CXX_COMPILER=clang-cl -DKYTY_BUILD_UWP=ON "-DKYTY_WINUI_ROOT=$WinUIRoot" "-DKYTY_WEBVIEW2_ROOT=$WebView2Root" `
         "-DKYTY_WINPTHREAD_DLL=$env:KYTY_WINPTHREAD_DLL" $fetched `
+        "-DKYTY_SPIRV_TO_DXIL_ROOT=$env:KYTY_SPIRV_TO_DXIL_ROOT" `
         $(if ($env:KYTY_UWP_PACKAGE_NAME) { "-DKYTY_UWP_PACKAGE_NAME=$env:KYTY_UWP_PACKAGE_NAME" }) `
         $(if ($env:KYTY_UWP_DISPLAY_NAME) { "-DKYTY_UWP_DISPLAY_NAME=$env:KYTY_UWP_DISPLAY_NAME" }) `
         $(if ($env:KYTY_UWP_PROTOCOL) { "-DKYTY_UWP_PROTOCOL=$env:KYTY_UWP_PROTOCOL" }) `

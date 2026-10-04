@@ -41,6 +41,10 @@ struct RenderDepthInfo {
 	[[nodiscard]] vk::ImageAspectFlags AttachmentWriteAspects() const;
 };
 
+// Decides whether binding `depth` starts with a clear: a clear draw, or HTile metadata left
+// cleared by an earlier fast clear, which binding consumes.
+void ConsumeDepthClearState(TextureCache& cache, RenderDepthInfo& depth);
+
 inline vk::ImageAspectFlags DepthFeedbackAspects(vk::ImageAspectFlags draw_writes,
                                                  const ImageViewInfo& target,
                                                  const ImageViewInfo& sampled) {

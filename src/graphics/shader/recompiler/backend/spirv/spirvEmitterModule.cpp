@@ -229,9 +229,21 @@ void DefineDescriptors(EmitterState& state) {
 			const auto variable =
 			    state.builder.DefineGlobalVariable(TypePointer(state, storage, type), storage);
 			state.builder.AddName(variable, name);
+#if defined(KYTY_GPU_BACKEND_D3D12)
+			// D3D12 register ranges of different arrays must not overlap: give each binding its
+			// own set, which spirv_to_dxil maps to its own register space.
+			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationDescriptorSet,
+			                            IR::NativeBinding(state.program.stage, binding.kind));
+			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBinding, 0);
+			// Read-only buffers become SRVs, whose states combine with index/vertex buffer use.
+			if (IR::IsReadOnlyBufferBinding(state.program.info, binding)) {
+				state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationNonWritable);
+			}
+#else
 			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationDescriptorSet, 0);
 			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBinding,
 			                            IR::NativeBinding(state.program.stage, binding.kind));
+#endif
 			return variable;
 		};
 		const auto ArrayType = [&](uint32_t type) {

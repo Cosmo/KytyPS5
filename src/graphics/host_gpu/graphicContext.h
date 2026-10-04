@@ -45,6 +45,8 @@ struct GraphicContext {
 	uint32_t                           queue_family = static_cast<uint32_t>(-1);
 	vk::Queue                          queue        = nullptr;
 
+	[[nodiscard]] const char* DeviceName() const { return physical_device_properties.deviceName.data(); }
+
 	[[nodiscard]] const vk::PhysicalDeviceProperties& GetPhysicalDeviceProperties() const {
 		return physical_device_properties;
 	}
@@ -98,6 +100,19 @@ struct GraphicContext {
 	[[nodiscard]] bool CanReportMemoryUsage() const noexcept { return memory_budget_ext_enabled; }
 	[[nodiscard]] uint64_t GetDeviceMemoryUsage() const;
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
+	[[nodiscard]] uint64_t UniformBufferAlignment() const noexcept {
+		return physical_device_properties.limits.minUniformBufferOffsetAlignment;
+	}
+	[[nodiscard]] uint64_t MaxStorageBufferRange() const noexcept {
+		return physical_device_properties.limits.maxStorageBufferRange;
+	}
+	[[nodiscard]] bool SupportsDepthTargetFormat(vk::Format format, uint32_t samples) const;
+	[[nodiscard]] bool SupportsSampleRateShading() const noexcept { return sample_rate_shading_enabled; }
+	[[nodiscard]] bool SupportsSamplesWithoutAttachments(uint32_t samples) const noexcept {
+		return (static_cast<uint32_t>(
+		            physical_device_properties.limits.framebufferNoAttachmentsSampleCounts) &
+		        samples) != 0;
+	}
 	[[nodiscard]] bool     CreateImage(const vk::ImageCreateInfo& info, VulkanImage& image);
 	void                   DeleteImage(VulkanImage& image);
 

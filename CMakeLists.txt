@@ -274,6 +274,24 @@ if(KYTY_GPU_BACKEND STREQUAL "D3D12")
 	list(APPEND kyty_emulator_src ${kyty_d3d12_src}
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/sync.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/imageInfo.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/textureCommon.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/blendMapping.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/bufferCache.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/streamBuffer.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/samplerInfo.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/textureCache.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/imageCommon.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/imageView.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/tileDispatch.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/debug.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/colorRenderTarget.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/depthRenderTarget.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/renderCompute.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/renderDraw.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineState.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineCacheFile.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/descriptors.cpp"
+		"${KYTY_THIRD_PARTY_DIR}/D3D12MemoryAllocator/src/D3D12MemAlloc.cpp"
 	)
 elseif(NOT KYTY_GPU_BACKEND STREQUAL "Vulkan")
 	message(FATAL_ERROR "Unknown KYTY_GPU_BACKEND '${KYTY_GPU_BACKEND}'")
@@ -295,6 +313,7 @@ set(gpu_tiler_shader_names
 	promote_d16
 	demote_d16
 	swap_bgra16
+	copy_rows
 )
 file(GLOB gpu_tiler_shader_includes CONFIGURE_DEPENDS "${gpu_tiler_shader_dir}/gpu_tiler_*.inc")
 foreach(shader_name IN LISTS gpu_tiler_shader_names)
@@ -336,6 +355,7 @@ set(gpu_blit_generated_dir "${PROJECT_BINARY_DIR}/gpu_blit_shaders")
 set(gpu_blit_shader_sources
 	"${gpu_tiler_shader_dir}/gpu_blit_fs_triangle.vert"
 	"${gpu_tiler_shader_dir}/gpu_blit_color_to_ms_depth.frag"
+	"${gpu_tiler_shader_dir}/gpu_blit_present.frag"
 	"${gpu_tiler_shader_dir}/gpu_video_out_overlay.frag"
 )
 foreach(shader_source IN LISTS gpu_blit_shader_sources)
@@ -370,7 +390,17 @@ endif()
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus)
 
 if(KYTY_GPU_BACKEND STREQUAL "D3D12")
-	list(APPEND kyty_emulator_link_libraries d3d12 dxgi dxguid)
+	# Mesa's spirv_to_dxil (shader translation only) and the Windows SDK DXIL validator, which
+	# signs the translated shaders. See docs/d3d12-backend.md for building spirv_to_dxil.
+	set(KYTY_SPIRV_TO_DXIL_ROOT "" CACHE PATH "Directory with include/, lib/ and bin/ of spirv_to_dxil")
+	if(NOT EXISTS "${KYTY_SPIRV_TO_DXIL_ROOT}/include/spirv_to_dxil.h")
+		message(FATAL_ERROR "Set KYTY_SPIRV_TO_DXIL_ROOT to a spirv_to_dxil build (see docs/d3d12-backend.md)")
+	endif()
+	find_file(KYTY_DXIL_DLL dxil.dll PATHS "$ENV{WindowsSdkVerBinPath}/x64" NO_DEFAULT_PATH)
+	if(NOT KYTY_DXIL_DLL)
+		message(FATAL_ERROR "dxil.dll not found; configure from a Visual Studio developer shell or set KYTY_DXIL_DLL")
+	endif()
+	list(APPEND kyty_emulator_link_libraries d3d12 dxgi dxguid "${KYTY_SPIRV_TO_DXIL_ROOT}/lib/spirv_to_dxil.lib")
 endif()
 
 # Linux system libraries.
@@ -390,6 +420,12 @@ set(inc_headers
 	${KYTY_THIRD_PARTY_DIR}/renderdoc
 	${KYTY_THIRD_PARTY_DIR}/stb
 )
+
+if(KYTY_GPU_BACKEND STREQUAL "D3D12")
+	list(APPEND inc_headers "${KYTY_SPIRV_TO_DXIL_ROOT}/include" "${KYTY_THIRD_PARTY_DIR}/D3D12MemoryAllocator/include")
+	# Third-party source: its warnings are not ours to fix.
+	set_source_files_properties("${KYTY_THIRD_PARTY_DIR}/D3D12MemoryAllocator/src/D3D12MemAlloc.cpp" PROPERTIES COMPILE_OPTIONS "-w")
+endif()
 
 if (KYTY_CLANG_CL)
 	list(APPEND kyty_emulator_link_libraries winpthread)
@@ -803,6 +839,11 @@ elseif(WIN32 OR LINUX)
 	# LINK_FLAGS is a space-delimited string: a -Map path containing spaces would
 	# be split into bogus arguments, so pass it as a discrete link option instead.
 	target_link_options(kyty_emulator PRIVATE "-Wl,-Map=${KYTY_EMULATOR_MAP_LINK_PATH}")
+endif()
+if(KYTY_GPU_BACKEND STREQUAL "D3D12")
+	add_custom_command(TARGET kyty_emulator POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_SPIRV_TO_DXIL_ROOT}/bin/spirv_to_dxil.dll" $<TARGET_FILE_DIR:kyty_emulator>/spirv_to_dxil.dll
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_DXIL_DLL}" $<TARGET_FILE_DIR:kyty_emulator>/dxil.dll)
 endif()
 
 if(LINUX)

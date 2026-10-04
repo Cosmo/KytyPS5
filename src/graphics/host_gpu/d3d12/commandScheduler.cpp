@@ -5,32 +5,58 @@
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
 
+#include <cstdlib>
 #include <optional>
 
 namespace Libs::Graphics {
 
 static thread_local CommandScheduler* g_deferred_callback_scheduler = nullptr;
 
-CommandBuffer::CommandBuffer(CommandScheduler& scheduler): m_context(scheduler.Context()), m_graphics(scheduler.Graphics()) {}
+namespace {
+
+// KYTY_DRAW_FLUSH_INTERVAL=N overrides CompleteDraw()'s periodic flush interval (0 disables),
+// matching the Vulkan scheduler.
+uint32_t DrawFlushInterval() {
+	static const uint32_t interval = [] {
+		const char* v = std::getenv("KYTY_DRAW_FLUSH_INTERVAL");
+		if (v == nullptr) {
+			return 256u;
+		}
+		return static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+	}();
+	return interval;
+}
+
+} // namespace
+
+CommandBuffer::CommandBuffer(CommandScheduler& scheduler)
+    : m_context(scheduler.Context()), m_graphics(scheduler.Graphics()) {}
 
 ID3D12GraphicsCommandList* CommandBuffer::Handle() const {
 	EXIT_IF(IsInvalid());
 	return m_list;
 }
 
-void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint64_t arg4) {
+ID3D12GraphicsCommandList6* CommandBuffer::MeshHandle() const {
+	EXIT_IF(IsInvalid() || m_mesh_list == nullptr);
+	return m_mesh_list;
+}
+
+void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0, uint32_t arg1,
+                                 uint32_t arg2, uint32_t arg3, uint64_t arg4) {
 	m_debug = {op, submit_id, {arg0, arg1, arg2, arg3}, arg4};
 }
 
 void CommandBuffer::GlobalMemoryBarrier() const {
-	// Resource state transitions order everything else; a UAV barrier without a resource orders the writes of all unordered-access resources.
+	// Resource state transitions order everything else; a null UAV barrier orders UAV writes.
 	D3D12_RESOURCE_BARRIER barrier {};
 	barrier.Type          = D3D12_RESOURCE_BARRIER_TYPE_UAV;
 	barrier.UAV.pResource = nullptr;
 	Handle()->ResourceBarrier(1, &barrier);
 }
 
-CommandScheduler::AllocatorPool::AllocatorPool(GraphicContext& graphics, MasterSemaphore& master): m_graphics(graphics), m_master(master) {}
+CommandScheduler::AllocatorPool::AllocatorPool(GraphicContext& graphics, MasterSemaphore& master)
+    : m_graphics(graphics), m_master(master) {}
 
 CommandScheduler::AllocatorPool::~AllocatorPool() {
 	for (auto* allocator: m_allocators) {
@@ -41,12 +67,12 @@ CommandScheduler::AllocatorPool::~AllocatorPool() {
 ID3D12CommandAllocator* CommandScheduler::AllocatorPool::Commit() {
 	auto       gpu_tick = m_master.KnownGpuTick();
 	const auto search   = [this, &gpu_tick](size_t begin, size_t end) -> std::optional<size_t> {
-        for (size_t index = begin; index < end; ++index) {
-            if (gpu_tick >= m_ticks[index]) {
-                return index;
-            }
-        }
-        return std::nullopt;
+		for (size_t index = begin; index < end; ++index) {
+			if (gpu_tick >= m_ticks[index]) {
+				return index;
+			}
+		}
+		return std::nullopt;
 	};
 
 	auto found = search(m_hint, m_ticks.size());
@@ -62,7 +88,9 @@ ID3D12CommandAllocator* CommandScheduler::AllocatorPool::Commit() {
 		D3D12::Check(m_allocators[*found]->Reset(), "reset command allocator");
 	} else {
 		ID3D12CommandAllocator* allocator = nullptr;
-		D3D12::Check(m_graphics.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "CreateCommandAllocator");
+		D3D12::Check(m_graphics.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+		                                                       IID_PPV_ARGS(&allocator)),
+		             "CreateCommandAllocator");
 		m_allocators.push_back(allocator);
 		m_ticks.push_back(0);
 		found = m_allocators.size() - 1;
@@ -77,11 +105,15 @@ bool CommandScheduler::InDeferredOperation() noexcept {
 }
 
 CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graphics)
-    : m_master(graphics), m_context(context), m_graphics(graphics), m_allocators(graphics, m_master), m_command(*this),
+    : m_master(graphics), m_context(context), m_graphics(graphics),
+      m_allocators(graphics, m_master), m_command(*this),
       m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {}
 
 CommandScheduler::~CommandScheduler() {
 	Shutdown();
+	if (m_mesh_list != nullptr) {
+		m_mesh_list->Release();
+	}
 	if (m_list != nullptr) {
 		m_list->Release();
 	}
@@ -94,12 +126,13 @@ void CommandScheduler::Shutdown() {
 			return;
 		}
 		if (g_deferred_callback_scheduler == this) {
-			// A priority callback cannot join its own runner; the owning thread finishes the shutdown.
+			// A priority callback cannot join its own runner; the owning thread finishes shutdown.
 			EXIT_IF(m_operation_state == OperationState::Open);
 			return;
 		}
 		if (m_operation_state == OperationState::Draining) {
-			m_operation_available.wait(lock, [this] { return m_operation_state == OperationState::Closed; });
+			m_operation_available.wait(
+			    lock, [this] { return m_operation_state == OperationState::Closed; });
 			return;
 		}
 		m_operation_state = OperationState::Draining;
@@ -117,13 +150,15 @@ void CommandScheduler::Shutdown() {
 	}
 	{
 		std::lock_guard lock(m_operation_mutex);
-		EXIT_IF(!m_pending_operations.empty() || !m_priority_operations.empty() || m_priority_active);
+		EXIT_IF(!m_pending_operations.empty() || !m_priority_operations.empty() ||
+		        m_priority_active);
 		m_operation_state = OperationState::Closed;
 	}
 	m_operation_available.notify_all();
 }
 
-void CommandScheduler::Begin(HW::Context& registers, HW::UserConfig& user_config, HW::Shader& shaders) {
+void CommandScheduler::Begin(HW::Context& registers, HW::UserConfig& user_config,
+                             HW::Shader& shaders) {
 	{
 		std::lock_guard lock(m_operation_mutex);
 		EXIT_IF(m_operation_state != OperationState::Open);
@@ -137,6 +172,33 @@ void CommandScheduler::Begin(HW::Context& registers, HW::UserConfig& user_config
 void CommandScheduler::Flush() {
 	Submit();
 	BeginNext();
+}
+
+void CommandScheduler::CompleteReleaseMemWrite() {
+	constexpr uint32_t WritesPerSubmission = 32;
+	if (++m_recorded_release_mem_writes < WritesPerSubmission) {
+		return;
+	}
+	CheckActive();
+	Flush();
+}
+
+void CommandScheduler::CompleteReleaseMemInterrupt() {
+	constexpr uint32_t InterruptsPerSubmission = 8;
+	if (++m_recorded_release_mem_interrupts < InterruptsPerSubmission) {
+		return;
+	}
+	CheckActive();
+	Flush();
+}
+
+void CommandScheduler::CompleteDraw() {
+	const auto interval = DrawFlushInterval();
+	if (interval == 0u || ++m_recorded_draws < interval) {
+		return;
+	}
+	CheckActive();
+	Flush();
 }
 
 void CommandScheduler::FlushAndWait() {
@@ -177,7 +239,8 @@ void CommandScheduler::PopPendingOperations() {
 		PendingOperation operation;
 		{
 			std::lock_guard lock(m_operation_mutex);
-			if (m_pending_operations.empty() || !m_master.IsFree(m_pending_operations.front().tick)) {
+			if (m_pending_operations.empty() ||
+			    !m_master.IsFree(m_pending_operations.front().tick)) {
 				return;
 			}
 			operation = std::move(m_pending_operations.front());
@@ -201,7 +264,8 @@ void CommandScheduler::DeferOperation(Common::UniqueFunction<void>&& operation) 
 		operation();
 		return;
 	}
-	m_operation_available.wait(lock, [this] { return m_operation_state == OperationState::Closed; });
+	m_operation_available.wait(lock,
+	                           [this] { return m_operation_state == OperationState::Closed; });
 	lock.unlock();
 	operation();
 }
@@ -221,7 +285,8 @@ void CommandScheduler::DeferPriorityOperation(Common::UniqueFunction<void>&& ope
 		operation();
 		return;
 	}
-	m_operation_available.wait(lock, [this] { return m_operation_state == OperationState::Closed; });
+	m_operation_available.wait(lock,
+	                           [this] { return m_operation_state == OperationState::Closed; });
 	lock.unlock();
 	operation();
 }
@@ -231,7 +296,9 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 		PendingOperation operation;
 		{
 			std::unique_lock lock(m_operation_mutex);
-			m_operation_available.wait(lock, [this, &stop] { return stop.stop_requested() || !m_priority_operations.empty(); });
+			m_operation_available.wait(lock, [this, &stop] {
+				return stop.stop_requested() || !m_priority_operations.empty();
+			});
 			if (stop.stop_requested()) {
 				return;
 			}
@@ -256,7 +323,8 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 void CommandScheduler::DrainPriorityOperations() {
 	EXIT_IF(g_deferred_callback_scheduler == this);
 	std::unique_lock lock(m_operation_mutex);
-	m_operation_available.wait(lock, [this] { return m_priority_operations.empty() && !m_priority_active; });
+	m_operation_available.wait(
+	    lock, [this] { return m_priority_operations.empty() && !m_priority_active; });
 }
 
 void CommandScheduler::WaitPriorityOperations(uint64_t tick) {
@@ -264,7 +332,8 @@ void CommandScheduler::WaitPriorityOperations(uint64_t tick) {
 	std::unique_lock lock(m_operation_mutex);
 	m_operation_available.wait(lock, [this, tick] {
 		const bool active_before_or_at = m_priority_active && m_priority_active_tick <= tick;
-		const bool queued_before_or_at = !m_priority_operations.empty() && m_priority_operations.front().tick <= tick;
+		const bool queued_before_or_at =
+		    !m_priority_operations.empty() && m_priority_operations.front().tick <= tick;
 		return !active_before_or_at && !queued_before_or_at;
 	});
 }
@@ -297,11 +366,19 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	EXIT_IF(!m_command.IsInvalid());
 	auto* allocator = m_allocators.Commit();
 	if (m_list == nullptr) {
-		D3D12::Check(m_graphics.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr, IID_PPV_ARGS(&m_list)), "CreateCommandList");
+		D3D12::Check(m_graphics.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+		                                                  allocator, nullptr,
+		                                                  IID_PPV_ARGS(&m_list)),
+		             "CreateCommandList");
+		if (m_graphics.mesh_shaders) {
+			D3D12::Check(m_list->QueryInterface(IID_PPV_ARGS(&m_mesh_list)),
+			             "query ID3D12GraphicsCommandList6");
+		}
 	} else {
 		D3D12::Check(m_list->Reset(allocator, nullptr), "reset command list");
 	}
 	m_command.m_list                  = m_list;
+	m_command.m_mesh_list             = m_mesh_list;
 	m_command.m_contains_encoded_draw = false;
 	return m_command;
 }
@@ -317,10 +394,14 @@ uint64_t CommandScheduler::Submit() {
 		tick                     = m_master.NextTick();
 		ID3D12CommandList* lists = m_list;
 		m_graphics.queue->ExecuteCommandLists(1, &lists);
-		D3D12::Check(m_graphics.queue->Signal(m_master.Handle(), tick), "signal the GPU timeline");
+		D3D12::Check(m_graphics.queue->Signal(m_master.Handle(), tick), "signal GPU timeline");
 	}
 
-	m_command.m_list = nullptr;
+	m_command.m_list                  = nullptr;
+	m_command.m_mesh_list             = nullptr;
+	m_recorded_release_mem_writes     = 0;
+	m_recorded_release_mem_interrupts = 0;
+	m_recorded_draws                  = 0;
 	return tick;
 }
 

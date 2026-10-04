@@ -6,7 +6,7 @@
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/hardwareContext.h"
-#include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/gpuBackend.h"
 
 #include <algorithm>
 #include <array>

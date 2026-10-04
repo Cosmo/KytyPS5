@@ -948,13 +948,10 @@ bool EnsureGuestCommitted(uint64_t vaddr, uint64_t size) {
 }
 
 void RestoreHostProtection(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode old_mode) noexcept {
-#if !defined(KYTY_GPU_BACKEND_D3D12)
-	// Only the Vulkan renderer owns a page manager (page watchers); the D3D12 skeleton has none.
 	if (g_gpu_resources != nullptr) {
 		g_gpu_resources->RestoreHostProtection(vaddr, size, old_mode);
 		return;
 	}
-#endif
 	if (g_guest_address_space != nullptr) {
 		(void)g_guest_address_space->ProtectTransient(vaddr, size, old_mode);
 	}

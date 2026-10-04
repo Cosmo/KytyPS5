@@ -60,7 +60,9 @@ AppSettings LoadSettings() {
 	read("console_language", settings.console_language);
 	read("debug_layer", settings.debug_layer);
 	read("game_output", settings.game_output);
+	read("d3d12_selftest", settings.d3d12_selftest);
 	read("overlay_size", settings.overlay_size);
+	read("xbox_gpu_limits", settings.xbox_gpu_limits);
 	return settings;
 }
 
@@ -83,6 +85,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["console_language"] = settings.console_language;
 	json["debug_layer"]      = settings.debug_layer;
 	json["game_output"]      = settings.game_output;
+	json["d3d12_selftest"]   = settings.d3d12_selftest;
 	json["overlay_size"]     = settings.overlay_size;
 	std::ofstream(SettingsPath(), std::ios::binary | std::ios::trunc) << json.dump(2);
 }

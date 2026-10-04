@@ -5,9 +5,9 @@
 #include "common/profiler.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
-#include "kernel/memory.h"
 
 #include <algorithm>
 #include <array>
@@ -94,20 +94,6 @@ namespace {
 }
 
 } // namespace
-
-vk::ImageAspectFlags Image::FullAspectMask(vk::Format format) noexcept {
-	switch (format) {
-		case vk::Format::eD16Unorm:
-		case vk::Format::eX8D24UnormPack32:
-		case vk::Format::eD32Sfloat: return vk::ImageAspectFlagBits::eDepth;
-		case vk::Format::eS8Uint: return vk::ImageAspectFlagBits::eStencil;
-		case vk::Format::eD16UnormS8Uint:
-		case vk::Format::eD24UnormS8Uint:
-		case vk::Format::eD32SfloatS8Uint:
-			return vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
-		default: return vk::ImageAspectFlagBits::eColor;
-	}
-}
 
 Image::Barriers Image::GetBarriers(vk::ImageLayout                      destination_layout,
                                    vk::AccessFlags2                     destination_access,
@@ -306,28 +292,6 @@ void Image::Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buf
 	command.pipelineBarrier2(dependency);
 }
 
-std::pair<uint32_t, uint32_t> Image::SanitizeCopyLayers(const Image& source,
-                                                        const Image& destination, uint32_t depth) {
-	const auto source_type        = source.backing.image_type;
-	const auto destination_type   = destination.backing.image_type;
-	uint32_t   source_layers      = source.backing.layers;
-	uint32_t   destination_layers = destination.backing.layers;
-	if (source_type == vk::ImageType::e3D) {
-		source_layers = 1;
-	}
-	if (destination_type == vk::ImageType::e3D) {
-		destination_layers = 1;
-	}
-	if (source_type == destination_type) {
-		source_layers = destination_layers = std::min(source_layers, destination_layers);
-	} else if (source_type == vk::ImageType::e2D && destination_type == vk::ImageType::e3D) {
-		source_layers = depth;
-	} else if (source_type == vk::ImageType::e3D && destination_type == vk::ImageType::e2D) {
-		destination_layers = depth;
-	}
-	return {source_layers, destination_layers};
-}
-
 void Image::CopyImage(Image& source) {
 	EXIT_IF(source.backing.samples != backing.samples);
 	m_scheduler.EndRendering();
@@ -439,13 +403,6 @@ void Image::Resolve(Image& source, const ImageSubresourceRange& source_range,
 		command.resolveImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal,
 		                     backing.image, vk::ImageLayout::eTransferDstOptimal, region);
 	}
-}
-
-uint32_t Image::CopyRows(uint64_t row_size, uint32_t rows, uint64_t capacity) noexcept {
-	if (row_size == 0 || rows == 0 || row_size > capacity) {
-		return 0;
-	}
-	return static_cast<uint32_t>(std::min<uint64_t>(rows, capacity / row_size));
 }
 
 void Image::CopyImageWithBuffer(Image& source, Buffer& buffer) {
@@ -619,23 +576,109 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	    info.samples);
 }
 
-uint64_t Image::HashGuestEdges() const {
-	std::array<uint8_t, TRACKER_PAGE_SIZE * 2> bytes {};
-	const auto                                 range = info.data;
-	const uint64_t head_end =
-	    std::min(range.End(), Common::AlignUp(range.address, TRACKER_PAGE_SIZE));
-	const uint64_t tail_begin =
-	    std::max(range.address, Common::AlignDown(range.End(), TRACKER_PAGE_SIZE));
-	const uint64_t head_size    = head_end - range.address;
-	const uint64_t tail_address = tail_begin < head_end ? head_end : tail_begin;
-	const uint64_t tail_size    = range.End() - tail_address;
-	if ((head_size != 0 &&
-	     !LibKernel::Memory::TryReadBacking(range.address, bytes.data(), head_size)) ||
-	    (tail_size != 0 &&
-	     !LibKernel::Memory::TryReadBacking(tail_address, bytes.data() + head_size, tail_size))) {
-		EXIT("Image: failed to hash guest backing\n");
+void Image::CopySubresources(Image& source, const ImageSubresourceRange& range,
+                             std::span<const vk::ImageCopy> regions) {
+	m_scheduler.EndRendering();
+	const auto command = m_scheduler.Current().Handle();
+	source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, range,
+	               command);
+	Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, range,
+	        command);
+	command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal, backing.image,
+	                  vk::ImageLayout::eTransferDstOptimal, static_cast<uint32_t>(regions.size()),
+	                  regions.data());
+}
+
+ImageViewHandle Image::CreateView(const ImageViewInfo& view_info) {
+	const auto& image      = backing;
+	const bool  is_storage = static_cast<bool>(view_info.usage & vk::ImageUsageFlagBits::eStorage);
+	vk::ImageViewUsageCreateInfo usage {};
+	usage.usage = is_storage ? vk::ImageUsageFlagBits::eStorage
+	                         : image.usage & ~vk::ImageUsageFlagBits::eStorage;
+	vk::ImageViewMinLodCreateInfoEXT min_lod {};
+	if (view_info.min_lod != 0) {
+		min_lod.minLod = static_cast<float>(view_info.base_level) +
+		                 static_cast<float>(view_info.min_lod) / 256.0f;
+		usage.pNext    = &min_lod;
 	}
-	return XXH3_64bits(bytes.data(), static_cast<size_t>(head_size + tail_size));
+	vk::ImageViewCreateInfo create {};
+	create.pNext                           = &usage;
+	create.image                           = image.image;
+	create.viewType                        = view_info.type;
+	create.format                          = view_info.format;
+	create.components                      = view_info.mapping;
+	create.subresourceRange.aspectMask     = view_info.aspect;
+	create.subresourceRange.baseMipLevel   = view_info.base_level;
+	create.subresourceRange.levelCount     = view_info.level_count;
+	create.subresourceRange.baseArrayLayer = view_info.base_layer;
+	create.subresourceRange.layerCount     = view_info.layer_count;
+
+	vk::ImageView view   = nullptr;
+	const auto    result = m_graphics.device.createImageView(&create, nullptr, &view);
+	if (result != vk::Result::eSuccess || view == nullptr) {
+		EXIT("failed to create image view: result=%d image_format=%d view_format=%d type=%d "
+		     "aspect=0x%x mip=%u+%u layer=%u+%u usage=0x%x\n",
+		     static_cast<int>(result), static_cast<int>(image.format),
+		     static_cast<int>(view_info.format), static_cast<int>(view_info.type),
+		     static_cast<vk::ImageAspectFlags::MaskType>(view_info.aspect), view_info.base_level,
+		     view_info.level_count, view_info.base_layer, view_info.layer_count,
+		     static_cast<vk::ImageUsageFlags::MaskType>(view_info.usage));
+	}
+	SetVulkanObjectNameF(
+	    m_graphics.device, view,
+	    "Kyty.ImageView[guest=0x{:016x} format={} aspect=0x{:x} mip={}+{} layer={}+{}]",
+	    info.data.address, static_cast<uint32_t>(view_info.format),
+	    static_cast<vk::ImageAspectFlags::MaskType>(view_info.aspect), view_info.base_level,
+	    view_info.level_count, view_info.base_layer, view_info.layer_count);
+	return view;
+}
+
+void Image::Clear(CommandBuffer& command, vk::Format format, const vk::ImageSubresourceRange& range,
+                  const vk::ClearValue& clear, bool full_image) {
+	command.EndRendering();
+	// Transfer clears use the backing format; aliased clears must encode through their view.
+	if (format != backing.format || (info.IsVolume() && !full_image)) {
+		EXIT_NOT_IMPLEMENTED(range.aspectMask != vk::ImageAspectFlagBits::eColor ||
+		                     range.levelCount != 1);
+		ImageViewInfo view {};
+		view.format = format;
+		view.type   = range.layerCount == 1 ? vk::ImageViewType::e2D : vk::ImageViewType::e2DArray;
+		view.base_level  = range.baseMipLevel;
+		view.base_layer  = range.baseArrayLayer;
+		view.layer_count = range.layerCount;
+		view.usage       = vk::ImageUsageFlagBits::eColorAttachment;
+		Transit(vk::ImageLayout::eColorAttachmentOptimal, vk::AccessFlagBits2::eColorAttachmentWrite,
+		        {}, command.Handle());
+		vk::RenderingAttachmentInfo attachment {};
+		attachment.imageView   = FindView(view);
+		attachment.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
+		attachment.loadOp      = vk::AttachmentLoadOp::eClear;
+		attachment.storeOp     = vk::AttachmentStoreOp::eStore;
+		attachment.clearValue  = clear;
+		vk::RenderingInfo rendering {};
+		rendering.renderArea.extent = {std::max(info.extent.width >> range.baseMipLevel, 1u),
+		                               std::max(info.extent.height >> range.baseMipLevel, 1u)};
+		rendering.layerCount           = range.layerCount;
+		rendering.colorAttachmentCount = 1;
+		rendering.pColorAttachments    = &attachment;
+		command.Handle().beginRendering(&rendering);
+		command.Handle().endRendering();
+		return;
+	}
+	Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {},
+	        command.Handle());
+	auto native_range = range;
+	if (info.IsVolume()) {
+		native_range.baseArrayLayer = 0;
+		native_range.layerCount     = 1;
+	}
+	if (range.aspectMask == vk::ImageAspectFlagBits::eColor) {
+		command.Handle().clearColorImage(backing.image, vk::ImageLayout::eTransferDstOptimal,
+		                                 &clear.color, 1, &native_range);
+	} else {
+		command.Handle().clearDepthStencilImage(backing.image, vk::ImageLayout::eTransferDstOptimal,
+		                                        &clear.depthStencil, 1, &native_range);
+	}
 }
 
 Image::~Image() {

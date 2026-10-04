@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include "graphics/host_gpu/gpuBackend.h"
+#include "graphics/host_gpu/renderer/cache/bdaLayout.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 
 #include <algorithm>
@@ -987,10 +988,32 @@ void DefineGetBdaPointer(EmitterState& state) {
 	const auto page64        = Binary(state, spv::OpShiftRightLogical, type, packed,
 	                                  ConstantDeviceAddress(state, BufferCache::CACHING_PAGEBITS));
 	const auto page          = Unary(state, spv::OpUConvert, TypeU32(state), page64);
+	// Two levels (BdaLayout): the directory names the slot of the page's block. Pages past the
+	// guest address space read the zero slot, as they read zeros past the end of a flat table.
+	const auto block     = Binary(state, spv::OpShiftRightLogical, TypeU32(state), page,
+	                              ConstantU32(state, BdaLayout::BLOCK_BITS));
+	const auto in_range  = Binary(state, spv::OpULessThan, TypeBool(state), block,
+	                              ConstantU32(state, static_cast<uint32_t>(BdaLayout::BLOCK_COUNT)));
+	const auto directory = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferU64ElementPointer(state),
+	                          directory, state.bda_pagetable_variable, ConstantU32(state, 0),
+	                          Select(state, TypeU32(state), in_range, block, ConstantU32(state, 0)));
+	const auto slot_value = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, type, slot_value, directory);
+	const auto slot  = Binary(state, spv::OpIAdd, TypeU32(state),
+	                          Unary(state, spv::OpUConvert, TypeU32(state), slot_value),
+	                          ConstantU32(state, static_cast<uint32_t>(BdaLayout::DIRECTORY_SLOTS)));
+	const auto index = Binary(
+	    state, spv::OpBitwiseOr, TypeU32(state),
+	    Binary(state, spv::OpShiftLeftLogical, TypeU32(state),
+	           Select(state, TypeU32(state), in_range, slot, ConstantU32(state, static_cast<uint32_t>(BdaLayout::DIRECTORY_SLOTS))),
+	           ConstantU32(state, BdaLayout::BLOCK_BITS)),
+	    Binary(state, spv::OpBitwiseAnd, TypeU32(state), page,
+	           ConstantU32(state, static_cast<uint32_t>(BdaLayout::BLOCK_ENTRIES - 1))));
 	const auto entry_pointer = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferU64ElementPointer(state),
 	                          entry_pointer, state.bda_pagetable_variable, ConstantU32(state, 0),
-	                          page);
+	                          index);
 	const auto base = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpLoad, type, base, entry_pointer);
 	const auto missing =

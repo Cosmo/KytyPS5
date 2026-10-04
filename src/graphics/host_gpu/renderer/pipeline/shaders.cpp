@@ -6,7 +6,7 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/debug.h"
-#include "graphics/host_gpu/renderer/pipeline/descriptors.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptorCommit.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -24,118 +24,6 @@
 #include <vector>
 
 namespace Libs::Graphics {
-
-// IDK: maybe we can remove it?
-constexpr uint8_t kTemporaryVertexAttribFormat113 =
-    static_cast<uint8_t>(Prospero::VertexAttribFormat::k16_16SInt);
-constexpr uint32_t kTemporaryPs5BufferFormat121 = 121u;
-
-static bool NarrowInputFormat(vk::Format& format, uint32_t& size, uint32_t used_components) {
-	if (used_components == 0 || used_components >= size) {
-		return false;
-	}
-
-	switch (format) {
-		case vk::Format::eR32G32B32A32Sfloat:
-			switch (used_components) {
-				case 1: format = vk::Format::eR32Sfloat; break;
-				case 2: format = vk::Format::eR32G32Sfloat; break;
-				case 3: format = vk::Format::eR32G32B32Sfloat; break;
-				default: return false;
-			}
-			size = used_components;
-			return true;
-		case vk::Format::eR32G32B32Sfloat:
-			switch (used_components) {
-				case 1: format = vk::Format::eR32Sfloat; break;
-				case 2: format = vk::Format::eR32G32Sfloat; break;
-				default: return false;
-			}
-			size = used_components;
-			return true;
-		case vk::Format::eR16G16B16A16Sfloat:
-			switch (used_components) {
-				case 1: format = vk::Format::eR16Sfloat; break;
-				case 2: format = vk::Format::eR16G16Sfloat; break;
-				default: return false;
-			}
-			size = used_components;
-			return true;
-		case vk::Format::eR8G8B8A8Unorm:
-			switch (used_components) {
-				case 1: format = vk::Format::eR8Unorm; break;
-				case 2: format = vk::Format::eR8G8Unorm; break;
-				default: return false;
-			}
-			size = used_components;
-			return true;
-		case vk::Format::eR8G8B8A8Snorm:
-			if (used_components != 2) {
-				return false;
-			}
-			format = vk::Format::eR8G8Snorm;
-			size   = 2;
-			return true;
-		case vk::Format::eR8G8B8A8Uint:
-			switch (used_components) {
-				case 1: format = vk::Format::eR8Uint; break;
-				case 2: format = vk::Format::eR8G8Uint; break;
-				default: return false;
-			}
-			size = used_components;
-			return true;
-		default: break;
-	}
-
-	return false;
-}
-
-static void GetInputFormat(const ShaderBufferResource& res, vk::Format& format, uint32_t& size,
-                           uint32_t used_components) {
-	const auto fmt        = res.Format();
-	const auto raw_format = res.RawFormat();
-	if (raw_format == kTemporaryVertexAttribFormat113) {
-		static bool logged_113 = false;
-		if (!logged_113) {
-			LOGF("InputFormat: temporary: accepting invalid PS5 buffer format 113 as "
-			     "vk::Format::eR32G32B32A32Sfloat\n");
-			logged_113 = true;
-		}
-		format = vk::Format::eR32G32B32A32Sfloat;
-		size   = 4;
-		if (NarrowInputFormat(format, size, used_components)) {
-			LOGF("InputFormat: narrowing fmt=%u to %s for used_components=%u\n", raw_format,
-			     vk::to_string(format).c_str(), used_components);
-		}
-		return;
-	}
-	if (raw_format == kTemporaryPs5BufferFormat121) {
-		static bool logged_121 = false;
-		if (!logged_121) {
-			LOGF("InputFormat: accepting PS5 buffer format 121 as vk::Format::eR16G16Sfloat\n");
-			logged_121 = true;
-		}
-		format = vk::Format::eR16G16Sfloat;
-		size   = 2;
-		return;
-	}
-
-	format = VulkanFormat(fmt);
-	size   = ShaderRecompiler::Format::GetFormatInfo(fmt).component_count;
-	if (format == vk::Format::eUndefined || size == 0) {
-		EXIT("unknown vertex format: fmt = %u\n", raw_format);
-	}
-
-	if (NarrowInputFormat(format, size, used_components)) {
-		static std::atomic<uint64_t> log_count = 0;
-		auto                         log_id    = log_count.fetch_add(1);
-		if (log_id < 32) {
-			LOGF("VertexInput: narrowed vertex format to %" PRIu32
-			     " component(s) for shader fetch\n",
-			     used_components);
-		}
-	}
-}
 
 static vk::BlendFactor GetBlendFactor(uint32_t factor, bool remap_source_alpha) {
 	switch (static_cast<Prospero::BlendFactor>(factor)) {

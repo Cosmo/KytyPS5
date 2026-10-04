@@ -4,7 +4,7 @@
 #include "common/assert.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/gpu_format.h"
-#include "graphics/host_gpu/renderer/image/tiler.h"
+#include "graphics/host_gpu/renderer/image/tileDispatch.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shader.h"
 

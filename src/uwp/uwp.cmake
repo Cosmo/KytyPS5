@@ -76,6 +76,7 @@ add_custom_target(kyty_uwp_layout ALL
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:kyty_uwp> "${KYTY_UWP_LAYOUT}/"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/uwp/AppxManifest.xml" "${KYTY_UWP_LAYOUT}/"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_WINPTHREAD_DLL}" "${KYTY_UWP_LAYOUT}/"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_SPIRV_TO_DXIL_ROOT}/bin/spirv_to_dxil.dll" "${KYTY_DXIL_DLL}" "${KYTY_UWP_LAYOUT}/"
 	COMMAND ${CMAKE_COMMAND} -E copy_directory "${KYTY_UWP_DIR}/Assets" "${KYTY_UWP_LAYOUT}/Assets"
 	COMMENT "Updating the UWP package layout")
 add_dependencies(kyty_uwp_layout kyty_uwp)

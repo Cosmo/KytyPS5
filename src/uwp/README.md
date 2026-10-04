@@ -2,7 +2,7 @@
 
 `src/uwp` is the KytyPS5 app for UWP: the launcher, the settings, the game menu, the overlay and the controller input. It runs on Windows with Developer Mode and is packaged for Xbox Dev Mode.
 
-**Status:** the emulator runs in the app with a placeholder renderer: a light game boots on a PC and runs at 60 frames per second, presenting its frames as plain colors (the renderer counts draws and dispatches but draws nothing yet), without sound. Guest memory is still upstream's up-front 13.5 GiB commit, which a Series X cannot do. The launcher shows the games of the game folders and archives as a row of covers over the selected game's background and takes controller, keyboard or mouse input. `kyty://run?title=<title ID>` (or `?game=<folder>`) starts a game.
+**Status:** the emulator runs in the app with a Direct3D 12 renderer (`docs/d3d12-backend.md`): a 3D test game renders its scenes on a PC at 46 to 61 frames per second and on a Series X at about 55, with sound through XAudio2 (not heard yet) and guest memory committed on first touch. Shaders go through Mesa's `spirv_to_dxil`; what the Series X's driver cannot do (mesh shaders, tessellation, 64-bit image atomics) is reported once and skipped. The launcher shows the games of the game folders and archives as a row of covers over the selected game's background and takes controller, keyboard or mouse input. `kyty://run?title=<title ID>` (or `?game=<folder>`) starts a game.
 
 ## Design
 

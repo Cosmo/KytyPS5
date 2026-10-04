@@ -2,18 +2,6 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
-#include "gpu_tiler_shaders/gpu_tiler_demote_d16_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_depth_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_promote_d16_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_prt_3d_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_prt_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_render_target_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_standard256_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_standard4_3d_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_standard4_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_standard64_3d_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_standard64_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_swap_bgra16_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
@@ -30,8 +18,7 @@ namespace Libs::Graphics {
 TileManager::TileManager(GraphicContext& graphics, CommandScheduler& scheduler,
                          StreamBuffer& stream_buffer)
     : m_graphics(graphics), m_scheduler(scheduler), m_stream_buffer(stream_buffer) {
-	static_assert(FamilyCount == 9);
-	static_assert(sizeof(Push) == 52);
+	static_assert(TileShaders::FamilyCount == 9);
 	std::array<vk::DescriptorSetLayoutBinding, 3> bindings {};
 	for (uint32_t index = 0; index < 2; index++) {
 		bindings[index] = {index, vk::DescriptorType::eStorageBuffer, 1,
@@ -91,109 +78,12 @@ TileManager::~TileManager() {
 void TileManager::Prepare(bool tile, uint64_t tiled_capacity, uint64_t linear_capacity,
                           std::span<const GpuTileInfo> infos, uint64_t source_base,
                           uint64_t target_base, std::vector<Dispatch>& dispatches) {
-	EXIT_IF(infos.empty() || tiled_capacity == 0 || linear_capacity == 0);
 	const auto& limits = m_graphics.GetPhysicalDeviceProperties().limits;
-	EXIT_NOT_IMPLEMENTED(tiled_capacity > UINT32_MAX || linear_capacity > UINT32_MAX);
-
-	const auto checked_multiply = [](uint64_t left, uint64_t right, uint64_t& result) {
-		return (left == 0 || right <= UINT64_MAX / left) && (result = left * right, true);
-	};
-	const auto checked_add = [](uint64_t left, uint64_t right, uint64_t& result) {
-		return right <= UINT64_MAX - left && (result = left + right, true);
-	};
-	const auto valid_range = [](uint64_t offset, uint64_t size, uint64_t capacity) {
-		return size != 0 && offset <= capacity && size <= capacity - offset;
-	};
-
 	dispatches.clear();
-	dispatches.reserve(infos.size());
-	for (const auto& info: infos) {
-		TileBlockLayout block {};
-		const uint32_t  tiled_width  = info.tiled_width != 0 ? info.tiled_width : info.pitch;
-		const uint32_t  tiled_height = info.tiled_height != 0 ? info.tiled_height : info.height;
-		const uint64_t  groups_x     = (static_cast<uint64_t>(info.width) + 7u) / 8u;
-		const uint64_t  groups_y     = (static_cast<uint64_t>(info.height) + 7u) / 8u;
-		EXIT_NOT_IMPLEMENTED(
-		    !TileGetBlockLayout(info.family, info.bytes_per_element, block) || info.width == 0 ||
-		    info.height == 0 || info.depth == 0 || info.pitch < info.width ||
-		    groups_x > limits.maxComputeWorkGroupCount[0] ||
-		    groups_y > limits.maxComputeWorkGroupCount[1] ||
-		    info.depth > limits.maxComputeWorkGroupCount[2] ||
-		    (!info.tail && (tiled_width < info.width || tiled_height < info.height)) ||
-		    !valid_range(info.linear_offset, info.linear_size, linear_capacity) ||
-		    !valid_range(info.tiled_offset, info.tiled_size, tiled_capacity) ||
-		    (block.block_depth == 1 && info.depth != 1));
-
-		uint64_t pitch_bytes = 0;
-		EXIT_NOT_IMPLEMENTED(!checked_multiply(info.pitch, info.bytes_per_element, pitch_bytes) ||
-		                     pitch_bytes > UINT32_MAX);
-		uint64_t slice_bytes   = info.linear_slice_stride;
-		uint64_t minimum_slice = 0;
-		EXIT_NOT_IMPLEMENTED(!checked_multiply(pitch_bytes, info.height, minimum_slice));
-		if (slice_bytes == 0) {
-			slice_bytes = minimum_slice;
-		}
-		uint64_t linear_used = 0;
-		uint64_t bytes       = 0;
-		EXIT_NOT_IMPLEMENTED((info.depth > 1 && slice_bytes < minimum_slice) ||
-		                     !checked_multiply(info.depth - 1u, slice_bytes, bytes) ||
-		                     !checked_add(linear_used, bytes, linear_used) ||
-		                     !checked_multiply(info.height - 1u, pitch_bytes, bytes) ||
-		                     !checked_add(linear_used, bytes, linear_used) ||
-		                     !checked_multiply(info.width, info.bytes_per_element, bytes) ||
-		                     !checked_add(linear_used, bytes, linear_used) ||
-		                     linear_used > info.linear_size || slice_bytes > UINT32_MAX);
-
-		const uint64_t columns =
-		    (static_cast<uint64_t>(tiled_width) + block.block_width - 1u) / block.block_width;
-		const uint64_t rows =
-		    (static_cast<uint64_t>(tiled_height) + block.block_height - 1u) / block.block_height;
-		uint64_t blocks_per_slice = 0;
-		EXIT_NOT_IMPLEMENTED(!checked_multiply(columns, rows, blocks_per_slice) ||
-		                     columns > UINT32_MAX || blocks_per_slice > UINT32_MAX);
-		if (info.tail) {
-			EXIT_NOT_IMPLEMENTED(
-			    info.family == TileBlockFamily::Standard256B || info.depth > block.block_depth ||
-			    info.tail_x >= block.block_width || info.width > block.block_width - info.tail_x ||
-			    info.tail_y >= block.block_height ||
-			    info.height > block.block_height - info.tail_y ||
-			    info.tiled_size < block.block_size);
-		} else {
-			const uint64_t slices =
-			    (static_cast<uint64_t>(info.depth) + block.block_depth - 1u) / block.block_depth;
-			uint64_t tiled_used = 0;
-			EXIT_NOT_IMPLEMENTED(!checked_multiply(blocks_per_slice, slices, tiled_used) ||
-			                     !checked_multiply(tiled_used, block.block_size, tiled_used) ||
-			                     tiled_used > info.tiled_size);
-		}
-
-		const uint32_t alignment = std::min(info.bytes_per_element, 4u);
-		EXIT_NOT_IMPLEMENTED(((info.linear_offset | info.tiled_offset | pitch_bytes | slice_bytes) &
-		                      (alignment - 1u)) != 0);
-		const uint64_t src = source_base + (tile ? info.linear_offset : info.tiled_offset);
-		const uint64_t dst = target_base + (tile ? info.tiled_offset : info.linear_offset);
-		EXIT_NOT_IMPLEMENTED(src > UINT32_MAX || dst > UINT32_MAX);
-
-		const uint32_t family_index  = static_cast<uint32_t>(info.family);
-		const uint32_t element_index = std::countr_zero(info.bytes_per_element);
-		EXIT_NOT_IMPLEMENTED(family_index >= FamilyCount || element_index >= BytesPerElementCount);
-		Dispatch dispatch {};
-		dispatch.pipeline_slot =
-		    ((tile ? FamilyCount : 0u) + family_index) * BytesPerElementCount + element_index;
-		dispatch.push.src_base         = static_cast<uint32_t>(src);
-		dispatch.push.dst_base         = static_cast<uint32_t>(dst);
-		dispatch.push.width            = info.width;
-		dispatch.push.height           = info.height;
-		dispatch.push.depth            = info.depth;
-		dispatch.push.surface_z        = info.surface_z;
-		dispatch.push.pitch_bytes      = static_cast<uint32_t>(pitch_bytes);
-		dispatch.push.slice_bytes      = static_cast<uint32_t>(slice_bytes);
-		dispatch.push.blocks_per_row   = static_cast<uint32_t>(columns);
-		dispatch.push.blocks_per_slice = static_cast<uint32_t>(blocks_per_slice);
-		dispatch.push.tail_x           = info.tail_x;
-		dispatch.push.tail_y           = info.tail_y;
-		dispatch.push.tail             = info.tail;
-		dispatches.push_back(dispatch);
+	for (const auto& prepared: TileShaders::Prepare(tile, tiled_capacity, linear_capacity, infos,
+	                                                source_base, target_base,
+	                                                limits.maxComputeWorkGroupCount.data())) {
+		dispatches.push_back({prepared.params, prepared.pipeline_slot, 0});
 	}
 
 	const uint64_t uniform_alignment =
@@ -215,29 +105,11 @@ vk::Pipeline TileManager::GetPipeline(uint32_t slot) {
 	if (m_pipelines[slot] != nullptr) {
 		return m_pipelines[slot];
 	}
-	struct Shader {
-		const uint32_t* code;
-		size_t          words;
-	};
-	static constexpr std::array<Shader, FamilyCount> shaders {{
-	    {GPU_TILER_STANDARD256_SPV, std::size(GPU_TILER_STANDARD256_SPV)},
-	    {GPU_TILER_STANDARD4_SPV, std::size(GPU_TILER_STANDARD4_SPV)},
-	    {GPU_TILER_STANDARD4_3D_SPV, std::size(GPU_TILER_STANDARD4_3D_SPV)},
-	    {GPU_TILER_STANDARD64_SPV, std::size(GPU_TILER_STANDARD64_SPV)},
-	    {GPU_TILER_STANDARD64_3D_SPV, std::size(GPU_TILER_STANDARD64_3D_SPV)},
-	    {GPU_TILER_PRT_SPV, std::size(GPU_TILER_PRT_SPV)},
-	    {GPU_TILER_PRT_3D_SPV, std::size(GPU_TILER_PRT_3D_SPV)},
-	    {GPU_TILER_RENDER_TARGET_SPV, std::size(GPU_TILER_RENDER_TARGET_SPV)},
-	    {GPU_TILER_DEPTH_SPV, std::size(GPU_TILER_DEPTH_SPV)},
-	}};
-	const uint32_t                                   element_index = slot % BytesPerElementCount;
-	const uint32_t                   direction_index = slot / (FamilyCount * BytesPerElementCount);
-	const uint32_t                   family_index    = (slot / BytesPerElementCount) % FamilyCount;
-	const uint32_t                   values[] {1u << element_index, direction_index};
+	const auto                       shader = TileShaders::PipelineShader(slot);
+	const uint32_t                   values[] {shader.element_bytes, shader.tile};
 	const vk::SpecializationMapEntry entries[] {{0, 0, 4}, {1, 4, 4}};
 	const vk::SpecializationInfo     specialization {2, entries, sizeof(values), values};
-	const auto module =
-	    CompileSPV({shaders[family_index].code, shaders[family_index].words}, m_graphics.device);
+	const auto                       module = CompileSPV(shader.spirv, m_graphics.device);
 	vk::PipelineShaderStageCreateInfo stage {};
 	stage.stage               = vk::ShaderStageFlagBits::eCompute;
 	stage.module              = module;
@@ -441,16 +313,9 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 		const uint32_t                   value = d32 ? 1u : 0u;
 		const vk::SpecializationMapEntry entry {0, 0, sizeof(value)};
 		const vk::SpecializationInfo     specialization {1, &entry, sizeof(value), &value};
-		const uint32_t*                  code  = nullptr;
-		size_t                           words = 0;
-		if (direction == D16Direction::Promote) {
-			code  = GPU_TILER_PROMOTE_D16_SPV;
-			words = std::size(GPU_TILER_PROMOTE_D16_SPV);
-		} else {
-			code  = GPU_TILER_DEMOTE_D16_SPV;
-			words = std::size(GPU_TILER_DEMOTE_D16_SPV);
-		}
-		const auto module = CompileSPV({code, words}, m_graphics.device);
+		const auto module = CompileSPV(direction == D16Direction::Promote ? TileShaders::PromoteD16()
+		                                                                  : TileShaders::DemoteD16(),
+		                               m_graphics.device);
 		vk::PipelineShaderStageCreateInfo stage {};
 		stage.stage               = vk::ShaderStageFlagBits::eCompute;
 		stage.module              = module;
@@ -584,7 +449,7 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 
 void TileManager::SwapBgra16(Result input, Result output, uint32_t pixels) {
 	if (m_swap_bgra16 == nullptr) {
-		const auto module = CompileSPV(GPU_TILER_SWAP_BGRA16_SPV, m_graphics.device);
+		const auto module = CompileSPV(TileShaders::SwapBgra16(), m_graphics.device);
 		vk::PipelineShaderStageCreateInfo stage {};
 		stage.stage  = vk::ShaderStageFlagBits::eCompute;
 		stage.module = module;

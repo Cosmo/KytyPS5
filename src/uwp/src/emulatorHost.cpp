@@ -8,6 +8,7 @@
 #include "fileAccess.h"
 #include "gameLibrary.h"
 #include "gameSource.h"
+#include "graphics/host_gpu/d3d12/selfTest.h"
 #include "log.h"
 #include "settings.h"
 
@@ -88,6 +89,10 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		Common::VirtualMemory::Init();
 		Common::InitializeThreads();
 
+		if (settings.d3d12_selftest) {
+			(void)Libs::Graphics::D3D12::RunShaderSelfTest(settings.debug_layer);
+		}
+
 		Emulator::RunOptions options;
 		options.app0_dir   = IsArchivePath(game_dir) ? Common::MakeArchivePath(game_dir) : game_dir;
 		options.elf        = "/app0/eboot.bin";
@@ -104,6 +109,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.printf_direction          = settings.game_output ? Config::LogDirection::Console : Config::LogDirection::Silent;
 		// The guest uses instructions only AMD CPUs have: on another CPU the emulator patches them (its --amd-cpu option).
 		config.amd_cpu_enabled = !IsAmdCpu();
+		config.xbox_gpu_limits_enabled     = settings.xbox_gpu_limits;
 		Emulator::Run(options);
 
 		Log("emulator stopped\n");

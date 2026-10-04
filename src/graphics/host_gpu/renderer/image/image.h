@@ -4,8 +4,14 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/slotVector.h"
-#include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
+
+#if defined(KYTY_GPU_BACKEND_D3D12)
+#include "graphics/host_gpu/d3d12/imageBacking.h"
+#else
+#include "graphics/host_gpu/graphicContext.h"
+#endif
 
 #include <compare>
 #include <limits>
@@ -16,15 +22,20 @@
 
 namespace Libs::Graphics {
 
-class Buffer;
+class CommandBuffer;
 class CommandScheduler;
 struct ImageTestAccess;
+
+#if !defined(KYTY_GPU_BACKEND_D3D12)
+using ImageBacking    = VulkanImage;
+using ImageViewHandle = vk::ImageView;
+#endif
 
 using ImageId = Common::SlotId;
 
 struct CachedImageView {
-	ImageViewInfo info;
-	vk::ImageView view = nullptr;
+	ImageViewInfo   info;
+	ImageViewHandle view {};
 };
 
 struct ImageUsage {
@@ -36,8 +47,10 @@ struct ImageUsage {
 };
 
 struct ImageBinding {
+#if !defined(KYTY_GPU_BACKEND_D3D12)
 	vk::ImageLayout  attachment_layout = vk::ImageLayout::eUndefined;
 	vk::AccessFlags2 attachment_access;
+#endif
 	bool             is_bound      = false;
 	bool             is_target     = false;
 	bool             needs_rebind  = false;
@@ -45,13 +58,46 @@ struct ImageBinding {
 	bool             shader_write  = false;
 };
 
+// A host image holding the contents of a guest image. The cache state and view bookkeeping are
+// shared; the host resource (`backing`) and the GPU operations are implemented per backend.
 class Image final {
 public:
 	Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageInfo& info);
 	~Image();
 	KYTY_CLASS_NO_COPY(Image);
 
-	[[nodiscard]] vk::ImageView FindView(const ImageViewInfo& view_info);
+	[[nodiscard]] ImageViewHandle FindView(const ImageViewInfo& view_info);
+	void Upload(std::span<const vk::BufferImageCopy> copies, BufferHandle buffer, uint64_t offset,
+	            uint64_t size);
+	void Download(std::span<const vk::BufferImageCopy> copies, BufferHandle buffer,
+	              uint64_t offset, uint64_t size);
+	void CopyImage(Image& source);
+	void Resolve(Image& source, const ImageSubresourceRange& source_range,
+	             const ImageSubresourceRange& destination_range);
+	void CopyImageWithBuffer(Image& source, Buffer& buffer);
+	void CopyMip(Image& source, uint32_t mip, uint32_t layer);
+	// Copies `regions` of `source`, which lie within `range` of both images.
+	void CopySubresources(Image& source, const ImageSubresourceRange& range,
+	                      std::span<const vk::ImageCopy> regions);
+	// Clears `range`; a `format` other than the image format clears through an aliasing view.
+	void Clear(CommandBuffer& command, vk::Format format, const vk::ImageSubresourceRange& range,
+	           const vk::ClearValue& clear, bool full_image);
+
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// Records the transition of `range` (all subresources when empty) to `state`, a
+	// D3D12_RESOURCE_STATES value, on the resource `view` reads (the current contents when empty).
+	// A resource of another format family is first brought up to date; a write state makes the
+	// used resource the only current one.
+	void Use(CommandBuffer& command, uint32_t state, std::optional<ImageSubresourceRange> range = {},
+	         std::optional<ImageViewHandle> view = {});
+	[[nodiscard]] ID3D12Resource*             Resource(ImageViewHandle view) const;
+	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE ShaderResourceView(ImageViewHandle view);
+	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE UnorderedAccessView(ImageViewHandle view);
+	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE RenderTargetView(ImageViewHandle view);
+	// A read-only view lets the image be sampled while it is the depth target.
+	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView(ImageViewHandle view,
+	                                                           bool            read_only = false);
+#else
 	using Barriers = std::vector<vk::ImageMemoryBarrier2>;
 	[[nodiscard]] Barriers GetBarriers(vk::ImageLayout                      destination_layout,
 	                                   vk::AccessFlags2                     destination_access,
@@ -59,15 +105,7 @@ public:
 	                                   std::optional<ImageSubresourceRange> range);
 	void Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
 	             std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer);
-	void Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
-	            uint64_t size);
-	void Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
-	              uint64_t size);
-	void CopyImage(Image& source);
-	void Resolve(Image& source, const ImageSubresourceRange& source_range,
-	             const ImageSubresourceRange& destination_range);
-	void CopyImageWithBuffer(Image& source, Buffer& buffer);
-	void CopyMip(Image& source, uint32_t mip, uint32_t layer);
+#endif
 
 	void InvalidateCpuWrite(uint64_t vaddr, uint64_t size) {
 		if (ImageRangeOverlaps(info.data.address, info.data.size, vaddr, size)) {
@@ -139,7 +177,7 @@ public:
 	[[nodiscard]] uint64_t HashGuestEdges() const;
 
 	ImageInfo        info;
-	VulkanImage      backing;
+	ImageBacking     backing;
 	std::vector<CachedImageView> views;
 	ImageUsage       usage;
 	ImageBinding     binding;
@@ -150,9 +188,32 @@ public:
 	ImageId          depth_id {};
 	uint64_t         tick_accessed_last = 0;
 	size_t           lru_id             = 0;
+	// CommandScheduler tick and guest DCC metadata bytes MaterializeDccClear last read back from
+	// the GPU for this image. UINT64_MAX means never. Lets repeated FindImage lookups of the same
+	// metadata within the same still-unsubmitted recording (i.e. many draws to the same bound
+	// render target) skip the synchronous GPU readback after the first one; the guest bytes are
+	// still inspected, so CPU writes and other slices are always seen.
+	uint64_t         dcc_readback_tick    = UINT64_MAX;
+	uint64_t         dcc_readback_address = 0;
+	uint64_t         dcc_readback_size    = 0;
 
 private:
 	friend struct ImageTestAccess;
+
+	// Creates the host view for a validated, normalized description.
+	[[nodiscard]] ImageViewHandle CreateView(const ImageViewInfo& view_info);
+
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	struct BufferRegion;
+	[[nodiscard]] uint32_t ResourceIndex(vk::Format view_format);
+	void                   Transition(CommandBuffer& command, uint32_t resource, uint32_t state,
+	                                  std::optional<ImageSubresourceRange> range);
+	void                   Synchronize(CommandBuffer& command, uint32_t resource);
+	void CopyRegions(CommandBuffer& command, std::span<const vk::BufferImageCopy> copies,
+	                 BufferHandle buffer, bool upload);
+	void CopyContents(CommandBuffer& command, Image& source, uint32_t source_resource,
+	                  uint32_t destination_resource, std::span<const vk::ImageCopy> copies);
+#endif
 
 	[[nodiscard]] static vk::ImageAspectFlags FullAspectMask(vk::Format format) noexcept;
 	[[nodiscard]] static uint32_t             CopyRows(uint64_t row_size, uint32_t rows,

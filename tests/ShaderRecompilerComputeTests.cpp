@@ -14544,6 +14544,7 @@ public:
       cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
                           vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr,
                           1, barriers.data(), 0, nullptr);
+      BdaBlocks blocks;
       for (const auto &[guest_base, backing] : test.bda_mappings) {
         const auto page_offset = guest_base &
                                  (BufferCache::CACHING_PAGESIZE - 1);
@@ -14557,8 +14558,19 @@ public:
         auto address = buffer.device_address + backing - page_offset;
         auto page = BufferCache::PageIndex(guest_base);
         for (uint64_t mapped = 0; mapped < pages; mapped++) {
+          uint64_t directory_value = 0;
+          Require(test.name, "dispatch",
+                  blocks.Allocate(page + mapped, &directory_value),
+                  "BDA test mappings fill the page table");
+          if (directory_value != 0) {
+            cmd.updateBuffer(m_bda_pagetable_buffer.buffer,
+                             ((page + mapped) >> BdaLayout::BLOCK_BITS) *
+                                 sizeof(uint64_t),
+                             sizeof(directory_value), &directory_value);
+          }
           cmd.updateBuffer(m_bda_pagetable_buffer.buffer,
-                           (page + mapped) * sizeof(vk::DeviceAddress),
+                           blocks.EntryElement(page + mapped) *
+                               sizeof(vk::DeviceAddress),
                            sizeof(address), &address);
           address += BufferCache::CACHING_PAGESIZE;
         }
@@ -17354,7 +17366,8 @@ private:
     const auto usage = vk::BufferUsageFlagBits::eStorageBuffer |
                        vk::BufferUsageFlagBits::eTransferDst;
     m_bda_pagetable_buffer =
-        CreateDeviceBuffer(shader_name, BufferCache::BDA_PAGETABLE_SIZE, usage);
+        CreateDeviceBuffer(shader_name,
+                           BdaLayout::TABLE_ELEMENTS * sizeof(vk::DeviceAddress), usage);
     m_fault_buffer = CreateDeviceBuffer(
         shader_name, BufferCache::CACHING_NUMPAGES / 8, usage);
   }

@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
 
 #include "common/assert.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
@@ -218,7 +219,10 @@ void CollectPixelInputs(const Program& program, const ShaderPixelInputInfo* pixe
 		for (const auto& inst: *block) {
 			if (inst.GetOpcode() == ValueOpcode::GetAttribute) {
 				interpolated[inst.Arg(0).U32()] = true;
-			} else if (inst.GetOpcode() == ValueOpcode::GetInterpolationParameter) {
+			} else if (inst.GetOpcode() == ValueOpcode::GetInterpolationParameter &&
+			           GetHostShaderFeatures().barycentrics) {
+				// (Without barycentrics, vertex values come from the interpolated input:
+				// EmitInterpolationParameter.)
 				const auto input = inst.Arg(0).U32();
 				const auto mode  = inst.Arg(2).U32();
 				per_vertex[input] =
@@ -301,10 +305,14 @@ void CollectBuiltinInputs(const Program& program, ShaderInfo& info) {
 				case StageInputKind::SampleId: AddInput(info, kind, 0, 1, "gl_SampleID"); break;
 				case StageInputKind::BaryCoordSmooth:
 				case StageInputKind::BaryCoordSmoothCentroid:
-					AddInput(info, StageInputKind::BaryCoordSmooth, 0, 3, "gl_BaryCoordKHR");
+					if (GetHostShaderFeatures().barycentrics) {
+						AddInput(info, StageInputKind::BaryCoordSmooth, 0, 3, "gl_BaryCoordKHR");
+					}
 					break;
 				case StageInputKind::BaryCoordNoPerspective:
-					AddInput(info, kind, 0, 3, "gl_BaryCoordNoPerspKHR");
+					if (GetHostShaderFeatures().barycentrics) {
+						AddInput(info, kind, 0, 3, "gl_BaryCoordNoPerspKHR");
+					}
 					break;
 				case StageInputKind::WorkgroupId:
 					AddInput(info, kind, 0, 3, "gl_WorkGroupID");

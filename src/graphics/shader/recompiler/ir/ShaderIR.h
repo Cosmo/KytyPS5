@@ -12,6 +12,7 @@
 #include "graphics/shader/recompiler/ir/opcodes/ValueOpcodes.h"
 #include "graphics/shader/shader.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <deque>
@@ -520,6 +521,23 @@ struct CompiledShaderInfo {
 	ShaderInfo                    info;
 	BindingLayout                 bindings;
 };
+
+// Whether a program with `info` only reads the buffers of `binding`. The D3D12 build declares
+// such bindings NonWritable, which makes them shader resource views rather than unordered
+// access views.
+[[nodiscard]] inline bool IsReadOnlyBufferBinding(const ShaderInfo&        info,
+                                                  const DescriptorBinding& binding) {
+	switch (binding.kind) {
+		case DescriptorBindingKind::ShaderData:
+		case DescriptorBindingKind::FlattenedSrt: return true;
+		case DescriptorBindingKind::Buffers:
+			return std::none_of(binding.resources.begin(), binding.resources.end(),
+			                    [&](uint32_t resource) {
+				                    return info.buffers.at(resource).written;
+			                    });
+		default: return false;
+	}
+}
 
 struct UniformFillPlan {
 	UniformFill          fill;
