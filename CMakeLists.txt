@@ -190,6 +190,12 @@ if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0.0)
 endif()
 
 option(KYTY_BUILD_LAUNCHER "Build Qt launcher" ON)
+option(KYTY_BUILD_UWP "Build the UWP app (Windows and Xbox Dev Mode; src/uwp)" OFF)
+if(KYTY_BUILD_UWP)
+	# Everything in this build directory runs inside the UWP app container (src/uwp/README.md).
+	add_compile_definitions(KYTY_PLATFORM_UWP=1)
+	set(KYTY_BUILD_LAUNCHER OFF)
+endif()
 
 config_compiler_and_linker()
 
@@ -794,4 +800,9 @@ if(KYTY_BUILD_LAUNCHER)
 endif()
 if(KYTY_CLANG_CL)
 	install(FILES "${KYTY_THIRD_PARTY_DIR}/winpthread/bin/libwinpthread-1.dll" DESTINATION .)
+endif()
+
+if(KYTY_BUILD_UWP)
+	# Included, not added as a subdirectory: it uses the source lists and settings above as they are.
+	include("${KYTY_SOURCE_DIR}/uwp/uwp.cmake")
 endif()

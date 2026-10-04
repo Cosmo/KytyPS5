@@ -5,6 +5,8 @@
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #include <windows.h> // IWYU pragma: keep
+
+#include "common/platform/sysWindowsVirtual.h"
 #else
 #include <algorithm>
 #include <csignal>
@@ -101,6 +103,12 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
 	info.native_context    = exception->ContextRecord;
 
 	if (exception_record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+		// Pages meant to be writable and executable (UWP app) switch access and retry.
+		const auto access = exception_record->ExceptionInformation[0];
+		if ((access == 1 || access == 8) &&
+		    Common::VirtualMemory::Windows::HandleWriteExecuteFault(exception_record->ExceptionInformation[1], access == 8)) {
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
 		info.type = ExceptionType::AccessViolation;
 		switch (exception_record->ExceptionInformation[0]) {
 			case 0: info.access_violation_type = AccessViolationType::Read; break;

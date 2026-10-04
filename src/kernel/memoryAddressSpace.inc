@@ -43,17 +43,14 @@ public:
 
 	explicit GuestBackingStore(uint64_t size): m_size(size) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		m_handle = CreateFileMappingA(
-		    INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE | SEC_COMMIT,
-		    static_cast<DWORD>(m_size >> 32u), static_cast<DWORD>(m_size & 0xffffffffu), nullptr);
+		m_handle = VirtualMemory::Windows::CreateGuestSection(m_size);
 		if (m_handle == nullptr) {
 			LOGF_COLOR(Log::Color::Red,
 			           "\t direct-memory backing: CreateFileMapping failed: 0x%08" PRIx32 "\n",
 			           static_cast<uint32_t>(GetLastError()));
 			return;
 		}
-		m_backing_base = static_cast<uint8_t*>(
-		    MapViewOfFile(m_handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, m_size));
+		m_backing_base = static_cast<uint8_t*>(VirtualMemory::Windows::MapSectionAlias(m_handle, m_size));
 		if (m_backing_base == nullptr) {
 			LOGF_COLOR(Log::Color::Red,
 			           "\t direct-memory backing: writable alias failed: 0x%08" PRIx32 "\n",
@@ -547,23 +544,8 @@ private:
 	}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	static DWORD GetProtect(VirtualMemory::Mode mode) {
-		switch (mode) {
-			case VirtualMemory::Mode::Read: return PAGE_READONLY;
-			case VirtualMemory::Mode::Write:
-			case VirtualMemory::Mode::ReadWrite: return PAGE_READWRITE;
-			case VirtualMemory::Mode::Execute: return PAGE_EXECUTE;
-			case VirtualMemory::Mode::ExecuteRead: return PAGE_EXECUTE_READ;
-			case VirtualMemory::Mode::ExecuteWrite:
-			case VirtualMemory::Mode::ExecuteReadWrite: return PAGE_EXECUTE_READWRITE;
-			case VirtualMemory::Mode::NoAccess:
-			default: return PAGE_NOACCESS;
-		}
-	}
-
 	static bool ApplyProtection(void* ptr, uint64_t size, VirtualMemory::Mode mode) {
-		DWORD old_protect = 0;
-		return VirtualProtect(ptr, size, GetProtect(mode), &old_protect) != 0;
+		return VirtualMemory::Protect(reinterpret_cast<uint64_t>(ptr), size, mode);
 	}
 
 	static bool SplitPlaceholder(uint64_t vaddr, uint64_t size) {
@@ -576,11 +558,7 @@ private:
 
 	void* ReplacePlaceholderView(uint64_t vaddr, uint64_t size, uint64_t backing_offset,
 	                             VirtualMemory::Mode mode, FailureReason* failure_reason) {
-		const DWORD map_protect =
-		    mode == VirtualMemory::Mode::NoAccess ? PAGE_READWRITE : GetProtect(mode);
-		void* ptr =
-		    MapViewOfFile3(m_handle, GetCurrentProcess(), reinterpret_cast<void*>(vaddr),
-		                   backing_offset, size, MEM_REPLACE_PLACEHOLDER, map_protect, nullptr, 0);
+		void* ptr = VirtualMemory::Windows::MapPlaceholderView(m_handle, vaddr, backing_offset, size, mode);
 		if (ptr == nullptr || reinterpret_cast<uint64_t>(ptr) != vaddr) {
 			if (ptr != nullptr) {
 				UnmapViewOfFile2(GetCurrentProcess(), ptr, MEM_PRESERVE_PLACEHOLDER);
@@ -869,13 +847,7 @@ public:
 		                           : VirtualMemory::Mode::ReadWrite;
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		auto* ptr = VirtualAlloc2(GetCurrentProcess(), reinterpret_cast<void*>(vaddr), size,
-		                          MEM_RESERVE | MEM_COMMIT | MEM_REPLACE_PLACEHOLDER,
-		                          GetProtect(host_mode), nullptr, 0);
-		if (ptr == nullptr || reinterpret_cast<uint64_t>(ptr) != vaddr) {
-			if (ptr != nullptr) {
-				VirtualFree(ptr, 0, MEM_RELEASE);
-			}
+		if (!VirtualMemory::Windows::CommitPlaceholder(vaddr, size, host_mode)) {
 			AddFreeUnlocked(vaddr, size);
 			return false;
 		}
@@ -1080,22 +1052,6 @@ private:
 		return true;
 	}
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	static DWORD GetProtect(VirtualMemory::Mode mode) {
-		switch (mode) {
-			case VirtualMemory::Mode::Read: return PAGE_READONLY;
-			case VirtualMemory::Mode::Write:
-			case VirtualMemory::Mode::ReadWrite: return PAGE_READWRITE;
-			case VirtualMemory::Mode::Execute: return PAGE_EXECUTE;
-			case VirtualMemory::Mode::ExecuteRead: return PAGE_EXECUTE_READ;
-			case VirtualMemory::Mode::ExecuteWrite:
-			case VirtualMemory::Mode::ExecuteReadWrite: return PAGE_EXECUTE_READWRITE;
-			case VirtualMemory::Mode::NoAccess:
-			default: return PAGE_NOACCESS;
-		}
-	}
-#endif
-
 	void ReserveGuestRegions() {
 		const std::array<std::pair<uint64_t, uint64_t>, 3> regions {{
 		    {HOST_SYSTEM_MANAGED_MIN, HOST_SYSTEM_RESERVED_MAX + 1u},
@@ -1105,7 +1061,6 @@ private:
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		constexpr uint64_t MinimumRegionSize = 0x1000000;
-		const auto         process           = GetCurrentProcess();
 		for (const auto& [guest_start, guest_end]: regions) {
 			auto next_addr = guest_start;
 			while (next_addr < guest_end) {
@@ -1123,10 +1078,7 @@ private:
 
 				if (info.State == MEM_FREE && reserve_end > reserve_start &&
 				    reserve_end - reserve_start > MinimumRegionSize) {
-					auto* ptr = VirtualAlloc2(
-					    process, reinterpret_cast<void*>(reserve_start), reserve_end - reserve_start,
-					    MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
-					if (reinterpret_cast<uint64_t>(ptr) != reserve_start) {
+					if (!VirtualMemory::Windows::ReservePlaceholder(reserve_start, reserve_end - reserve_start)) {
 						EXIT("failed to reserve guest address space at 0x%016" PRIx64
 						     ", size 0x%016" PRIx64 "\n",
 						     reserve_start, reserve_end - reserve_start);

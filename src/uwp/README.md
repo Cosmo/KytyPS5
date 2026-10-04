@@ -2,11 +2,11 @@
 
 `src/uwp` is the KytyPS5 app for UWP: the launcher, the settings, the game menu, the overlay and the controller input. It runs on Windows with Developer Mode and is packaged for Xbox Dev Mode.
 
-**Status:** the emulator is not part of this build yet. The launcher shows the games of the game folders and archives as a row of covers over the selected game's background and takes controller, keyboard or mouse input. Starting a game shows its launch screen and the game menu; nothing runs behind it. `kyty://run?title=<title ID>` (or `?game=<folder>`) starts a game the same way.
+**Status:** the emulator is linked into the app but does not run yet (it has no graphics backend for UWP: a game's launch screen shows, nothing runs behind it). The launcher shows the games of the game folders and archives as a row of covers over the selected game's background and takes controller, keyboard or mouse input. Starting a game shows its launch screen and the game menu; nothing runs behind it. `kyty://run?title=<title ID>` (or `?game=<folder>`) starts a game the same way.
 
 ## Design
 
-- **One XAML app.** WinUI 2.8 (the newest UI stack UWP and Xbox run), written in C++/WinRT. The markup is loaded at runtime (`XamlReader`), so there is no XAML compiler and no MSBuild project: the app is a CMake target built with clang-cl. `src/uwp` is its own CMake project (`uwp.ps1 configure`).
+- **One XAML app.** WinUI 2.8 (the newest UI stack UWP and Xbox run), written in C++/WinRT. The markup is loaded at runtime (`XamlReader`), so there is no XAML compiler and no MSBuild project: the app is a CMake target built with clang-cl. `src/uwp/uwp.cmake` is included by the root `CMakeLists.txt` when `KYTY_BUILD_UWP` is on (`uwp.ps1 configure` sets it).
 - **UWP APIs only.** The Xbox has none of the desktop-only DLLs, and an import it cannot resolve stops the app from starting while Windows still runs it. The target links `WindowsApp.lib` and the store C++ runtime ahead of the desktop libraries, and `uwp.ps1 build` checks every import of the package's binaries against `WindowsApp.lib`.
 - **Game library.** The app searches its game folders for games (folders with `eboot.bin`, up to two levels deep, and `.zar` archives in those folders) and indexes them by title ID from `sce_sys\param.json`, in `LocalState\library.json`. Archives are read in place with ZArchive (the same library and patch as upstream, plus `zarchive-open-from-stream.patch`, which lets the app open the file itself: the Xbox allows a USB drive to be read only through the `*FromApp` functions); the covers and backgrounds come out of the archive too. The library is read from that file at start; Y (or F5) in the launcher scans again.
 - **Files** outside the package are opened with the `*FromApp` functions. Game folders must grant UWP apps read access (below), so files are read directly. The `broadFileSystemAccess` capability goes through a file broker at about 20 ms per file call and is not used.
@@ -60,8 +60,9 @@ Requirements:
 
 - Windows SDK 10.0.26100 or newer (C++/WinRT and the packaging tools) and the store C++ runtime from Visual Studio's C++ workload, with clang-cl.
 - The WinUI 2 NuGet package `Microsoft.UI.Xaml` 2.8.7 and its declared dependency `Microsoft.Web.WebView2` 1.0.2849.39, extracted (a `.nupkg` is a zip). Only WebView2's metadata is used, to generate the C++ headers; nothing of it is packaged. `$env:KYTY_DEPS` is the folder that holds `nuget\<package>` (default `build\deps`), or pass `-WinUIRoot` and `-WebView2Root`.
-- The `nlohmann/json` header: the submodule `3rdparty/nlohmann_json`, or another folder in `$env:KYTY_JSON_INCLUDE`.
-- zstd and ZArchive, fetched at configure time like upstream does (`$env:KYTY_ZSTD_SOURCE` and `$env:KYTY_ZARCHIVE_SOURCE` name existing source folders instead; the ZArchive one patched with `3rdparty/patches/zarchive-reader.patch` and `src/uwp/zarchive-open-from-stream.patch`).
+- The submodules (`git submodule update --init`) and glslang's `glslangValidator` on the PATH, as for the desktop build.
+- The UCRT build of `libwinpthread-1.dll` (mingw-w64, MSYS2 package `mingw-w64-ucrt-x86_64-libwinpthread`) in `$env:KYTY_WINPTHREAD_DLL`.
+- The libraries upstream fetches at configure time (opus, xbyak, zydis, zstd, ZArchive): downloaded, or taken from `$env:KYTY_DEPS\<name>-src` (opus, xbyak, zydis, zstd) and `$env:KYTY_ZARCHIVE_SOURCE` (ZArchive, with upstream's patch and `src/uwp/zarchive-open-from-stream.patch` applied) when they exist. `$env:KYTY_FFMPEG_DIR` names an unpacked FFmpeg package (upstream's prebuilt one) to use instead of downloading it.
 - Developer Mode (Settings > System > For developers) to register the unsigned package.
 
 `uwp.ps1` runs each step and builds into `build\uwp` (or `$env:KYTY_UWP_BUILD`):
@@ -78,6 +79,17 @@ src\uwp\uwp.ps1                # build, deploy, run
 The layout is registered in place, so after a rebuild the app runs the new binary without a new deploy (deploy again when the manifest changes).
 
 To install next to another build of the app, give this one other names: `$env:KYTY_UWP_PACKAGE_NAME`, `$env:KYTY_UWP_DISPLAY_NAME` and `$env:KYTY_UWP_PROTOCOL` at configure time (defaults `KytyPS5`, `KytyPS5`, `kyty`).
+
+### The emulator in the app
+
+`KYTY_BUILD_UWP=ON` (set by `uwp.ps1 configure`) builds the whole repository for UWP: the root `CMakeLists.txt` includes `src/uwp/uwp.cmake`, which compiles the emulator's sources into the app (without the SDL window and host input, which the app replaces) next to the launcher. The emulator code is compiled as ordinary desktop code with `KYTY_PLATFORM_UWP` defined; what separates it from a desktop build:
+
+- **Libraries.** SDL has no UWP port and stops its own build at the UWP partition of the headers, so it is built as desktop code with its video, audio, input and other subsystems that need desktop DLLs switched off, and without its dynamic API table (so only the SDL code in use is linked). Tracy runs in its UWP mode (no callstacks, no ETW). imgui's Windows clipboard, IME and shell functions are off. ZArchive gets `zarchive-open-from-stream.patch`. FFmpeg and cpuinfo are used as they are.
+- **Shims.** `src/uwp/src/desktopShims.cpp` defines the few desktop functions the SDL and cpuinfo objects reference (as `__imp_<name>` pointers), so the executable imports none of them.
+- **Files** go through the `*FromApp` functions (`common/platform/sysWindowsFileIO.cpp`), on a thread with a large stack, because the file broker needs more stack than a guest thread has; a `.zar` archive is opened with them as well (`SysFileOpenCStreamR`, `ZArchiveReader::OpenFromStream`).
+- **Memory** goes through `common/platform/sysWindowsVirtual.*`: the `*FromApp` variants of the allocation, protection and section functions; memory is never writable and executable at once (a page meant to be both switches on execute and write faults, `HandleWriteExecuteFault` from the exception handler); guest memory is the same paging-file section as on the desktop.
+- **pthreads** run on winpthread. Upstream's DLL imports `msvcrt.dll`, which UWP apps do not have; the UCRT build of the same library (mingw-w64's, from MSYS2's ucrt64 package) is packaged instead (`$env:KYTY_WINPTHREAD_DLL`).
+- **Imports** of the package's binaries are checked against `WindowsApp.lib` by `uwp.ps1 build`.
 
 ## Xbox
 

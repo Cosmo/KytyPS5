@@ -8,13 +8,25 @@
 #define NOMINMAX
 #endif
 #include <windows.h> // IWYU pragma: keep
+#if defined(KYTY_PLATFORM_UWP)
+#include <fcntl.h>
+#include <fileapifromapp.h>
+#include <io.h>
+#endif
 
+#include "common/assert.h"
 #include "common/platform/sysFileIO.h"
 #include "common/platform/sysTimer.h"
 #include "common/stringUtils.h"
 
+#include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <optional>
 #include <vector>
 
 // NOLINTNEXTLINE(readability-identifier-naming)
@@ -50,6 +62,165 @@ struct sys_file_t {
 constexpr DWORD FILE_SHARE_POSIX = static_cast<DWORD>(FILE_SHARE_READ) |
                                    static_cast<DWORD>(FILE_SHARE_WRITE) |
                                    static_cast<DWORD>(FILE_SHARE_DELETE);
+
+// The UWP app reaches files outside its package only through the *FromApp functions, which apply its file capabilities (removableStorage).
+#if defined(KYTY_PLATFORM_UWP)
+// Where the app has no direct access (the Xbox's USB drives), the *FromApp functions go through the file broker, over COM and RPC, which needs far more
+// stack than a guest thread may have: games give threads small stacks of their own, which the host code they call runs on (a game thread overflowed its
+// stack in GetFileAttributesExFromAppW, which ended the process). These calls run on a thread of their own with a large stack; the caller waits, and gets
+// the call's last error.
+class BrokerThread {
+public:
+	template <typename Fn>
+	auto Run(Fn&& fn) -> decltype(fn()) {
+		using Result = decltype(fn());
+		if (GetCurrentThreadId() == m_thread_id) {
+			return fn();
+		}
+		std::optional<Result> result;
+		DWORD                 error = 0;
+		Call([&] {
+			result = fn();
+			error  = GetLastError();
+		});
+		SetLastError(error);
+		return *result;
+	}
+
+private:
+	void Call(std::function<void()> job) {
+		std::unique_lock lock(m_mutex);
+		if (m_thread == nullptr) {
+			m_thread = CreateThread(
+			    nullptr, StackSize,
+			    [](void* parameter) -> DWORD {
+				    static_cast<BrokerThread*>(parameter)->Loop();
+				    return 0;
+			    },
+			    this, STACK_SIZE_PARAM_IS_A_RESERVATION, &m_thread_id);
+			EXIT_IF(m_thread == nullptr);
+		}
+		const auto ticket = ++m_submitted;
+		m_jobs.push_back(std::move(job));
+		m_changed.notify_all();
+		m_changed.wait(lock, [&] { return m_finished >= ticket; });
+	}
+
+	void Loop() {
+		std::unique_lock lock(m_mutex);
+		for (;;) {
+			m_changed.wait(lock, [&] { return !m_jobs.empty(); });
+			auto job = std::move(m_jobs.front());
+			m_jobs.pop_front();
+			lock.unlock();
+			job();
+			lock.lock();
+			m_finished++;
+			m_changed.notify_all();
+		}
+	}
+
+	static constexpr SIZE_T StackSize = SIZE_T {4} << 20u;
+
+	std::mutex                        m_mutex;
+	std::condition_variable           m_changed;
+	std::deque<std::function<void()>> m_jobs;
+	uint64_t                          m_submitted = 0;
+	uint64_t                          m_finished  = 0;
+	HANDLE                            m_thread    = nullptr;
+	DWORD                             m_thread_id = 0;
+};
+
+static BrokerThread& Broker() {
+	static BrokerThread thread;
+	return thread;
+}
+
+static HANDLE HostCreateFile(const wchar_t* name, DWORD access, DWORD disposition, DWORD flags) {
+	return Broker().Run([&] { return CreateFileFromAppW(name, access, FILE_SHARE_POSIX, nullptr, disposition, flags, nullptr); });
+}
+
+static BOOL HostGetFileAttributesEx(const wchar_t* name, WIN32_FILE_ATTRIBUTE_DATA* data) {
+	return Broker().Run([&] { return GetFileAttributesExFromAppW(name, GetFileExInfoStandard, data); });
+}
+
+static BOOL HostCreateDirectory(const wchar_t* name) {
+	return Broker().Run([&] { return CreateDirectoryFromAppW(name, nullptr); });
+}
+
+static BOOL HostRemoveDirectory(const wchar_t* name) {
+	return Broker().Run([&] { return RemoveDirectoryFromAppW(name); });
+}
+
+static BOOL HostDeleteFile(const wchar_t* name) {
+	return Broker().Run([&] { return DeleteFileFromAppW(name); });
+}
+
+static HANDLE HostFindFirstFile(const wchar_t* pattern, WIN32_FIND_DATAW* data) {
+	return Broker().Run([&] { return FindFirstFileExFromAppW(pattern, FindExInfoStandard, data, FindExSearchNameMatch, nullptr, 0); });
+}
+
+static BOOL HostFindNextFile(HANDLE find, WIN32_FIND_DATAW* data) {
+	return Broker().Run([&] { return FindNextFileW(find, data); });
+}
+
+static BOOL HostCopyFile(const wchar_t* source, const wchar_t* destination) {
+	return Broker().Run([&] { return CopyFileFromAppW(source, destination, FALSE); });
+}
+
+static BOOL HostMoveFile(const wchar_t* source, const wchar_t* destination) {
+	return Broker().Run([&] { return MoveFileFromAppW(source, destination); });
+}
+
+static BOOL HostSetFileAttributes(const wchar_t* name, DWORD attributes) {
+	return Broker().Run([&] { return SetFileAttributesFromAppW(name, attributes); });
+}
+#else
+static HANDLE HostCreateFile(const wchar_t* name, DWORD access, DWORD disposition, DWORD flags) {
+	return CreateFileW(name, access, FILE_SHARE_POSIX, nullptr, disposition, flags, nullptr);
+}
+
+static BOOL HostGetFileAttributesEx(const wchar_t* name, WIN32_FILE_ATTRIBUTE_DATA* data) {
+	return GetFileAttributesExW(name, GetFileExInfoStandard, data);
+}
+
+static BOOL HostCreateDirectory(const wchar_t* name) {
+	return CreateDirectoryW(name, nullptr);
+}
+
+static BOOL HostRemoveDirectory(const wchar_t* name) {
+	return RemoveDirectoryW(name);
+}
+
+static BOOL HostDeleteFile(const wchar_t* name) {
+	return DeleteFileW(name);
+}
+
+static HANDLE HostFindFirstFile(const wchar_t* pattern, WIN32_FIND_DATAW* data) {
+	return FindFirstFileW(pattern, data);
+}
+
+static BOOL HostFindNextFile(HANDLE find, WIN32_FIND_DATAW* data) {
+	return FindNextFileW(find, data);
+}
+
+static BOOL HostCopyFile(const wchar_t* source, const wchar_t* destination) {
+	return CopyFileW(source, destination, FALSE);
+}
+
+static BOOL HostMoveFile(const wchar_t* source, const wchar_t* destination) {
+	return MoveFileW(source, destination);
+}
+
+static BOOL HostSetFileAttributes(const wchar_t* name, DWORD attributes) {
+	return SetFileAttributesW(name, attributes);
+}
+#endif
+
+static DWORD HostGetFileAttributes(const wchar_t* name) {
+	WIN32_FILE_ATTRIBUTE_DATA data {};
+	return HostGetFileAttributesEx(name, &data) != 0 ? data.dwFileAttributes : INVALID_FILE_ATTRIBUTES;
+}
 
 static DWORD GetCacheAccessType(sys_file_cache_type_t t) {
 	if (t == SYS_FILE_CACHE_RANDOM_ACCESS) {
@@ -141,10 +312,10 @@ sys_file_t* SysFileCreate(const std::filesystem::path& file_name) {
 
 	auto   wide   = file_name.wstring();
 	HANDLE h_file = nullptr;
-	h_file = CreateFileW(wide.c_str(),
-	                     static_cast<DWORD>(GENERIC_READ) | static_cast<DWORD>(GENERIC_WRITE) |
-	                         static_cast<DWORD>(DELETE),
-	                     FILE_SHARE_POSIX, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	h_file = HostCreateFile(wide.c_str(),
+	                        static_cast<DWORD>(GENERIC_READ) | static_cast<DWORD>(GENERIC_WRITE) |
+	                            static_cast<DWORD>(DELETE),
+	                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL);
 
 	ret->handle = h_file;
 	ret->type   = SYS_FILE_FILE;
@@ -157,8 +328,7 @@ sys_file_t* SysFileOpenR(const std::filesystem::path& file_name, sys_file_cache_
 
 	auto   wide   = file_name.wstring();
 	HANDLE h_file = nullptr;
-	h_file = CreateFileW(wide.c_str(), GENERIC_READ, FILE_SHARE_POSIX, nullptr, OPEN_EXISTING,
-	                     GetCacheAccessType(cache_type), nullptr);
+	h_file = HostCreateFile(wide.c_str(), GENERIC_READ, OPEN_EXISTING, GetCacheAccessType(cache_type));
 
 	if (h_file == INVALID_HANDLE_VALUE) {
 		ret->type = SYS_FILE_ERROR;
@@ -200,9 +370,9 @@ sys_file_t* SysFileOpenW(const std::filesystem::path& file_name, sys_file_cache_
 
 	auto   wide   = file_name.wstring();
 	HANDLE h_file = nullptr;
-	h_file        = CreateFileW(
-	    wide.c_str(), static_cast<DWORD>(GENERIC_WRITE) | static_cast<DWORD>(DELETE),
-	    FILE_SHARE_POSIX, nullptr, OPEN_EXISTING, GetCacheAccessType(cache_type), nullptr);
+	h_file        = HostCreateFile(wide.c_str(),
+	                               static_cast<DWORD>(GENERIC_WRITE) | static_cast<DWORD>(DELETE),
+	                               OPEN_EXISTING, GetCacheAccessType(cache_type));
 
 	if (h_file == INVALID_HANDLE_VALUE) {
 		ret->type = SYS_FILE_ERROR;
@@ -221,11 +391,10 @@ sys_file_t* SysFileOpenRw(const std::filesystem::path& file_name,
 
 	auto   wide   = file_name.wstring();
 	HANDLE h_file = nullptr;
-	h_file = CreateFileW(wide.c_str(),
-	                     static_cast<DWORD>(GENERIC_READ) | static_cast<DWORD>(GENERIC_WRITE) |
-	                         static_cast<DWORD>(DELETE),
-	                     FILE_SHARE_POSIX, nullptr, OPEN_EXISTING, GetCacheAccessType(cache_type),
-	                     nullptr);
+	h_file = HostCreateFile(wide.c_str(),
+	                        static_cast<DWORD>(GENERIC_READ) | static_cast<DWORD>(GENERIC_WRITE) |
+	                            static_cast<DWORD>(DELETE),
+	                        OPEN_EXISTING, GetCacheAccessType(cache_type));
 
 	if (h_file == INVALID_HANDLE_VALUE) {
 		ret->type = SYS_FILE_ERROR;
@@ -269,8 +438,7 @@ uint64_t SysFileSize(sys_file_t& f) {
 bool SysFileGetInfo(const std::filesystem::path& name, bool* is_file, uint64_t* size) {
 	const bool directory_path = !name.empty() && !name.has_filename() && name != name.root_path();
 	WIN32_FILE_ATTRIBUTE_DATA info {};
-	if (GetFileAttributesExW(directory_path ? name.parent_path().c_str() : name.c_str(),
-	                         GetFileExInfoStandard, &info) == 0) {
+	if (HostGetFileAttributesEx(directory_path ? name.parent_path().c_str() : name.c_str(), &info) == 0) {
 		return false;
 	}
 	const bool file = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
@@ -367,17 +535,17 @@ bool SysFileIsFileExisting(const std::filesystem::path& name) {
 
 bool SysFileCreateDirectory(const std::filesystem::path& path) {
 	auto wide = path.wstring();
-	return CreateDirectoryW(wide.c_str(), nullptr) != 0;
+	return HostCreateDirectory(wide.c_str()) != 0;
 }
 
 bool SysFileDeleteDirectory(const std::filesystem::path& path) {
 	auto wide = path.wstring();
-	return RemoveDirectoryW(wide.c_str()) != 0;
+	return HostRemoveDirectory(wide.c_str()) != 0;
 }
 
 bool SysFileDeleteFile(const std::filesystem::path& name) {
 	auto wide = name.wstring();
-	return DeleteFileW(wide.c_str()) != 0;
+	return HostDeleteFile(wide.c_str()) != 0;
 }
 
 bool SysFileFlush(sys_file_t& f) {
@@ -486,7 +654,7 @@ void SysFileGetDents(const std::filesystem::path& path, std::vector<sys_dir_entr
 	const auto pattern = path / L"*";
 
 	WIN32_FIND_DATAW data {};
-	HANDLE h = FindFirstFileW(pattern.c_str(), &data);
+	HANDLE h = HostFindFirstFile(pattern.c_str(), &data);
 
 	if (h == INVALID_HANDLE_VALUE) {
 		return;
@@ -502,7 +670,7 @@ void SysFileGetDents(const std::filesystem::path& path, std::vector<sys_dir_entr
 
 		out.push_back(std::move(r));
 
-	} while (FindNextFileW(h, &data) != 0);
+	} while (HostFindNextFile(h, &data) != 0);
 
 	FindClose(h);
 }
@@ -510,19 +678,38 @@ void SysFileGetDents(const std::filesystem::path& path, std::vector<sys_dir_entr
 bool SysFileCopyFile(const std::filesystem::path& src, const std::filesystem::path& dst) {
 	auto src_wide = src.wstring();
 	auto dst_wide = dst.wstring();
-	return CopyFileW(src_wide.c_str(), dst_wide.c_str(), FALSE) != 0;
+	return HostCopyFile(src_wide.c_str(), dst_wide.c_str()) != 0;
 }
 
 bool SysFileRenameFile(const std::filesystem::path& src, const std::filesystem::path& dst) {
 	auto src_wide = src.wstring();
 	auto dst_wide = dst.wstring();
-	return MoveFileW(src_wide.c_str(), dst_wide.c_str()) != 0;
+	return HostMoveFile(src_wide.c_str(), dst_wide.c_str()) != 0;
 }
+
+#if defined(KYTY_PLATFORM_UWP)
+std::FILE* SysFileOpenCStreamR(const std::filesystem::path& file_name) {
+	const auto wide   = file_name.wstring();
+	HANDLE     handle = HostCreateFile(wide.c_str(), GENERIC_READ, OPEN_EXISTING, FILE_FLAG_RANDOM_ACCESS);
+	if (handle == INVALID_HANDLE_VALUE) {
+		return nullptr;
+	}
+	const int descriptor = _open_osfhandle(reinterpret_cast<intptr_t>(handle), _O_RDONLY | _O_BINARY);
+	if (descriptor < 0) {
+		CloseHandle(handle);
+		return nullptr;
+	}
+	std::FILE* file = _fdopen(descriptor, "rb");
+	if (file == nullptr) {
+		_close(descriptor);
+	}
+	return file;
+}
+#endif
 
 void SysFileRemoveReadonly(const std::filesystem::path& name) {
 	auto wide = name.wstring();
-	SetFileAttributesW(wide.c_str(), GetFileAttributesW(wide.c_str()) &
-	                                     (~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY)));
+	HostSetFileAttributes(wide.c_str(), HostGetFileAttributes(wide.c_str()) & (~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY)));
 }
 
 #endif

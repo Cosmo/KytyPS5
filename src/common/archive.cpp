@@ -1,9 +1,12 @@
 #include "common/archive.h"
 
+#include "common/platform/sysFileIO.h"
 #include "common/stringUtils.h"
 
 #include <algorithm>
+#include <fstream>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <optional>
@@ -42,8 +45,16 @@ namespace {
 
 class ZArchiveReaderBackend final: public ArchiveReader {
 public:
-	explicit ZArchiveReaderBackend(std::unique_ptr<ZArchiveReader> reader)
-	    : m_reader(std::move(reader)) {}
+	explicit ZArchiveReaderBackend(std::unique_ptr<ZArchiveReader> reader, std::FILE* file = nullptr)
+	    : m_reader(std::move(reader)), m_file(file) {}
+
+	~ZArchiveReaderBackend() override {
+		// The reader reads through the C stream, which it does not own.
+		m_reader.reset();
+		if (m_file != nullptr) {
+			std::fclose(m_file);
+		}
+	}
 
 	std::optional<Entry> Find(std::string_view member) override {
 		const auto node = m_reader->LookUp(member);
@@ -80,11 +91,26 @@ public:
 
 private:
 	std::unique_ptr<ZArchiveReader> m_reader;
+	std::FILE*                      m_file = nullptr;
 };
 
 std::shared_ptr<ArchiveReader> OpenZArchive(const std::filesystem::path& path) {
+#if defined(KYTY_PLATFORM_UWP)
+	// The app reads a file outside its package only through the *FromApp functions; ZArchive reads from the stream on the file it opened that way.
+	std::FILE* file = SysFileOpenCStreamR(path);
+	if (file == nullptr) {
+		return nullptr;
+	}
+	auto reader = std::unique_ptr<ZArchiveReader>(ZArchiveReader::OpenFromStream(std::ifstream(file)));
+	if (!reader) {
+		std::fclose(file);
+		return nullptr;
+	}
+	return std::make_shared<ZArchiveReaderBackend>(std::move(reader), file);
+#else
 	auto reader = std::unique_ptr<ZArchiveReader>(ZArchiveReader::OpenFromFile(path));
 	return reader ? std::make_shared<ZArchiveReaderBackend>(std::move(reader)) : nullptr;
+#endif
 }
 
 struct ArchiveFormat {

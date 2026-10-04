@@ -82,15 +82,23 @@ function Invoke-Configure {
     foreach ($path in @($WinUIRoot, $WebView2Root)) {
         if (-not (Test-Path $path)) { Fail "missing dependency: $path (see README.md)" }
     }
+    if (-not $env:KYTY_WINPTHREAD_DLL -or -not (Test-Path $env:KYTY_WINPTHREAD_DLL)) {
+        Fail '$env:KYTY_WINPTHREAD_DLL must name the UCRT build of libwinpthread-1.dll (see README.md)'
+    }
     Enter-DevShell
-    cmake -S $PSScriptRoot -B $BuildDir -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl `
-        -DCMAKE_CXX_COMPILER=clang-cl "-DKYTY_WINUI_ROOT=$WinUIRoot" "-DKYTY_WEBVIEW2_ROOT=$WebView2Root" `
-        $(if ($env:KYTY_JSON_INCLUDE) { "-DKYTY_JSON_INCLUDE_DIR=$env:KYTY_JSON_INCLUDE" }) `
+    # Sources of the libraries upstream fetches, when they are kept in $env:KYTY_DEPS\<name>-src instead of being downloaded.
+    $fetched = foreach ($name in 'opus', 'xbyak', 'zydis', 'zstd') {
+        if (Test-Path "$deps\$name-src") { "-DFETCHCONTENT_SOURCE_DIR_$($name.ToUpper())=$deps\$name-src" }
+    }
+    cmake -S $root -B $BuildDir -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl `
+        -DCMAKE_CXX_COMPILER=clang-cl -DKYTY_BUILD_UWP=ON "-DKYTY_WINUI_ROOT=$WinUIRoot" "-DKYTY_WEBVIEW2_ROOT=$WebView2Root" `
+        "-DKYTY_WINPTHREAD_DLL=$env:KYTY_WINPTHREAD_DLL" $fetched `
         $(if ($env:KYTY_UWP_PACKAGE_NAME) { "-DKYTY_UWP_PACKAGE_NAME=$env:KYTY_UWP_PACKAGE_NAME" }) `
         $(if ($env:KYTY_UWP_DISPLAY_NAME) { "-DKYTY_UWP_DISPLAY_NAME=$env:KYTY_UWP_DISPLAY_NAME" }) `
         $(if ($env:KYTY_UWP_PROTOCOL) { "-DKYTY_UWP_PROTOCOL=$env:KYTY_UWP_PROTOCOL" }) `
-        $(if ($env:KYTY_ZSTD_SOURCE) { "-DKYTY_ZSTD_SOURCE_DIR=$env:KYTY_ZSTD_SOURCE" }) `
-        $(if ($env:KYTY_ZARCHIVE_SOURCE) { "-DKYTY_ZARCHIVE_SOURCE_DIR=$env:KYTY_ZARCHIVE_SOURCE" })
+        $(if ($env:KYTY_ZARCHIVE_SOURCE) { "-DFETCHCONTENT_SOURCE_DIR_ZARCHIVE_SOURCE=$env:KYTY_ZARCHIVE_SOURCE" }) `
+        $(if ($env:KYTY_FFMPEG_DIR) { "-DFFMPEG_PREBUILT_DIR=$env:KYTY_FFMPEG_DIR" }) `
+        -DFETCHCONTENT_UPDATES_DISCONNECTED=ON
     if ($LASTEXITCODE -ne 0) { Fail 'configure' }
 }
 
@@ -99,22 +107,22 @@ function Invoke-Build {
     if (-not (Test-Path "$BuildDir\CMakeCache.txt")) { Invoke-Configure } else { Enter-DevShell }
     cmake --build $BuildDir --target kyty_uwp_layout
     if ($LASTEXITCODE -ne 0) { Fail 'build' }
-    Test-Imports
+    $null = Test-Imports
 }
 
-function Test-Imports {
-    # Every import of the layout's binaries has to be an API UWP apps have: WindowsApp.lib, the
+function Test-Imports([string]$Folder = $layout) {
+    # Every import of the folder's binaries (the package layout) has to be an API UWP apps have: WindowsApp.lib, the
     # store C runtime or a DLL in the package. The Xbox has no desktop-only DLLs, and an import it
     # can't resolve stops the app from starting there (Windows still runs it). Imports by
-    # ordinal are not checked.
+    # ordinal are not checked. Returns whether every import is fine.
     $lib = "$env:WindowsSdkDir\Lib\$($env:WindowsSDKVersion.TrimEnd('\'))\um\x64\WindowsApp.lib"
     $available = [System.Collections.Generic.HashSet[string]]::new()
     foreach ($line in (llvm-nm $lib 2>$null)) {
         if ($line -match '__imp_(\S+)$') { [void]$available.Add($Matches[1]) }
     }
-    if ($available.Count -eq 0) { Write-Host "(imports not checked: no $lib)"; return }
-    $packaged = (Get-ChildItem $layout -Filter *.dll).Name
-    $missing = foreach ($binary in Get-ChildItem "$layout\*" -Include *.exe, *.dll) {
+    if ($available.Count -eq 0) { Write-Host "(imports not checked: no $lib)"; return $true }
+    $packaged = (Get-ChildItem $Folder -Filter *.dll).Name
+    $missing = foreach ($binary in Get-ChildItem "$Folder\*" -Include *.exe, *.dll) {
         $dll = ''
         foreach ($line in (llvm-readobj --coff-imports $binary.FullName)) {
             if ($line -match '^\s*Name: (\S+)') { $dll = $Matches[1]; continue }
@@ -133,6 +141,7 @@ function Test-Imports {
                 (($_.Group | ForEach-Object { $_ -replace '^.* ' }) -join ' '))
         }
     }
+    return -not $missing
 }
 
 function Install-Framework($name, $appx) {
