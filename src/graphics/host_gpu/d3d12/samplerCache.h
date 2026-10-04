@@ -25,10 +25,13 @@ public:
 	    : m_graphics(graphics), m_heap(heap) {}
 	KYTY_CLASS_NO_COPY(SamplerCache);
 
-	[[nodiscard]] SamplerHandle GetSampler(const ShaderSamplerResource& r, bool integer_border);
+	// `compare` picks how a sampler is used: as the guest set it, without depth comparison, or with it (a sampler array that a shader uses both ways is
+	// declared twice, once of each kind).
+	enum class Use { Guest, Plain, Comparison };
+	[[nodiscard]] SamplerHandle GetSampler(const ShaderSamplerResource& r, bool integer_border, Use use = Use::Guest);
 
 private:
-	using SamplerKey = std::array<uint32_t, 5>;
+	using SamplerKey = std::array<uint32_t, 5>; // the guest descriptor, the integer-border flag and the use
 
 	struct SamplerKeyHash {
 		std::size_t operator()(const SamplerKey& key) const {

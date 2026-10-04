@@ -111,13 +111,23 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 		std::vector<uint32_t> occurrences(images.size(), 0);
 		for (const auto& binding: program.bindings.descriptors) {
 			if (binding.kind == IR::DescriptorBindingKind::Samplers) {
-				// The comparison range holds the same samplers; the guest sets compare modes.
-				const uint32_t ranges = HasComparisonSamplers(program, binding) ? 2 : 1;
+				// An array that is also used for depth comparison is declared twice (the second at the comparison space): the first range holds each sampler
+				// without comparison, the second with it, as D3D12 requires of the shader's declaration.
+				const bool     both   = HasComparisonSamplers(program, binding);
+				const uint32_t ranges = both ? 2 : 1;
 				for (uint32_t range = 0; range < ranges; range++) {
 					for (const auto resource: binding.resources) {
-						device->CopyDescriptorsSimple(1, samplers.Cpu(sampler_index++),
-						                              prepared->samplers.at(resource),
-						                              D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+						auto handle = prepared->samplers.at(resource);
+						if (both) {
+							const auto& sampler = program.info.samplers.at(resource);
+							auto        guest   = DecodeNativeDescriptor<ShaderSamplerResource>(prepared->runtime->resources->samplers[sampler.snapshot_index]);
+							if (sampler.force_point_filtering) {
+								guest.SetPointFiltering();
+							}
+							handle = m_context.GetSamplerCache().GetSampler(guest, sampler.integer_border,
+							                                                range == 0 ? SamplerCache::Use::Plain : SamplerCache::Use::Comparison);
+						}
+						device->CopyDescriptorsSimple(1, samplers.Cpu(sampler_index++), handle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
 					}
 				}
 				continue;

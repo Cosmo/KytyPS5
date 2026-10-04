@@ -30,9 +30,15 @@ namespace {
 
 } // namespace
 
-SamplerHandle SamplerCache::GetSampler(const ShaderSamplerResource& r, bool integer_border) {
+SamplerHandle SamplerCache::GetSampler(const ShaderSamplerResource& guest, bool integer_border, Use use) {
 	Common::LockGuard lock(m_mutex);
 
+	auto r = guest;
+	if (use == Use::Plain) {
+		r.fields[0] &= ~(0x7u << 12u);
+	} else if (use == Use::Comparison && r.DepthCompareFunc() == 0) {
+		r.fields[0] |= 0x3u << 12u; // less or equal: a sampler used for depth comparison with none set
+	}
 	const SamplerKey key {r.fields[0], r.fields[1], r.fields[2], r.fields[3], integer_border ? 1u : 0u};
 	if (auto found = m_samplers.find(key); found != m_samplers.end()) {
 		return found->second;
