@@ -597,7 +597,7 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 		    L"Press Y (or F5) to scan the game folders again and show them.");
 	} else if (count == 0) {
 		find(L"EmptyText").as<xaml::Controls::TextBlock>().Text(
-		    L"KytyPS5 looks for games (folders with eboot.bin) in:" + searched +
+		    L"KytyPS5 looks for games (folders with eboot.bin, and .zar archives) in:" + searched +
 		    L"\n\nCopy a game there, or add a game folder with uwp.ps1 folders -Add <folder>.");
 	}
 	if (count == 0) {

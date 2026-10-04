@@ -96,7 +96,7 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
       <TextBlock Text="Game folders" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,0" />
       <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
-                 Text="KytyPS5 looks for games (folders with eboot.bin) in its own Games folder and in these folders. Folders must give apps read access; the library shows how." />
+                 Text="KytyPS5 looks for games (folders with eboot.bin, and .zar archives) in its own Games folder and in these folders. Folders must give apps read access; the library shows how." />
       <StackPanel x:Name="Folders" Spacing="8" />
       <Button x:Name="AddFolder" Content="Add folder" />
 
