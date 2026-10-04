@@ -62,6 +62,7 @@ AppSettings LoadSettings() {
 	read("game_output", settings.game_output);
 	read("d3d12_selftest", settings.d3d12_selftest);
 	read("overlay_size", settings.overlay_size);
+	read("xbox_gpu_limits", settings.xbox_gpu_limits);
 	return settings;
 }
 

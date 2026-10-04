@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include "common/logging/log.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 
 #include <algorithm>
 #include <atomic>
@@ -218,6 +219,11 @@ uint32_t EmitInterpolationParameter(ValueEmitContext& ctx, uint32_t attr, uint32
 	auto&       state = ctx.state;
 	const auto* input = InputBindingForParameter(state, attr);
 	if (!input->per_vertex) {
+		// Without barycentrics (HostShaderFeatures.h): P0 is the interpolated value, P10 and P20
+		// are zeros.
+		if (!GetHostShaderFeatures().barycentrics && mode < 2u && !PixelParameterIsCustom(state, attr)) {
+			return ConstantU32(state, 0);
+		}
 		return EmitAttribute(ctx.state, attr, chan);
 	}
 	const auto load_vertex = [&](uint32_t vertex) {

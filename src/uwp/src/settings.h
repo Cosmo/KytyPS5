@@ -26,6 +26,8 @@ struct AppSettings {
 	bool                               d3d12_selftest   = false; // translate and sign built-in shaders at start (not on the settings page)
 	// The overlay's size: 0 small, 1 medium, 2 large (OverlaySizes in overlay.cpp).
 	uint32_t overlay_size = 1;
+	// Debugging, only in the file: the Xbox's shader limits on any GPU (Config::XboxGpuLimitsEnabled).
+	bool xbox_gpu_limits = false;
 };
 [[nodiscard]] AppSettings LoadSettings();
 void                      SaveSettings(const AppSettings& settings);

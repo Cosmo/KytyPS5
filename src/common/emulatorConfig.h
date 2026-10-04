@@ -77,6 +77,10 @@ struct ConfigOptions {
 	bool                   playgo_hack_enabled         = false;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
+	// Debugging (D3D12 build): the shader limits of the Xbox's UWP games on any device (shader
+	// model 6.4, 16-bit ops as 32-bit, no barycentrics, no mesh shaders), to reproduce Xbox
+	// problems on a PC.
+	bool xbox_gpu_limits_enabled = false;
 #endif
 	Keymap keymap;
 };
@@ -126,6 +130,7 @@ bool TessellationEnabled();
 bool PlayGoHackEnabled();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
+bool XboxGpuLimitsEnabled();
 #endif
 
 const Keymap& GetKeymap();

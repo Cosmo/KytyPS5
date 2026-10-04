@@ -1,11 +1,13 @@
 #include "graphics/host_gpu/d3d12/graphicContext.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
 #include "graphics/host_gpu/d3d12/formats.h"
 #include "graphics/host_gpu/d3d12/dxilCompiler.h"
 #include "graphics/host_gpu/d3d12/gpuTrace.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 
 #include <D3D12MemAlloc.h>
 #include <algorithm>
@@ -186,20 +188,23 @@ static void LogCapabilities(ID3D12Device* device) {
 	D3D12_FEATURE_DATA_D3D12_OPTIONS  options {};
 	D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1 {};
 	D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3 {};
+	D3D12_FEATURE_DATA_D3D12_OPTIONS4 options4 {};
 	D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7 {};
 	(void)device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
 	(void)device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options1, sizeof(options1));
 	(void)device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &options3, sizeof(options3));
+	(void)device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4, &options4, sizeof(options4));
 	(void)device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7));
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "D3D12 features: level {:x}.{:x}, shader model {}.{}, binding tier {}, tiled resources tier "
-	    "{}, typed UAV loads {}, wave ops {}, barycentrics {}, mesh shaders {}\n",
+	    "{}, typed UAV loads {}, wave ops {}, 16-bit ops {}, barycentrics {}, mesh shaders {}\n",
 	    static_cast<unsigned>(feature_levels.MaxSupportedFeatureLevel) >> 12u,
 	    (static_cast<unsigned>(feature_levels.MaxSupportedFeatureLevel) >> 8u) & 0xfu,
 	    static_cast<unsigned>(model.HighestShaderModel) >> 4u,
 	    static_cast<unsigned>(model.HighestShaderModel) & 0xfu,
 	    static_cast<int>(options.ResourceBindingTier), static_cast<int>(options.TiledResourcesTier),
 	    options.TypedUAVLoadAdditionalFormats ? "yes" : "no", options1.WaveOps ? "yes" : "no",
+	    options4.Native16BitShaderOpsSupported ? "yes" : "no",
 	    options3.BarycentricsSupported ? "yes" : "no",
 	    options7.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED ? "yes" : "no"));
 }
@@ -297,6 +302,17 @@ void GraphicContext::Create(bool enable_debug_layer) {
 	Log::WriteToConsoleAndLog(fmt::format("D3D12 device: {} (debug layer {})\n", device_name,
 	                                      debug_layer ? "on" : "off"));
 	LogCapabilities(device);
+	D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3 {};
+	bool barycentrics = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &options3,
+	                                                         sizeof(options3))) &&
+	                    options3.BarycentricsSupported != FALSE;
+	if (Config::XboxGpuLimitsEnabled()) {
+		// (The DXIL compiler applies the rest: shader model 6.4, 16-bit ops as 32-bit.)
+		mesh_shaders = false;
+		barycentrics = false;
+		Log::WriteToConsoleAndLog("D3D12: the Xbox's limits apply (no barycentrics, no mesh shaders)\n");
+	}
+	ShaderRecompiler::SetHostShaderFeatures({.barycentrics = barycentrics});
 }
 
 void GraphicContext::Destroy() {

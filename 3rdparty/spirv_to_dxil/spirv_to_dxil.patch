@@ -803,10 +803,10 @@ index cf3edcc..d17478a 100644
           continue;
        struct blob dxil_blob;
 diff --git a/src/microsoft/spirv_to_dxil/spirv_to_dxil.c b/src/microsoft/spirv_to_dxil/spirv_to_dxil.c
-index b9205aa..f3a1754 100644
+index b9205aa..aa1ac9c 100644
 --- a/src/microsoft/spirv_to_dxil/spirv_to_dxil.c
 +++ b/src/microsoft/spirv_to_dxil/spirv_to_dxil.c
-@@ -41,65 +41,62 @@ static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_FRAGMENT == MESA_SHADER_FRAGM
+@@ -41,65 +41,63 @@ static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_FRAGMENT == MESA_SHADER_FRAGM
  static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_COMPUTE == MESA_SHADER_COMPUTE, "must match");
  static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_KERNEL == MESA_SHADER_KERNEL, "must match");
  
@@ -901,6 +901,7 @@ index b9205aa..f3a1754 100644
 +{
 +   struct nir_to_dxil_options opts = {
 +      .environment = DXIL_ENVIRONMENT_VULKAN,
++      .lower_int16 = conf->lower_16bit_ops,
 +      .shader_model_max = conf->shader_model_max,
 +      .validator_version_max = validator_version_max,
 +   };
@@ -908,7 +909,7 @@ index b9205aa..f3a1754 100644
     struct dxil_logger logger_inner = {.priv = logger->priv,
                                        .log = logger->log};
  
-@@ -107,17 +104,108 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
+@@ -107,17 +105,108 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
     if (!nir_to_dxil(nir, &opts, &logger_inner, &dxil_blob)) {
        if (dxil_blob.allocated)
           blob_finish(&dxil_blob);
@@ -1032,7 +1033,7 @@ index 62851f2..23f6dda 100644
      spirv_to_dxil_free
      spirv_to_dxil_get_version
 diff --git a/src/microsoft/spirv_to_dxil/spirv_to_dxil.h b/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
-index 8f4684c..4485fda 100644
+index 8f4684c..e8452ae 100644
 --- a/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
 +++ b/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
 @@ -46,6 +46,8 @@ typedef enum {
@@ -1044,7 +1045,7 @@ index 8f4684c..4485fda 100644
     DXIL_SPIRV_SHADER_KERNEL = 14,
  } dxil_spirv_shader_stage;
  
-@@ -199,6 +201,13 @@ struct dxil_spirv_runtime_conf {
+@@ -199,6 +201,17 @@ struct dxil_spirv_runtime_conf {
  
     // Affects which features can be used by the shader
     enum dxil_shader_model shader_model_max;
@@ -1055,10 +1056,14 @@ index 8f4684c..4485fda 100644
 +   // Register space offset of comparison samplers declared from samplers the shader also uses
 +   // for regular sampling (both would otherwise occupy the same registers)
 +   uint32_t shadow_sampler_space_offset;
++
++   // Lowers 16-bit arithmetic to 32 bits, for devices without native 16-bit shader operations
++   // (D3D12_FEATURE_DATA_D3D12_OPTIONS4::Native16BitShaderOpsSupported)
++   bool lower_16bit_ops;
  };
  
  struct dxil_spirv_debug_options {
-@@ -235,6 +244,30 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
+@@ -235,6 +248,30 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
                const struct dxil_spirv_logger *logger,
                struct dxil_spirv_object *out_dxil);
  

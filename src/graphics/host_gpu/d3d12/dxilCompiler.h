@@ -118,6 +118,9 @@ private:
 
 	uint32_t       m_shader_model      = 0; // enum dxil_shader_model
 	uint32_t       m_validator_version = 0; // enum dxil_validator_version
+	// The device has no native 16-bit shader operations (the Xbox's UWP games): 16-bit arithmetic
+	// becomes 32-bit.
+	bool           m_lower_16bit       = false;
 	IDxcValidator* m_validator         = nullptr;
 	void*          m_dxil_module       = nullptr;
 	uint64_t       m_translator_hash   = 0; // of the spirv_to_dxil library file

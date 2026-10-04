@@ -619,8 +619,50 @@ void PipelineCache::SaveWhenIdle() {
 	});
 }
 
+// The features a DXIL shader requires (the container's SFI0 part), by name.
+static std::string RequiredFeatures(const std::vector<uint8_t>& dxil) {
+	static constexpr const char* names[] = {
+	    "doubles", "raw/structured buffers (FL 10)", "UAVs at every stage (FL 11.1)",
+	    "64 UAVs (FL 11.1)", "minimum precision", "11.1 double extensions", "11.1 shader extensions",
+	    "level 9 comparison filtering", "tiled resources", "stencil ref", "inner coverage",
+	    "typed UAV load formats", "ROVs", "viewport/RT array index from any stage", "wave ops",
+	    "int64 ops", "view ID", "barycentrics", "native 16-bit ops", "shading rate",
+	    "raytracing 1.1", "sampler feedback", "int64 atomics (typed)", "int64 atomics (groupshared)",
+	    "derivatives in mesh/amplification", "resource descriptor heap indexing",
+	    "sampler descriptor heap indexing", "wave MMA", "int64 atomics (heap)",
+	    "advanced texture ops", "writable MSAA textures", "sample-compare gradient/bias",
+	    "extended command info"};
+	// DXBC header: fourCC, digest (16), version (4), size, part count; then the part offsets.
+	const auto read32 = [&](size_t offset) {
+		uint32_t value = 0;
+		if (offset + sizeof(value) <= dxil.size()) {
+			std::memcpy(&value, dxil.data() + offset, sizeof(value));
+		}
+		return value;
+	};
+	const auto parts = read32(28);
+	for (uint32_t i = 0; i < parts; i++) {
+		const auto part = read32(32 + 4 * i);
+		if (read32(part) != 0x30494653u /* SFI0 */ || part + 16 > dxil.size()) {
+			continue;
+		}
+		uint64_t flags = 0;
+		std::memcpy(&flags, dxil.data() + part + 8, sizeof(flags));
+		std::string text;
+		for (size_t bit = 0; bit < 64; bit++) {
+			if ((flags >> bit & 1u) != 0) {
+				text += (text.empty() ? "" : ", ") +
+				        (bit < std::size(names) ? std::string(names[bit]) : fmt::format("bit {}", bit));
+			}
+		}
+		return text.empty() ? "none" : text;
+	}
+	return "unknown (no SFI0 part)";
+}
+
 ID3D12PipelineState* PipelineCache::LoadOrCreate(const std::wstring&                    name,
-                                                 const D3D12_PIPELINE_STATE_STREAM_DESC& desc) {
+                                                 const D3D12_PIPELINE_STATE_STREAM_DESC& desc,
+                                                 std::initializer_list<const D3D12::DxilShader*> shaders) {
 	ID3D12PipelineState* pipeline = nullptr;
 	if (m_library != nullptr &&
 	    SUCCEEDED(m_library->LoadPipeline(name.c_str(), &desc, IID_PPV_ARGS(&pipeline)))) {
@@ -629,8 +671,19 @@ ID3D12PipelineState* PipelineCache::LoadOrCreate(const std::wstring&            
 	}
 	const HRESULT result = m_device->CreatePipelineState(&desc, IID_PPV_ARGS(&pipeline));
 	if (FAILED(result)) {
-		// What the driver refuses is reported once and skipped: the draws and dispatches that need this pipeline do nothing.
-		Log::WriteToConsoleAndLog(fmt::format("D3D12: CreatePipelineState failed (0x{:08x}) for a pipeline; its draws are skipped\n", static_cast<uint32_t>(result)));
+		// The device's limits are the usual reason (the Xbox's UWP games get feature level 11.0). The pipeline is skipped, its shaders' required features
+		// are reported and the shaders saved.
+		std::string                           report;
+		std::vector<std::span<const uint8_t>> dxil;
+		for (const auto* shader: shaders) {
+			if (shader != nullptr && !shader->bytecode.empty()) {
+				report += fmt::format("  shader {} ({} bytes) requires: {}\n", dxil.size(), shader->bytecode.size(), RequiredFeatures(shader->bytecode));
+				dxil.emplace_back(shader->bytecode);
+			}
+		}
+		Log::WriteToConsoleAndLog(fmt::format("D3D12: CreatePipelineState failed (0x{:08x}); the draws that need this pipeline are skipped. Shaders saved to {}:\n{}",
+		                                      static_cast<uint32_t>(result),
+		                                      D3D12::SaveShaderDump(fmt::format("rejected_pipeline_{}", ++m_rejected_pipelines), dxil, {}), report));
 		return nullptr;
 	}
 	// Fails only for a name already stored, which then describes another pipeline: the file
@@ -817,7 +870,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	name.Add(RootLayoutHash {}(pipeline->layout));
 	name.Add(stream.cs.value);
 	const auto loaded_before = m_loaded_pipelines;
-	pipeline->pipeline = LoadOrCreate(name.Get(L'C'), {sizeof(stream), &stream});
+	pipeline->pipeline = LoadOrCreate(name.Get(L'C'), {sizeof(stream), &stream}, {&shader.dxil});
 	CountNewPipeline(loaded_before, shader.from_cache);
 	found->second = std::move(pipeline);
 	return *found->second;
@@ -942,7 +995,7 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 		SetOutputState(stream, key);
 		const auto loaded_before = m_loaded_pipelines;
 		pipeline->pipeline = LoadOrCreate(GraphicsPipelineName(stream, elements, root_layout_hash),
-		                                  {sizeof(stream), &stream});
+		                                  {sizeof(stream), &stream}, {&linked.vertex, &linked.pixel});
 		CountNewPipeline(loaded_before, linked.from_cache);
 		return pipeline;
 	}
@@ -959,7 +1012,7 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 
 	const auto loaded_before = m_loaded_pipelines;
 	pipeline->pipeline = LoadOrCreate(GraphicsPipelineName(stream, elements, root_layout_hash),
-	                                  {sizeof(stream), &stream});
+	                                  {sizeof(stream), &stream}, {&linked.vertex, &linked.geometry, &linked.pixel});
 	CountNewPipeline(loaded_before, linked.from_cache);
 	return pipeline;
 }

@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/d3d12/dxilCompiler.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
@@ -116,6 +117,14 @@ DxilCompiler::DxilCompiler(ID3D12Device* device) {
 	       model.HighestShaderModel > D3D_SHADER_MODEL_6_0) {
 		model.HighestShaderModel = static_cast<D3D_SHADER_MODEL>(model.HighestShaderModel - 1);
 	}
+	D3D12_FEATURE_DATA_D3D12_OPTIONS4 options4 {};
+	m_lower_16bit = FAILED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4, &options4,
+	                                                   sizeof(options4))) ||
+	                !options4.Native16BitShaderOpsSupported;
+	if (Config::XboxGpuLimitsEnabled()) {
+		model.HighestShaderModel = std::min(model.HighestShaderModel, D3D_SHADER_MODEL_6_4);
+		m_lower_16bit            = true;
+	}
 	const uint32_t device_minor = static_cast<uint32_t>(model.HighestShaderModel) & 0xfu;
 
 #if defined(KYTY_PLATFORM_UWP)
@@ -147,8 +156,8 @@ DxilCompiler::DxilCompiler(ID3D12Device* device) {
 	m_shader_model      = SHADER_MODEL_6_0 + model_minor;
 	m_validator_version = DXIL_VALIDATOR_1_0 + minor;
 	m_translator_hash   = ModuleFileHash(L"spirv_to_dxil.dll");
-	Log::WriteToConsoleAndLog(
-	    fmt::format("D3D12 shaders: shader model 6.{}, DXIL validator 1.{}\n", model_minor, minor));
+	Log::WriteToConsoleAndLog(fmt::format("D3D12 shaders: shader model 6.{}, DXIL validator 1.{}, 16-bit ops {}\n",
+	                                      model_minor, minor, m_lower_16bit ? "as 32-bit" : "native"));
 }
 
 DxilCompiler::~DxilCompiler() {
@@ -169,7 +178,7 @@ static_assert(ZFlipShift == DXIL_SPIRV_Z_FLIP_SHIFT);
 
 namespace {
 
-dxil_spirv_runtime_conf RuntimeConf(uint32_t shader_model, bool flip,
+dxil_spirv_runtime_conf RuntimeConf(uint32_t shader_model, bool lower_16bit, bool flip,
                                     bool sample_rate_shading = false, bool clip_halfz = false) {
 	dxil_spirv_runtime_conf conf {};
 	conf.runtime_data_cbv.register_space        = RuntimeDataSpace;
@@ -183,6 +192,7 @@ dxil_spirv_runtime_conf RuntimeConf(uint32_t shader_model, bool flip,
 	conf.force_sample_rate_shading = sample_rate_shading;
 	conf.clip_halfz                  = clip_halfz;
 	conf.shadow_sampler_space_offset = ComparisonSamplerSpaceOffset;
+	conf.lower_16bit_ops             = lower_16bit;
 	return conf;
 }
 
@@ -251,8 +261,9 @@ std::vector<DxilShader> DxilCompiler::CompileLinked(std::span<const LinkedStage>
 }
 
 std::string DxilCompiler::CacheSignature() const {
-	return fmt::format("spirv_to_dxil={:016x} sm=6.{} validator=1.{}", m_translator_hash,
-	                   m_shader_model - SHADER_MODEL_6_0, m_validator_version - DXIL_VALIDATOR_1_0);
+	return fmt::format("spirv_to_dxil={:016x} sm=6.{} validator=1.{} 16bit={}", m_translator_hash,
+	                   m_shader_model - SHADER_MODEL_6_0, m_validator_version - DXIL_VALIDATOR_1_0,
+	                   m_lower_16bit ? "lowered" : "native");
 }
 
 // Saved translations: u32 entry count, then per entry u64 key, u32 shader count and per shader
@@ -342,7 +353,7 @@ DxilShader DxilCompiler::Translate(std::span<const uint32_t> spirv, ShaderType s
 		Log::WriteToConsoleAndLog(fmt::format("D3D12: shader stage {} is not supported yet, shader 0x{:016x} is skipped\n", static_cast<int>(stage), shader_hash));
 		return {};
 	}
-	const auto conf = RuntimeConf(m_shader_model, last_vertex_stage);
+	const auto conf = RuntimeConf(m_shader_model, m_lower_16bit, last_vertex_stage);
 
 	std::string                    messages;
 	const dxil_spirv_logger        logger {&messages, [](void* priv, const char* message) {
@@ -371,7 +382,8 @@ std::vector<DxilShader> DxilCompiler::TranslateLinked(std::span<const LinkedStag
 	confs.reserve(stages.size());
 	for (const auto& stage: stages) {
 		confs.push_back(
-		    RuntimeConf(m_shader_model, stage.flip, stage.sample_rate_shading, stage.clip_halfz));
+		    RuntimeConf(m_shader_model, m_lower_16bit, stage.flip, stage.sample_rate_shading,
+		                stage.clip_halfz));
 		dxil_spirv_stage input {};
 		input.words            = stage.spirv.data();
 		input.word_count       = stage.spirv.size();

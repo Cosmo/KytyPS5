@@ -164,6 +164,10 @@ bool PlayGoHackEnabled() {
 bool RedZoneProtectionEnabled() {
 	return g_config->red_zone_protection_enabled;
 }
+
+bool XboxGpuLimitsEnabled() {
+	return g_config->xbox_gpu_limits_enabled;
+}
 #endif
 
 const Keymap& GetKeymap() {

@@ -14,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -191,13 +192,15 @@ private:
 	void SetOutputState(Stream& stream, const GraphicsKey& key) const;
 	// Loads the pipeline `name` names from the pipeline library, or creates and stores it.
 	ID3D12PipelineState* LoadOrCreate(const std::wstring&                    name,
-	                                  const D3D12_PIPELINE_STATE_STREAM_DESC& desc);
+	                                  const D3D12_PIPELINE_STATE_STREAM_DESC& desc,
+	                                  std::initializer_list<const D3D12::DxilShader*> shaders);
 	void                 InitializeDiskCache();
 	[[nodiscard]] std::string CacheSignature() const;
 
 	GraphicContext&                                                     m_graphics;
 	D3D12::ComPtr<ID3D12Device2>                                        m_device;
 	bool                                                                m_alpha_blend_factor = false;
+	uint32_t                                                            m_rejected_pipelines = 0;
 	D3D12::DxilCompiler                                                 m_compiler;
 	ShaderProgramCache                                                  m_programs;
 	std::unordered_map<uint64_t, std::unique_ptr<Shader>>               m_shaders;
