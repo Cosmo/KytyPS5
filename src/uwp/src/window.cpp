@@ -8,6 +8,7 @@
 #include "common/logging/log.h"
 #include "common/threads.h"
 #include "emulatorHost.h"
+#include "input.h"
 #include "graphics/host_gpu/d3d12/renderContext.h"
 #include "graphics/host_gpu/d3d12/windowContext.h"
 #include "graphics/presentation/presenter.h"
@@ -77,6 +78,9 @@ Presenter& WindowInit(uint32_t width, uint32_t height) {
 
 	auto& presenter = *window->presenter;
 	g_window        = std::move(window);
+	// The game is running: from here the connected controllers are its players, and View + Menu opens the game menu.
+	Kyty::Uwp::ActivateGameInput();
+	Kyty::Uwp::Log("game input active\n");
 	return presenter;
 }
 

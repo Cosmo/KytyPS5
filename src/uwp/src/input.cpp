@@ -102,6 +102,7 @@ std::array<std::atomic<int64_t>, Controller::MAX_PLAYERS> g_last_input {};
 std::atomic_bool            g_resumed = false;
 
 void RunChord(bool overlay) {
+	Log(overlay ? "chord: View + Menu + triggers (overlay)\n" : "chord: View + Menu (game menu)\n");
 	std::function<void()> handler;
 	{
 		std::lock_guard lock(g_shared_mutex);
