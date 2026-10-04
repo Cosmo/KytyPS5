@@ -12,17 +12,23 @@ namespace Libs::Graphics {
 
 struct GraphicContext;
 
-// The GPU timeline: every queue submission signals the next tick on one fence.
+// GPU timeline: every queue submission signals the next tick on one fence.
 class MasterSemaphore {
 public:
 	explicit MasterSemaphore(GraphicContext& graphics);
 	~MasterSemaphore();
 	KYTY_CLASS_NO_COPY(MasterSemaphore);
 
-	[[nodiscard]] uint64_t CurrentTick() const noexcept { return m_current_tick.load(std::memory_order_acquire); }
-	[[nodiscard]] uint64_t KnownGpuTick() const noexcept { return m_gpu_tick.load(std::memory_order_acquire); }
+	[[nodiscard]] uint64_t CurrentTick() const noexcept {
+		return m_current_tick.load(std::memory_order_acquire);
+	}
+	[[nodiscard]] uint64_t KnownGpuTick() const noexcept {
+		return m_gpu_tick.load(std::memory_order_acquire);
+	}
 	[[nodiscard]] bool     IsFree(uint64_t tick) const noexcept { return KnownGpuTick() >= tick; }
-	[[nodiscard]] uint64_t NextTick() noexcept { return m_current_tick.fetch_add(1, std::memory_order_release); }
+	[[nodiscard]] uint64_t NextTick() noexcept {
+		return m_current_tick.fetch_add(1, std::memory_order_release);
+	}
 	[[nodiscard]] ID3D12Fence* Handle() const noexcept { return m_fence; }
 
 	void Refresh();

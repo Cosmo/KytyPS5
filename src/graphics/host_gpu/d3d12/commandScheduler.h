@@ -16,8 +16,9 @@ struct ID3D12CommandAllocator;
 
 namespace Libs::Graphics {
 
-// Records guest work into one command list and submits it to the direct queue; each submission signals the next MasterSemaphore tick. Deferred operations
-// run once their tick completed; priority operations (interrupts, flips) run on a thread of their own as soon as it did.
+// Records guest work into one command list and submits it to the direct queue. Each submission
+// signals the next MasterSemaphore tick. Deferred operations run once their tick completes;
+// priority operations (interrupts, flips) run on a dedicated thread as soon as it does.
 class CommandScheduler {
 public:
 	CommandScheduler(RenderContext& context, GraphicContext& graphics);
@@ -29,21 +30,25 @@ public:
 	void Flush();
 	void FlushAndWait();
 	void Finish();
+	// Batch thresholds for RELEASE_MEM writes, interrupts and draws; see the Vulkan scheduler.
+	void CompleteReleaseMemWrite();
+	void CompleteReleaseMemInterrupt();
+	void CompleteDraw();
 
-	CommandBuffer&            BeginCommand();
-	uint64_t                  Submit();
-	void                      Shutdown();
-	void                      Wait(uint64_t tick);
-	void                      PopPendingOperations();
-	void                      DrainPriorityOperations();
-	void                      WaitPriorityOperations(uint64_t tick);
-	void                      DeferOperation(Common::UniqueFunction<void>&& operation);
-	void                      DeferPriorityOperation(Common::UniqueFunction<void>&& operation);
+	CommandBuffer& BeginCommand();
+	uint64_t       Submit();
+	void           Shutdown();
+	void           Wait(uint64_t tick);
+	void           PopPendingOperations();
+	void           DrainPriorityOperations();
+	void           WaitPriorityOperations(uint64_t tick);
+	void           DeferOperation(Common::UniqueFunction<void>&& operation);
+	void           DeferPriorityOperation(Common::UniqueFunction<void>&& operation);
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
 
-	[[nodiscard]] bool             Active() const noexcept { return m_command.m_registers != nullptr; }
-	void                           CheckActive() const;
-	CommandBuffer&                 Current();
+	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
+	void               CheckActive() const;
+	CommandBuffer&     Current();
 	[[nodiscard]] uint64_t         CurrentTick() const noexcept { return m_master.CurrentTick(); }
 	[[nodiscard]] bool             IsFree(uint64_t tick);
 	[[nodiscard]] MasterSemaphore& GetMasterSemaphore() noexcept { return m_master; }
@@ -84,7 +89,11 @@ private:
 	GraphicContext&              m_graphics;
 	AllocatorPool                m_allocators;
 	ID3D12GraphicsCommandList*   m_list = nullptr;
+	ID3D12GraphicsCommandList6*  m_mesh_list = nullptr;
 	CommandBuffer                m_command;
+	uint32_t                     m_recorded_release_mem_writes     = 0;
+	uint32_t                     m_recorded_release_mem_interrupts = 0;
+	uint32_t                     m_recorded_draws                  = 0;
 	std::queue<PendingOperation> m_pending_operations;
 	std::queue<PendingOperation> m_priority_operations;
 	std::mutex                   m_operation_mutex;

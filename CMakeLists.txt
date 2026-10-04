@@ -276,6 +276,9 @@ if(KYTY_GPU_BACKEND STREQUAL "D3D12")
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/imageInfo.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/textureCommon.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/blendMapping.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/bufferCache.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/streamBuffer.cpp"
+		"${KYTY_THIRD_PARTY_DIR}/D3D12MemoryAllocator/src/D3D12MemAlloc.cpp"
 	)
 elseif(NOT KYTY_GPU_BACKEND STREQUAL "Vulkan")
 	message(FATAL_ERROR "Unknown KYTY_GPU_BACKEND '${KYTY_GPU_BACKEND}'")
@@ -406,7 +409,9 @@ set(inc_headers
 )
 
 if(KYTY_GPU_BACKEND STREQUAL "D3D12")
-	list(APPEND inc_headers "${KYTY_SPIRV_TO_DXIL_ROOT}/include")
+	list(APPEND inc_headers "${KYTY_SPIRV_TO_DXIL_ROOT}/include" "${KYTY_THIRD_PARTY_DIR}/D3D12MemoryAllocator/include")
+	# Third-party source: its warnings are not ours to fix.
+	set_source_files_properties("${KYTY_THIRD_PARTY_DIR}/D3D12MemoryAllocator/src/D3D12MemAlloc.cpp" PROPERTIES COMPILE_OPTIONS "-w")
 endif()
 
 if (KYTY_CLANG_CL)

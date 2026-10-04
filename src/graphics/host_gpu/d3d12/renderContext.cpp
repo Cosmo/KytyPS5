@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/regionDefinitions.h"
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
 
@@ -11,8 +12,8 @@
 namespace Libs::Graphics {
 
 RenderContext::RenderContext(GraphicContext& graphics)
-    : m_graphics(graphics), m_render_executor(*this), m_command_scheduler(*this, graphics),
-      m_pipeline_cache(graphics) {
+    : m_graphics(graphics), m_render_executor(*this), m_command_scheduler(*this, graphics), m_descriptor_heap(graphics, m_command_scheduler),
+      m_pipeline_cache(graphics), m_buffer_cache(graphics, m_command_scheduler, m_page_manager, m_texture_cache) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 }
 
@@ -60,6 +61,8 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	if (access == PageFaultAccess::Write) {
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
+	} else {
+		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
 	return true;
 }
@@ -111,6 +114,22 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	m_gpu->SendCommandSync(unmap);
 }
 
+void RenderContext::PrepareBda() {
+	std::shared_lock lock(m_mapped_ranges_mutex);
+	m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) { m_buffer_cache.SynchronizeBuffersInRange(start, end - start); });
+	m_fault_process_pending = true;
+}
+
+void RenderContext::RunGarbageCollector() {
+	if (m_fault_process_pending) {
+		m_fault_process_pending = false;
+		m_buffer_cache.ProcessFaultBuffer();
+	}
+	m_texture_cache.ProcessDownloadImages();
+	m_texture_cache.RunGarbageCollector();
+	m_buffer_cache.RunGarbageCollector();
+}
+
 void RenderContext::AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id) {
 	Common::LockGuard lock(m_interrupt_mutex);
 	const auto        found = std::find_if(m_interrupt_eqs.begin(), m_interrupt_eqs.end(),
@@ -149,6 +168,11 @@ void RenderContext::TriggerInterrupt(int event_id, uint32_t context_id) {
 		}
 		EXIT_NOT_IMPLEMENTED(result != OK);
 	}
+}
+
+// There are no images yet to copy buffer contents from (the shared texture cache defines this).
+bool BufferCache::SynchronizeBufferFromImage(Buffer& /*buffer*/, uint64_t /*vaddr*/, uint64_t /*size*/) {
+	return false;
 }
 
 } // namespace Libs::Graphics

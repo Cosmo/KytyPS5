@@ -87,6 +87,7 @@ public:
 		uint64_t root_signatures   = 0;
 	};
 	[[nodiscard]] Statistics GetStatistics() const;
+	[[nodiscard]] const D3D12::DxilCompiler& GetCompiler() const noexcept { return m_compiler; }
 
 private:
 	struct RootLayoutHash {

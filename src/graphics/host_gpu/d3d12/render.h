@@ -7,6 +7,7 @@
 #include <cstdint>
 
 struct ID3D12GraphicsCommandList;
+struct ID3D12GraphicsCommandList6;
 
 namespace Libs::Graphics {
 
@@ -35,6 +36,8 @@ public:
 	void GlobalMemoryBarrier() const;
 
 	[[nodiscard]] ID3D12GraphicsCommandList* Handle() const;
+	// The same list, for recording mesh shader draws (GraphicContext::mesh_shaders).
+	[[nodiscard]] ID3D12GraphicsCommandList6* MeshHandle() const;
 	void                                     MarkEncodedDraw() noexcept { m_contains_encoded_draw = true; }
 	[[nodiscard]] bool                       ContainsEncodedDraw() const noexcept { return m_contains_encoded_draw; }
 	[[nodiscard]] GraphicContext&            GetGraphics() const noexcept { return m_graphics; }
@@ -62,6 +65,7 @@ private:
 	RenderContext&             m_context;
 	GraphicContext&            m_graphics;
 	ID3D12GraphicsCommandList* m_list                  = nullptr;
+	ID3D12GraphicsCommandList6* m_mesh_list            = nullptr;
 	DebugInfo                  m_debug;
 	bool                       m_contains_encoded_draw = false;
 	HW::Context*               m_registers             = nullptr;
