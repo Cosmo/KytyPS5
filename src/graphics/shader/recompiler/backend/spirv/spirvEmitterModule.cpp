@@ -235,6 +235,10 @@ void DefineDescriptors(EmitterState& state) {
 			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationDescriptorSet,
 			                            IR::NativeBinding(state.program.stage, binding.kind));
 			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBinding, 0);
+			// Read-only buffers become SRVs, whose states combine with index/vertex buffer use.
+			if (IR::IsReadOnlyBufferBinding(state.program.info, binding)) {
+				state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationNonWritable);
+			}
 #else
 			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationDescriptorSet, 0);
 			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBinding,

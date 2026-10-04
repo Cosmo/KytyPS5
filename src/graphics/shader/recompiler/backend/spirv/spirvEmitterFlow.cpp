@@ -41,9 +41,18 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 		return EmitAddU32(state, local,
 		                  EmitBinaryU32(state, spv::OpIMul, group, ConstantU32(state, size)));
 	}
-	const bool centroid = kind == IR::StageInputKind::BaryCoordSmoothCentroid;
+	const bool centroid_kind = kind == IR::StageInputKind::BaryCoordSmoothCentroid;
+	bool       centroid      = centroid_kind;
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// DXIL allows one perspective SV_Barycentrics input, so a shader reading the barycentrics at
+	// both the pixel center and the centroid gets the center for both. They differ only with MSAA,
+	// for pixels on triangle edges.
+	if (centroid && state.input_info.pixel->ps_perspective_center_vgpr != UINT32_MAX) {
+		centroid = false;
+	}
+#endif
 	const auto variable = InputVariableForKind(
-	    state, centroid ? IR::StageInputKind::BaryCoordSmooth : kind);
+	    state, centroid_kind ? IR::StageInputKind::BaryCoordSmooth : kind);
 	if (variable == 0) {
 		return ConstantU32(state, 0);
 	}
@@ -76,7 +85,7 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 		state.builder.AddFunction(spv::OpBitcast, TypeU32(state), bits, value);
 		return bits;
 	}
-	if (centroid || kind == IR::StageInputKind::BaryCoordSmooth ||
+	if (centroid_kind || kind == IR::StageInputKind::BaryCoordSmooth ||
 	    kind == IR::StageInputKind::BaryCoordNoPerspective) {
 		const auto value   = state.builder.AllocateId();
 		const auto bits    = state.builder.AllocateId();
