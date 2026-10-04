@@ -5,13 +5,17 @@
 
 #include <windows.h>
 #include <fileapifromapp.h>
+#include <fcntl.h>
+#include <io.h>
 
 #include <winrt/base.h>
 
 #include <zarchive/zarchivereader.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cwctype>
+#include <fstream>
 #include <memory>
 #include <mutex>
 
@@ -30,6 +34,39 @@ struct OpenArchive {
 std::mutex               g_mutex;
 std::vector<OpenArchive> g_open; // most recently used last
 
+// Opens the archive's file with the *FromApp functions (the Xbox lets the app read a USB drive only that way; a plain C++ stream cannot open the
+// file there) and gives the reader a stream on it. The stream does not own the C file, so the reader's deleter closes it.
+std::shared_ptr<ZArchiveReader> OpenReader(const std::filesystem::path& path) {
+	HANDLE handle = CreateFile2FromAppW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING, nullptr);
+	if (handle == INVALID_HANDLE_VALUE) {
+		Log("cannot open archive %ls (error %lu)\n", path.c_str(), GetLastError());
+		return nullptr;
+	}
+	const int descriptor = _open_osfhandle(reinterpret_cast<intptr_t>(handle), _O_RDONLY | _O_BINARY);
+	if (descriptor < 0) {
+		CloseHandle(handle);
+		Log("cannot open archive %ls (no C file descriptor)\n", path.c_str());
+		return nullptr;
+	}
+	FILE* file = _fdopen(descriptor, "rb");
+	if (file == nullptr) {
+		_close(descriptor);
+		Log("cannot open archive %ls (no C file)\n", path.c_str());
+		return nullptr;
+	}
+	std::ifstream   stream(file);
+	ZArchiveReader* reader = ZArchiveReader::OpenFromStream(std::move(stream));
+	if (reader == nullptr) {
+		fclose(file);
+		Log("archive %ls is not a readable .zar\n", path.c_str());
+		return nullptr;
+	}
+	return std::shared_ptr<ZArchiveReader>(reader, [file](ZArchiveReader* archive) {
+		delete archive;
+		fclose(file);
+	});
+}
+
 // The archive at `path`, kept open for the next read (opening reads its index).
 std::shared_ptr<ZArchiveReader> Open(const std::filesystem::path& path) {
 	std::lock_guard lock(g_mutex);
@@ -40,9 +77,8 @@ std::shared_ptr<ZArchiveReader> Open(const std::filesystem::path& path) {
 			return g_open.back().reader;
 		}
 	}
-	std::shared_ptr<ZArchiveReader> reader(ZArchiveReader::OpenFromFile(path));
+	auto reader = OpenReader(path);
 	if (!reader) {
-		Log("cannot open archive %ls\n", path.c_str());
 		return nullptr;
 	}
 	if (g_open.size() >= MAX_OPEN_ARCHIVES) {

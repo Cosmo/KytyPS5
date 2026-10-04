@@ -29,9 +29,11 @@ if(NOT EXISTS "${KYTY_JSON_INCLUDE_DIR}/nlohmann/json.hpp")
 	message(FATAL_ERROR "nlohmann/json.hpp not found: run 'git submodule update --init 3rdparty/nlohmann_json' or set KYTY_JSON_INCLUDE_DIR")
 endif()
 
-# ZArchive reads the .zar game archives, with zstd. The same versions and the same patch as upstream's 3rdparty/CMakeLists.txt; a folder with
-# the sources can be given instead of fetching them (KYTY_ZSTD_SOURCE_DIR, KYTY_ZARCHIVE_SOURCE_DIR; the ZArchive one must be patched already).
+# ZArchive reads the .zar game archives, with zstd. The same versions and patch as upstream's 3rdparty/CMakeLists.txt, plus a small patch that lets the app
+# open the file itself (zarchive-open-from-stream.patch); a folder with
+# the sources can be given instead of fetching them (KYTY_ZSTD_SOURCE_DIR, KYTY_ZARCHIVE_SOURCE_DIR; the ZArchive one must be patched already, with upstream's patch and zarchive-open-from-stream.patch).
 include(FetchContent)
+find_package(Git REQUIRED)
 set(KYTY_ZSTD_SOURCE_DIR "" CACHE PATH "zstd sources (optional)")
 set(KYTY_ZARCHIVE_SOURCE_DIR "" CACHE PATH "ZArchive sources, with upstream's patch applied (optional)")
 set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
@@ -59,6 +61,7 @@ FetchContent_Declare(
 	GIT_TAG d2c717730092c7bf8cbb033b12fd4001b7c4d932
 	GIT_SHALLOW FALSE
 	PATCH_COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/patches/zarchive-reader.patch"
+	COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace "${CMAKE_CURRENT_SOURCE_DIR}/zarchive-open-from-stream.patch"
 	SOURCE_SUBDIR kyty-library-only
 )
 FetchContent_MakeAvailable(zstd zarchive_source)
