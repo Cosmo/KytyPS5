@@ -248,6 +248,40 @@ struct PageManager::Impl {
 		release_pending();
 	}
 
+
+	// Xbox fork (T3): after a host copy made protected pages accessible for a moment, give every page the protection it should have now:
+	// the page manager's own state for pages that have watchers (it may have changed while the copy ran), `old_mode` for the others.
+	void RestoreHostProtection(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode old_mode) noexcept {
+		const auto begin = Common::AlignDown(vaddr, PAGE_SIZE);
+		const auto end   = Common::AlignUp(vaddr + size, PAGE_SIZE);
+		for (auto chunk_begin = begin; chunk_begin < end;) {
+			const auto chunk_end   = std::min(end, Common::AlignUp(chunk_begin + 1, REGION_SIZE));
+			const auto region_base = Common::AlignDown(chunk_begin, REGION_SIZE);
+			auto*      region      = FindRegion(chunk_begin);
+			if (region == nullptr) {
+				Protect(chunk_begin, chunk_end - chunk_begin, old_mode);
+				chunk_begin = chunk_end;
+				continue;
+			}
+			SpinGuard lock(region->lock);
+			const auto mode_of = [&](uint64_t address) {
+				const auto& page = region->pages[static_cast<size_t>((address - region_base) / PAGE_SIZE)];
+				return (page.write_watchers != 0 || page.access_watchers != 0) ? page.Perms() : old_mode;
+			};
+			auto run_begin = chunk_begin;
+			auto run_mode  = mode_of(chunk_begin);
+			for (auto address = chunk_begin + PAGE_SIZE; address <= chunk_end; address += PAGE_SIZE) {
+				const auto mode = address < chunk_end ? mode_of(address) : run_mode;
+				if (address == chunk_end || mode != run_mode) {
+					Protect(run_begin, address - run_begin, run_mode);
+					run_begin = address;
+					run_mode  = mode;
+				}
+			}
+			chunk_begin = chunk_end;
+		}
+	}
+
 	template <bool track, bool is_read>
 	void UpdatePageWatchers(uint64_t vaddr, uint64_t size) {
 		ValidateRange(vaddr, size);
@@ -277,6 +311,10 @@ static_assert(std::atomic<void*>::is_always_lock_free);
 PageManager::PageManager(): m_impl(std::make_unique<Impl>()) {}
 
 PageManager::~PageManager() = default;
+
+void PageManager::RestoreHostProtection(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode old_mode) noexcept {
+	m_impl->RestoreHostProtection(vaddr, size, old_mode);
+}
 
 uint64_t PageManager::GetPageSize() const {
 	return PAGE_SIZE;

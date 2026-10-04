@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/d3d12/windowContext.h"
 #include "graphics/presentation/presenter.h"
 #include "kernel/memory.h"
+#include "log.h"
 
 #include <windows.h>
 
@@ -52,11 +53,18 @@ Presenter& WindowInit(uint32_t width, uint32_t height) {
         static uint64_t frames        = 0;
         static uint64_t second_start  = GetTickCount64();
         static uint64_t second_frames = 0;
+        static uint64_t last_logged   = 0;
         frames++;
         second_frames++;
         const auto now = GetTickCount64();
         if (now - second_start >= 1000) {
             EmulatorHost::Get().SetTitle("KytyPS5 frame: " + std::to_string(frames) + ", fps: " + std::to_string(second_frames * 1000 / (now - second_start)));
+            // the same, every 5 seconds, in the app log (a console shows no window title)
+            if (now - last_logged >= 5000) {
+                Kyty::Uwp::Log("frame: %llu, fps: %llu\n", static_cast<unsigned long long>(frames),
+                               static_cast<unsigned long long>(second_frames * 1000 / (now - second_start)));
+                last_logged = now;
+            }
             second_start  = now;
             second_frames = 0;
         }
