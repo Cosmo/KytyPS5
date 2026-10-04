@@ -65,7 +65,11 @@ void Log(const char* format, ...) {
 		timed += *c;
 		line_start = *c == '\n';
 	}
-	OutputDebugStringA(timed.c_str());
+	// OutputDebugString raises an exception, which the system cannot dispatch on a guest thread (its stack is not the thread's own): only with a
+	// debugger attached, which handles it first.
+	if (IsDebuggerPresent()) {
+		OutputDebugStringA(timed.c_str());
+	}
 	if (file != nullptr) {
 		fputs(timed.c_str(), file);
 		fflush(file);

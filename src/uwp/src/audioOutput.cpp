@@ -4,6 +4,7 @@
 #include "libs/audioOutput.h"
 
 #include "common/logging/log.h"
+#include "log.h"
 
 #include <windows.h>
 
@@ -24,6 +25,7 @@ public:
 	std::mutex                       mutex;
 	std::deque<std::vector<uint8_t>> buffers;
 	std::atomic_uint32_t             queued_size {0};
+	uint64_t                         last_report = 0;
 
 	void STDMETHODCALLTYPE OnBufferEnd(void* /*context*/) noexcept override {
 		std::lock_guard lock(mutex);
@@ -119,6 +121,7 @@ Stream* Open(uint32_t freq, uint32_t channels, bool is_float) {
 	}
 	stream->voice->Start(0);
 	LOGF("AudioOut: opened XAudio2 stream (%u Hz, %u ch, %s)\n", freq, channels, is_float ? "float" : "16-bit");
+	Kyty::Uwp::Log("audio: opened an XAudio2 stream (%u Hz, %u ch, %s)\n", freq, channels, is_float ? "float" : "16-bit");
 	return stream;
 }
 
@@ -156,6 +159,14 @@ bool Queue(Stream* stream, const void* data, uint32_t size) {
 		stream->buffers.pop_back();
 		LOGF("AudioOut: XAudio2 submit failed: 0x%08x\n", static_cast<unsigned>(result));
 		return false;
+	}
+	// Every 5 seconds, per stream, the samples the device has played (in the app's own small log): proof that the sound arrives.
+	const auto now = GetTickCount64();
+	if (now - stream->last_report >= 5000) {
+		stream->last_report = now;
+		XAUDIO2_VOICE_STATE state {};
+		stream->voice->GetState(&state);
+		Kyty::Uwp::Log("audio: %llu samples played, %u buffers queued\n", static_cast<unsigned long long>(state.SamplesPlayed), state.BuffersQueued);
 	}
 	return true;
 }
