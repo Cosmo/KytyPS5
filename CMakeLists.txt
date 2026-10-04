@@ -372,7 +372,17 @@ endif()
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus)
 
 if(KYTY_GPU_BACKEND STREQUAL "D3D12")
-	list(APPEND kyty_emulator_link_libraries d3d12 dxgi dxguid)
+	# Mesa's spirv_to_dxil (shader translation only) and the Windows SDK DXIL validator, which
+	# signs the translated shaders. See docs/d3d12-backend.md for building spirv_to_dxil.
+	set(KYTY_SPIRV_TO_DXIL_ROOT "" CACHE PATH "Directory with include/, lib/ and bin/ of spirv_to_dxil")
+	if(NOT EXISTS "${KYTY_SPIRV_TO_DXIL_ROOT}/include/spirv_to_dxil.h")
+		message(FATAL_ERROR "Set KYTY_SPIRV_TO_DXIL_ROOT to a spirv_to_dxil build (see docs/d3d12-backend.md)")
+	endif()
+	find_file(KYTY_DXIL_DLL dxil.dll PATHS "$ENV{WindowsSdkVerBinPath}/x64" NO_DEFAULT_PATH)
+	if(NOT KYTY_DXIL_DLL)
+		message(FATAL_ERROR "dxil.dll not found; configure from a Visual Studio developer shell or set KYTY_DXIL_DLL")
+	endif()
+	list(APPEND kyty_emulator_link_libraries d3d12 dxgi dxguid "${KYTY_SPIRV_TO_DXIL_ROOT}/lib/spirv_to_dxil.lib")
 endif()
 
 # Linux system libraries.
@@ -392,6 +402,10 @@ set(inc_headers
 	${KYTY_THIRD_PARTY_DIR}/renderdoc
 	${KYTY_THIRD_PARTY_DIR}/stb
 )
+
+if(KYTY_GPU_BACKEND STREQUAL "D3D12")
+	list(APPEND inc_headers "${KYTY_SPIRV_TO_DXIL_ROOT}/include")
+endif()
 
 if (KYTY_CLANG_CL)
 	list(APPEND kyty_emulator_link_libraries winpthread)
@@ -805,6 +819,11 @@ elseif(WIN32 OR LINUX)
 	# LINK_FLAGS is a space-delimited string: a -Map path containing spaces would
 	# be split into bogus arguments, so pass it as a discrete link option instead.
 	target_link_options(kyty_emulator PRIVATE "-Wl,-Map=${KYTY_EMULATOR_MAP_LINK_PATH}")
+endif()
+if(KYTY_GPU_BACKEND STREQUAL "D3D12")
+	add_custom_command(TARGET kyty_emulator POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_SPIRV_TO_DXIL_ROOT}/bin/spirv_to_dxil.dll" $<TARGET_FILE_DIR:kyty_emulator>/spirv_to_dxil.dll
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_DXIL_DLL}" $<TARGET_FILE_DIR:kyty_emulator>/dxil.dll)
 endif()
 
 if(LINUX)

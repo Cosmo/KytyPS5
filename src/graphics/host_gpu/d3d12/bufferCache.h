@@ -56,14 +56,6 @@ public:
 	void               UnmapMemory(uint64_t /*vaddr*/, uint64_t /*size*/) noexcept {}
 };
 
-class PipelineCache {
-public:
-	PipelineCache() = default;
-	KYTY_CLASS_NO_COPY(PipelineCache);
-
-	void Save() {}
-};
-
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_D3D12_BUFFERCACHE_H_

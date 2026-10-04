@@ -1,0 +1,1091 @@
+diff --git a/src/compiler/nir/nir_lower_clip_halfz.c b/src/compiler/nir/nir_lower_clip_halfz.c
+index 75420f6..c3554dd 100644
+--- a/src/compiler/nir/nir_lower_clip_halfz.c
++++ b/src/compiler/nir/nir_lower_clip_halfz.c
+@@ -56,7 +56,8 @@ nir_lower_clip_halfz(nir_shader *shader)
+ {
+    if (shader->info.stage != MESA_SHADER_VERTEX &&
+        shader->info.stage != MESA_SHADER_GEOMETRY &&
+-       shader->info.stage != MESA_SHADER_TESS_EVAL)
++       shader->info.stage != MESA_SHADER_TESS_EVAL &&
++       shader->info.stage != MESA_SHADER_MESH)
+       return false;
+ 
+    return nir_shader_intrinsics_pass(shader, lower_pos_write,
+diff --git a/src/microsoft/compiler/dxil_enums.h b/src/microsoft/compiler/dxil_enums.h
+index d6bd8c1..dcad659 100644
+--- a/src/microsoft/compiler/dxil_enums.h
++++ b/src/microsoft/compiler/dxil_enums.h
+@@ -276,6 +276,7 @@ enum dxil_shader_tag {
+    DXIL_SHADER_TAG_DS_STATE    = 2,
+    DXIL_SHADER_TAG_HS_STATE    = 3,
+    DXIL_SHADER_TAG_NUM_THREADS = 4,
++   DXIL_SHADER_TAG_MS_STATE    = 9,
+    DXIL_SHADER_TAG_WAVE_SIZE   = 11,
+    DXIL_SHADER_TAG_WAVE_SIZE_RANGE = 23,
+ };
+diff --git a/src/microsoft/compiler/dxil_function.c b/src/microsoft/compiler/dxil_function.c
+index f5296a7..011b3e5 100644
+--- a/src/microsoft/compiler/dxil_function.c
++++ b/src/microsoft/compiler/dxil_function.c
+@@ -92,6 +92,10 @@ static struct  predefined_func_descr predefined_funcs[] = {
+ {"dx.op.evalSampleIndex", "O", "iiici", DXIL_ATTR_KIND_READ_NONE},
+ {"dx.op.coverage", "i", "i", DXIL_ATTR_KIND_READ_NONE},
+ {"dx.op.storePatchConstant", "v", "iiicO", DXIL_ATTR_KIND_NO_UNWIND},
++{"dx.op.setMeshOutputCounts", "v", "iii", DXIL_ATTR_KIND_NO_UNWIND},
++{"dx.op.emitIndices", "v", "iiiii", DXIL_ATTR_KIND_NO_UNWIND},
++{"dx.op.storeVertexOutput", "v", "iiicOi", DXIL_ATTR_KIND_NO_UNWIND},
++{"dx.op.storePrimitiveOutput", "v", "iiicOi", DXIL_ATTR_KIND_NO_UNWIND},
+ {"dx.op.loadPatchConstant", "O", "iiic", DXIL_ATTR_KIND_READ_NONE},
+ {"dx.op.loadOutputControlPoint", "O", "iiici", DXIL_ATTR_KIND_READ_NONE},
+ {"dx.op.createHandleFromBinding", "@", "i#ib", DXIL_ATTR_KIND_READ_NONE},
+diff --git a/src/microsoft/compiler/dxil_module.h b/src/microsoft/compiler/dxil_module.h
+index 08ba263..5324b7c 100644
+--- a/src/microsoft/compiler/dxil_module.h
++++ b/src/microsoft/compiler/dxil_module.h
+@@ -48,6 +48,7 @@ enum dxil_shader_kind {
+    DXIL_HULL_SHADER = 3,
+    DXIL_DOMAIN_SHADER = 4,
+    DXIL_COMPUTE_SHADER = 5,
++   DXIL_MESH_SHADER = 13,
+ };
+ 
+ extern int debug_dxil;
+diff --git a/src/microsoft/compiler/dxil_nir.c b/src/microsoft/compiler/dxil_nir.c
+index 25a844c..b8a0ac5 100644
+--- a/src/microsoft/compiler/dxil_nir.c
++++ b/src/microsoft/compiler/dxil_nir.c
+@@ -1150,9 +1150,18 @@ get_textures_for_sampler_type(const struct glsl_type *type)
+          glsl_without_array(type)), type);
+ }
+ 
++struct split_samplers_state {
++   struct hash_table_u64 *vars;
++   /* Added to the register space of comparison samplers cloned from regular ones, so both
++    * declarations can coexist; 0 keeps them in the same space. */
++   uint32_t shadow_space_offset;
++};
++
+ static bool
+-redirect_sampler_derefs(struct nir_builder *b, nir_instr *instr, void *data)
++redirect_sampler_derefs(struct nir_builder *b, nir_instr *instr, void *cb_data)
+ {
++   struct split_samplers_state *state = cb_data;
++   struct hash_table_u64 *data = state->vars;
+    if (instr->type != nir_instr_type_tex)
+       return false;
+ 
+@@ -1227,6 +1236,8 @@ redirect_sampler_derefs(struct nir_builder *b, nir_instr *instr, void *data)
+       nir_shader_add_variable(b->shader, new_var);
+       new_var->type = 
+          get_bare_samplers_for_type(old_var->type, tex->is_shadow);
++      if (tex->is_shadow)
++         new_var->data.descriptor_set += state->shadow_space_offset;
+       _mesa_hash_table_u64_insert(data, var_key, new_var);
+    }
+ 
+@@ -1325,11 +1336,18 @@ redirect_texture_derefs(struct nir_builder *b, nir_instr *instr, void *data)
+ 
+ bool
+ dxil_nir_split_typed_samplers(nir_shader *nir)
++{
++   return dxil_nir_split_typed_samplers_to_space(nir, 0);
++}
++
++bool
++dxil_nir_split_typed_samplers_to_space(nir_shader *nir, uint32_t shadow_space_offset)
+ {
+    struct hash_table_u64 *hash_table = _mesa_hash_table_u64_create(NULL);
++   struct split_samplers_state state = {hash_table, shadow_space_offset};
+ 
+    bool progress = nir_shader_instructions_pass(nir, redirect_sampler_derefs,
+-      nir_metadata_control_flow | nir_metadata_loop_analysis, hash_table);
++      nir_metadata_control_flow | nir_metadata_loop_analysis, &state);
+ 
+    _mesa_hash_table_u64_clear(hash_table);
+ 
+@@ -2825,6 +2843,8 @@ dxil_nir_kill_undefined_varyings(nir_shader *shader, uint64_t prev_stage_written
+ static bool
+ is_dead_out_variable(nir_variable *var, void *data)
+ {
++   if (var->data.per_primitive && var->data.location == VARYING_SLOT_CULL_PRIMITIVE)
++      return false;
+    return !nir_slot_is_sysval_output(var->data.location, MESA_SHADER_NONE);
+ }
+ 
+@@ -2860,17 +2880,22 @@ kill_unused_outputs(struct nir_builder *b,
+       var->data.location - VARYING_SLOT_PATCH0 :
+       var->data.location;
+ 
++   /* Mesh shader outputs are arrays over all vertices or primitives */
++   const struct glsl_type *type = var->type;
++   if (b->shader->info.stage == MESA_SHADER_MESH && nir_is_arrayed_io(var, MESA_SHADER_MESH))
++      type = glsl_get_array_element(type);
++
+    /* Outputs read back by load_deref in the same shader (e.g. TCS patch-
+     * constant function reading per-vertex outputs after a barrier) must
+     * stay alive even if the next stage doesn't consume them. */
+    uint64_t intra = var->data.patch && var->data.location >= VARYING_SLOT_PATCH0 ?
+       masks->intra_shader_patch_load_mask : masks->intra_shader_load_mask;
+-   if (BITFIELD64_RANGE(loc, glsl_varying_count(var->type)) & intra)
++   if (BITFIELD64_RANGE(loc, glsl_varying_count(type)) & intra)
+       return false;
+ 
+    uint64_t read = var->data.patch && var->data.location >= VARYING_SLOT_PATCH0 ?
+       masks->patch_io_mask : masks->io_mask;
+-   if (BITFIELD64_RANGE(loc, glsl_varying_count(var->type)) & read) {
++   if (BITFIELD64_RANGE(loc, glsl_varying_count(type)) & read) {
+       if (!masks->frac_io_mask || !var->data.location_frac ||
+           var->data.location < VARYING_SLOT_VAR0 ||
+           BITSET_TEST(masks->frac_io_mask, (var->data.location - VARYING_SLOT_VAR0) * 4 + var->data.location_frac))
+diff --git a/src/microsoft/compiler/dxil_nir.h b/src/microsoft/compiler/dxil_nir.h
+index 309c5d2..27e26d0 100644
+--- a/src/microsoft/compiler/dxil_nir.h
++++ b/src/microsoft/compiler/dxil_nir.h
+@@ -52,6 +52,7 @@ bool dxil_nir_lower_system_values_to_zero(nir_shader *shader,
+                                           uint32_t count);
+ bool dxil_nir_lower_system_values(nir_shader *shader);
+ bool dxil_nir_split_typed_samplers(nir_shader *shader);
++bool dxil_nir_split_typed_samplers_to_space(nir_shader *shader, uint32_t shadow_space_offset);
+ bool dxil_nir_lower_sysval_to_load_input(nir_shader *s, nir_variable **sysval_vars);
+ bool dxil_nir_lower_vs_vertex_conversion(nir_shader *s, enum pipe_format target_formats[]);
+ 
+diff --git a/src/microsoft/compiler/dxil_signature.c b/src/microsoft/compiler/dxil_signature.c
+index 0219e54..692b7f3 100644
+--- a/src/microsoft/compiler/dxil_signature.c
++++ b/src/microsoft/compiler/dxil_signature.c
+@@ -128,6 +128,10 @@ get_additional_semantic_info(nir_shader *s, nir_variable *var, struct semantic_i
+ 
+    info->comp_type = dxil_get_prog_sig_comp_type(type);
+    info->sig_comp_type = dxil_get_comp_type_from_prog_sig_type(info->comp_type);
++   /* SV_CullPrimitive is 32-bit in the container but i1 in the metadata; other booleans
++    * (SV_IsFrontFace) are uint */
++   if (info->kind == DXIL_SEM_CULL_PRIMITIVE)
++      info->sig_comp_type = DXIL_COMP_TYPE_I1;
+ 
+    bool is_depth = is_depth_output(info->kind);
+ 
+@@ -142,10 +146,15 @@ get_additional_semantic_info(nir_shader *s, nir_variable *var, struct semantic_i
+    } else if (is_depth ||
+               (info->kind == DXIL_SEM_PRIMITIVE_ID && is_gs_input) ||
+               info->kind == DXIL_SEM_COVERAGE ||
+-              info->kind == DXIL_SEM_SAMPLE_INDEX) {
++              info->kind == DXIL_SEM_SAMPLE_INDEX ||
++              info->kind == DXIL_SEM_CULL_PRIMITIVE) {
+       // This turns into a 'N/A' mask in the disassembly
+       info->start_row = -1;
+       info->cols = 1;
++   } else if (info->kind == DXIL_SEM_BARYCENTRICS) {
++      // Not packed into input registers either; still read with loadInput
++      info->start_row = -1;
++      info->cols = 3;
+    } else if (info->kind == DXIL_SEM_TESS_FACTOR ||
+               info->kind == DXIL_SEM_INSIDE_TESS_FACTOR) {
+       assert(var->data.compact);
+@@ -265,6 +274,13 @@ get_semantic_name(nir_variable *var, struct semantic_info *info,
+ {
+    info->kind = DXIL_SEM_INVALID;
+    info->interpolation = get_interpolation(var);
++   /* Shares its slot with VARYING_SLOT_BOUNDING_BOX0 */
++   if (var->data.mode == nir_var_shader_out && var->data.per_primitive &&
++       var->data.location == VARYING_SLOT_CULL_PRIMITIVE) {
++      snprintf(info->name, 64, "%s", "SV_CullPrimitive");
++      info->kind = DXIL_SEM_CULL_PRIMITIVE;
++      return;
++   }
+    switch (var->data.location) {
+ 
+    case VARYING_SLOT_POS:
+@@ -334,7 +350,17 @@ get_semantic_in_name(nir_variable *var, struct semantic_info *info, mesa_shader_
+        glsl_type_is_array(type))
+       type = glsl_get_array_element(type);
+ 
+-   get_semantic_name(var, info, type);
++   /* Barycentric coordinates, see lower_barycentric_coord_instr in nir_to_dxil.c */
++   if (stage == MESA_SHADER_FRAGMENT &&
++       (var->data.location == VARYING_SLOT_BOUNDING_BOX0 ||
++        var->data.location == VARYING_SLOT_BOUNDING_BOX1)) {
++      info->kind = DXIL_SEM_BARYCENTRICS;
++      info->index = var->data.location - VARYING_SLOT_BOUNDING_BOX0;
++      info->interpolation = get_interpolation(var);
++      snprintf(info->name, 64, "%s", "SV_Barycentrics");
++   } else {
++      get_semantic_name(var, info, type);
++   }
+    info->sysvalue_name = in_sysvalue_name(var);
+ }
+ 
+@@ -642,7 +668,8 @@ process_output_signature(struct dxil_module *mod, nir_shader *s)
+    unsigned next_row = 0;
+    nir_foreach_variable_with_modes(var, s, nir_var_shader_out) {
+       struct semantic_info semantic = {0};
+-      if (var->data.patch)
++      /* Mesh shader per-primitive outputs go into the primitive signature */
++      if (var->data.patch || (s->info.stage == MESA_SHADER_MESH && var->data.per_primitive))
+          continue;
+ 
+       if (s->info.stage == MESA_SHADER_FRAGMENT) {
+@@ -733,23 +760,29 @@ patch_sysvalue_name(nir_variable *var)
+    }
+ }
+ 
++/* Also builds the primitive signature of mesh shaders, which DXIL stores in the same place. */
+ static void
+ process_patch_const_signature(struct dxil_module *mod, nir_shader *s)
+ {
++   bool is_mesh = s->info.stage == MESA_SHADER_MESH;
+    if (s->info.stage != MESA_SHADER_TESS_CTRL &&
+-       s->info.stage != MESA_SHADER_TESS_EVAL)
++       s->info.stage != MESA_SHADER_TESS_EVAL && !is_mesh)
+       return;
+ 
+-   nir_variable_mode mode = s->info.stage == MESA_SHADER_TESS_CTRL ?
+-      nir_var_shader_out : nir_var_shader_in;
++   nir_variable_mode mode = s->info.stage == MESA_SHADER_TESS_EVAL ?
++      nir_var_shader_in : nir_var_shader_out;
+    unsigned num_consts = 0;
+    unsigned next_row = 0;
+    nir_foreach_variable_with_modes(var, s, mode) {
+       struct semantic_info semantic = {0};
+-      if (!var->data.patch)
++      if (is_mesh ? !var->data.per_primitive ||
++                    var->data.location == VARYING_SLOT_PRIMITIVE_INDICES :
++                    !var->data.patch)
+          continue;
+ 
+       const struct glsl_type *type = var->type;
++      if (nir_is_arrayed_io(var, s->info.stage))
++         type = glsl_get_array_element(type);
+       get_semantic_name(var, &semantic, type);
+ 
+       mod->patch_consts[num_consts].sysvalue = patch_sysvalue_name(var);
+diff --git a/src/microsoft/compiler/dxil_signature.h b/src/microsoft/compiler/dxil_signature.h
+index a40ddce..b1cf335 100644
+--- a/src/microsoft/compiler/dxil_signature.h
++++ b/src/microsoft/compiler/dxil_signature.h
+@@ -111,6 +111,14 @@ struct dxil_psv_runtime_info_0 {
+          char sample_frequency;
+       } ps;
+ 
++      struct {
++         uint32_t group_shared_bytes_used;
++         uint32_t group_shared_bytes_dependent_on_view_id;
++         uint32_t payload_size_in_bytes;
++         uint16_t max_output_vertices;
++         uint16_t max_output_primitives;
++      } ms;
++
+       /* Maximum sized defining the union size (MSInfo)*/
+       struct {
+          uint32_t dummy1[3];
+@@ -128,6 +136,10 @@ struct dxil_psv_runtime_info_1 {
+    union {
+      uint16_t max_vertex_count;          // MaxVertexCount for GS only (max 1024)
+      uint8_t sig_patch_const_or_prim_vectors;  // Output for HS; Input for DS; Primitive output for MS (overlaps MS1::SigPrimVectors)
++     struct {
++        uint8_t sig_prim_vectors;
++        uint8_t mesh_output_topology;
++     } ms1;
+      // struct { uint8_t dummy[2]; } fill;
+    };
+ 
+diff --git a/src/microsoft/compiler/nir_to_dxil.c b/src/microsoft/compiler/nir_to_dxil.c
+index 09a3203..787f5f4 100644
+--- a/src/microsoft/compiler/nir_to_dxil.c
++++ b/src/microsoft/compiler/nir_to_dxil.c
+@@ -229,6 +229,8 @@ get_shader_kind_str(enum dxil_shader_kind kind)
+       return "ds";
+    case DXIL_COMPUTE_SHADER:
+       return "cs";
++   case DXIL_MESH_SHADER:
++      return "ms";
+    default:
+       UNREACHABLE("invalid shader kind");
+    }
+@@ -384,6 +386,11 @@ enum dxil_intr {
+    DXIL_INTR_DOT4_ADD_I8_PACKED = 163,
+    DXIL_INTR_DOT4_ADD_U8_PACKED = 164,
+ 
++   DXIL_INTR_SET_MESH_OUTPUT_COUNTS = 168,
++   DXIL_INTR_EMIT_INDICES = 169,
++   DXIL_INTR_STORE_VERTEX_OUTPUT = 171,
++   DXIL_INTR_STORE_PRIMITIVE_OUTPUT = 172,
++
+    DXIL_INTR_ANNOTATE_HANDLE = 216,
+    DXIL_INTR_CREATE_HANDLE_FROM_BINDING = 217,
+    DXIL_INTR_CREATE_HANDLE_FROM_HEAP = 218,
+@@ -1344,8 +1351,17 @@ emit_uav(struct ntd_context *ctx, unsigned binding, unsigned space, unsigned cou
+    add_resource(ctx, res_kind == DXIL_RESOURCE_KIND_RAW_BUFFER ? DXIL_RES_UAV_RAW : DXIL_RES_UAV_TYPED, res_kind, &layout);
+    if (res_kind == DXIL_RESOURCE_KIND_RAW_BUFFER)
+       ctx->mod.raw_and_structured_buffers = true;
+-   if (ctx->mod.shader_kind != DXIL_PIXEL_SHADER &&
+-       ctx->mod.shader_kind != DXIL_COMPUTE_SHADER)
++   /* Validator 1.8 expects this D3D11.1 feature only for the stages it extended, not for mesh
++    * and amplification shaders. */
++   const bool uav_feature_stage =
++      ctx->mod.minor_validator < 8 ?
++         ctx->mod.shader_kind != DXIL_PIXEL_SHADER &&
++         ctx->mod.shader_kind != DXIL_COMPUTE_SHADER :
++         ctx->mod.shader_kind == DXIL_VERTEX_SHADER ||
++         ctx->mod.shader_kind == DXIL_HULL_SHADER ||
++         ctx->mod.shader_kind == DXIL_DOMAIN_SHADER ||
++         ctx->mod.shader_kind == DXIL_GEOMETRY_SHADER;
++   if (uav_feature_stage)
+       ctx->mod.feats.uavs_at_every_stage = true;
+ 
+    return true;
+@@ -1793,6 +1809,34 @@ emit_threads(struct ntd_context *ctx)
+    return dxil_get_metadata_node(&ctx->mod, threads_nodes, ARRAY_SIZE(threads_nodes));
+ }
+ 
++static unsigned
++get_mesh_output_topology(const nir_shader *s)
++{
++   switch (s->info.mesh.primitive_type) {
++   case MESA_PRIM_LINES:
++      return 1;
++   case MESA_PRIM_TRIANGLES:
++      return 2;
++   default:
++      UNREACHABLE("unsupported mesh output primitive");
++   }
++}
++
++static const struct dxil_mdnode *
++emit_ms_state(struct ntd_context *ctx)
++{
++   const nir_shader *s = ctx->shader;
++   const struct dxil_mdnode *ms_state_nodes[] = {
++      emit_threads(ctx),
++      dxil_get_metadata_int32(&ctx->mod, s->info.mesh.max_vertices_out),
++      dxil_get_metadata_int32(&ctx->mod, s->info.mesh.max_primitives_out),
++      dxil_get_metadata_int32(&ctx->mod, get_mesh_output_topology(s)),
++      /* No task shader payload */
++      dxil_get_metadata_int32(&ctx->mod, 0),
++   };
++   return dxil_get_metadata_node(&ctx->mod, ms_state_nodes, ARRAY_SIZE(ms_state_nodes));
++}
++
+ static const struct dxil_mdnode *
+ emit_wave_size(struct ntd_context *ctx)
+ {
+@@ -2033,6 +2077,9 @@ emit_metadata(struct ntd_context *ctx)
+    } else if (ctx->mod.shader_kind == DXIL_DOMAIN_SHADER) {
+       if (!emit_tag(ctx, DXIL_SHADER_TAG_DS_STATE, emit_ds_state(ctx)))
+          return false;
++   } else if (ctx->mod.shader_kind == DXIL_MESH_SHADER) {
++      if (!emit_tag(ctx, DXIL_SHADER_TAG_MS_STATE, emit_ms_state(ctx)))
++         return false;
+    } else if (ctx->mod.shader_kind == DXIL_COMPUTE_SHADER) {
+       if (!emit_tag(ctx, DXIL_SHADER_TAG_NUM_THREADS, emit_threads(ctx)))
+          return false;
+@@ -3086,7 +3133,8 @@ emit_barrier_impl(struct ntd_context *ctx, nir_variable_mode modes, mesa_scope e
+    if (execution_scope == SCOPE_WORKGROUP)
+       flags |= DXIL_BARRIER_MODE_SYNC_THREAD_GROUP;
+ 
+-   bool is_compute = ctx->mod.shader_kind == DXIL_COMPUTE_SHADER;
++   bool is_compute = ctx->mod.shader_kind == DXIL_COMPUTE_SHADER ||
++                     ctx->mod.shader_kind == DXIL_MESH_SHADER;
+ 
+    if ((modes & (nir_var_mem_ssbo | nir_var_mem_global | nir_var_image)) &&
+        (mem_scope > SCOPE_WORKGROUP || !is_compute)) {
+@@ -3564,24 +3612,83 @@ find_patch_matching_variable_by_driver_location(nir_shader *s, nir_variable_mode
+    return NULL;
+ }
+ 
++static bool
++emit_set_mesh_output_counts(struct ntd_context *ctx, nir_intrinsic_instr *intr)
++{
++   const struct dxil_func *func = dxil_get_function(&ctx->mod, "dx.op.setMeshOutputCounts", DXIL_NONE);
++   const struct dxil_value *args[] = {
++      dxil_module_get_int32_const(&ctx->mod, DXIL_INTR_SET_MESH_OUTPUT_COUNTS),
++      get_src(ctx, &intr->src[0], 0, nir_type_uint),
++      get_src(ctx, &intr->src[1], 0, nir_type_uint),
++   };
++   if (!func || !args[0] || !args[1] || !args[2])
++      return false;
++   return dxil_emit_call_void(&ctx->mod, func, args, ARRAY_SIZE(args));
++}
++
++/* Mesh shader triangle indices aren't a signature element; all three are written at once. */
++static bool
++emit_mesh_indices(struct ntd_context *ctx, nir_intrinsic_instr *intr)
++{
++   if (intr->num_components != 3 || nir_intrinsic_write_mask(intr) != 0x7) {
++      ctx->logger->log(ctx->logger->priv, "Mesh shader primitive indices must be written as triangles\n");
++      return false;
++   }
++   const struct dxil_func *func = dxil_get_function(&ctx->mod, "dx.op.emitIndices", DXIL_NONE);
++   const struct dxil_value *args[] = {
++      dxil_module_get_int32_const(&ctx->mod, DXIL_INTR_EMIT_INDICES),
++      get_src(ctx, &intr->src[1], 0, nir_type_uint),
++      get_src(ctx, &intr->src[0], 0, nir_type_uint),
++      get_src(ctx, &intr->src[0], 1, nir_type_uint),
++      get_src(ctx, &intr->src[0], 2, nir_type_uint),
++   };
++   if (!func)
++      return false;
++   for (unsigned i = 0; i < ARRAY_SIZE(args); ++i) {
++      if (!args[i])
++         return false;
++   }
++   return dxil_emit_call_void(&ctx->mod, func, args, ARRAY_SIZE(args));
++}
++
+ static bool
+ emit_store_output_via_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *intr)
+ {
++   bool is_mesh = ctx->mod.shader_kind == DXIL_MESH_SHADER;
+    assert(intr->intrinsic == nir_intrinsic_store_output ||
+-          ctx->mod.shader_kind == DXIL_HULL_SHADER);
+-   bool is_patch_constant = intr->intrinsic == nir_intrinsic_store_output &&
+-      ctx->mod.shader_kind == DXIL_HULL_SHADER;
++          ctx->mod.shader_kind == DXIL_HULL_SHADER || is_mesh);
++   if (intr->intrinsic == nir_intrinsic_store_per_primitive_output &&
++       nir_intrinsic_io_semantics(intr).location == VARYING_SLOT_PRIMITIVE_INDICES)
++      return emit_mesh_indices(ctx, intr);
++
++   /* Mesh shader per-primitive outputs use the patch constant tables for their signature */
++   bool is_patch_constant = (intr->intrinsic == nir_intrinsic_store_output &&
++      ctx->mod.shader_kind == DXIL_HULL_SHADER) ||
++      intr->intrinsic == nir_intrinsic_store_per_primitive_output;
+    nir_alu_type out_type = nir_intrinsic_src_type(intr);
+-   enum overload_type overload = get_overload(out_type, intr->src[0].ssa->bit_size);
+-   const struct dxil_func *func = dxil_get_function(&ctx->mod, is_patch_constant ?
+-      "dx.op.storePatchConstant" : "dx.op.storeOutput",
+-      overload);
++   /* Booleans (SV_CullPrimitive) are stored as 0 or 1 */
++   bool is_bool = nir_alu_type_get_base_type(out_type) == nir_type_bool;
++   enum overload_type overload = is_bool ?
++      DXIL_I32 : get_overload(out_type, intr->src[0].ssa->bit_size);
++   const char *func_name;
++   unsigned opcode_val;
++   if (is_mesh) {
++      func_name = is_patch_constant ? "dx.op.storePrimitiveOutput" : "dx.op.storeVertexOutput";
++      opcode_val = is_patch_constant ? DXIL_INTR_STORE_PRIMITIVE_OUTPUT : DXIL_INTR_STORE_VERTEX_OUTPUT;
++   } else {
++      func_name = is_patch_constant ? "dx.op.storePatchConstant" : "dx.op.storeOutput";
++      opcode_val = is_patch_constant ? DXIL_INTR_STORE_PATCH_CONSTANT : DXIL_INTR_STORE_OUTPUT;
++   }
++   const struct dxil_func *func = dxil_get_function(&ctx->mod, func_name, overload);
+ 
+    if (!func)
+       return false;
+ 
+-   const struct dxil_value *opcode = dxil_module_get_int32_const(&ctx->mod, is_patch_constant ?
+-      DXIL_INTR_STORE_PATCH_CONSTANT : DXIL_INTR_STORE_OUTPUT);
++   const struct dxil_value *opcode = dxil_module_get_int32_const(&ctx->mod, opcode_val);
++   const struct dxil_value *element_index = is_mesh ?
++      get_src(ctx, &intr->src[1], 0, nir_type_uint) : NULL;
++   if (is_mesh && !element_index)
++      return false;
+    uint8_t *io_mappings = is_patch_constant ? ctx->mod.patch_mappings : ctx->mod.output_mappings;
+    uint8_t io_index = io_mappings[nir_intrinsic_base(intr)];
+    const struct dxil_value *output_id = dxil_module_get_int32_const(&ctx->mod, io_index);
+@@ -3605,7 +3712,7 @@ emit_store_output_via_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *in
+    bool success = true;
+    uint32_t writemask = nir_intrinsic_write_mask(intr);
+ 
+-   nir_variable *var = find_patch_matching_variable_by_driver_location(ctx->shader, nir_var_shader_out, nir_intrinsic_base(intr), is_patch_constant);
++   nir_variable *var = find_patch_matching_variable_by_driver_location(ctx->shader, nir_var_shader_out, nir_intrinsic_base(intr), is_patch_constant && !is_mesh);
+    unsigned var_base_component = var->data.location_frac;
+    unsigned base_component = nir_intrinsic_component(intr) - var_base_component;
+ 
+@@ -3642,13 +3749,16 @@ emit_store_output_via_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *in
+          else
+             col = dxil_module_get_int8_const(&ctx->mod, i + base_component);
+          const struct dxil_value *value = get_src(ctx, &intr->src[0], i, out_type);
++         if (is_bool && value)
++            value = dxil_emit_cast(&ctx->mod, DXIL_CAST_ZEXT,
++                                   dxil_module_get_int_type(&ctx->mod, 32), value);
+          if (!col || !row || !value)
+             return false;
+ 
+          const struct dxil_value *args[] = {
+-            opcode, output_id, row, col, value
++            opcode, output_id, row, col, value, element_index
+          };
+-         success &= dxil_emit_call_void(&ctx->mod, func, args, ARRAY_SIZE(args));
++         success &= dxil_emit_call_void(&ctx->mod, func, args, is_mesh ? 6 : 5);
+       }
+    }
+ 
+@@ -4875,7 +4985,11 @@ emit_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *intr)
+       return emit_load_input_via_intrinsic(ctx, intr);
+    case nir_intrinsic_store_output:
+    case nir_intrinsic_store_per_vertex_output:
++   case nir_intrinsic_store_per_primitive_output:
+       return emit_store_output_via_intrinsic(ctx, intr);
++   case nir_intrinsic_set_vertex_and_primitive_count:
++      assert(ctx->mod.shader_kind == DXIL_MESH_SHADER);
++      return emit_set_mesh_output_counts(ctx, intr);
+ 
+    case nir_intrinsic_load_barycentric_at_offset:
+    case nir_intrinsic_load_barycentric_at_sample:
+@@ -5961,6 +6075,12 @@ emit_function(struct ntd_context *ctx, nir_function *func, nir_function_impl *im
+       attr_values[0] = "ftz";
+    else if (ctx->shader->info.float_controls_execution_mode & FLOAT_CONTROLS_DENORM_PRESERVE_FP32)
+       attr_values[0] = "preserve";
++   /* Helper lanes take part in subgroup operations on the hardware Vulkan drivers expose, but in
++    * DXIL only with this attribute (shader model 6.7). Without it, a loop that runs until each
++    * lane of the wave was handled never ends for helper lanes. */
++   if (func->is_entrypoint && ctx->mod.shader_kind == DXIL_PIXEL_SHADER &&
++       (ctx->mod.major_version > 6 || ctx->mod.minor_version >= 7))
++      attr_keys[attr_keys[0] ? 1 : 0] = "waveops-include-helper-lanes";
+ 
+    const struct dxil_type *void_type = dxil_module_get_void_type(&ctx->mod);
+    const struct dxil_type *func_type = dxil_module_add_function_type(&ctx->mod, void_type, NULL, 0);
+@@ -6185,6 +6305,8 @@ get_dxil_shader_kind(struct nir_shader *s)
+    case MESA_SHADER_KERNEL:
+    case MESA_SHADER_COMPUTE:
+       return DXIL_COMPUTE_SHADER;
++   case MESA_SHADER_MESH:
++      return DXIL_MESH_SHADER;
+    default:
+       UNREACHABLE("unknown shader stage in nir_to_dxil");
+       return DXIL_COMPUTE_SHADER;
+@@ -6412,6 +6534,20 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
+       psv0->ds.output_position_present = ctx->mod.info.has_out_position;
+       psv1->sig_patch_const_or_prim_vectors = ctx->mod.num_psv_patch_consts;
+       break;
++   case DXIL_MESH_SHADER: {
++      uint32_t shared_bytes = 0;
++      nir_foreach_variable_with_modes(var, ctx->shader, nir_var_mem_shared)
++         shared_bytes += glsl_get_cl_size(var->type);
++      psv0->ms.group_shared_bytes_used = shared_bytes;
++      psv0->ms.max_output_vertices = ctx->shader->info.mesh.max_vertices_out;
++      psv0->ms.max_output_primitives = ctx->shader->info.mesh.max_primitives_out;
++      psv1->ms1.sig_prim_vectors = ctx->mod.num_psv_patch_consts;
++      psv1->ms1.mesh_output_topology = get_mesh_output_topology(ctx->shader);
++      psv2->num_threads_x = MAX2(ctx->shader->info.workgroup_size[0], 1);
++      psv2->num_threads_y = MAX2(ctx->shader->info.workgroup_size[1], 1);
++      psv2->num_threads_z = MAX2(ctx->shader->info.workgroup_size[2], 1);
++      break;
++   }
+    default:
+       assert(0 && "Shader type not (yet) supported");
+    }
+@@ -6427,6 +6563,69 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
+    }
+ }
+ 
++/* Pixel shader inputs holding barycentric coordinates (SPIR-V BaryCoordKHR and
++ * BaryCoordNoPerspKHR). Each interpolation variant becomes a float3 input at
++ * VARYING_SLOT_BOUNDING_BOX0 + n, which the signature names SV_Barycentrics n; D3D allows
++ * two such inputs.
++ */
++static bool
++lower_barycentric_coord_instr(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   nir_variable **vars = data;
++   bool centroid = false, sample = false;
++   switch (intr->intrinsic) {
++   case nir_intrinsic_load_barycentric_coord_pixel:
++      break;
++   case nir_intrinsic_load_barycentric_coord_centroid:
++      centroid = true;
++      break;
++   case nir_intrinsic_load_barycentric_coord_sample:
++      sample = true;
++      break;
++   default:
++      return false;
++   }
++
++   enum glsl_interp_mode mode = nir_intrinsic_interp_mode(intr);
++   if (mode == INTERP_MODE_NONE)
++      mode = INTERP_MODE_SMOOTH;
++
++   nir_variable *var = NULL;
++   unsigned index = 0;
++   for (; index < 2 && vars[index]; ++index) {
++      if (vars[index]->data.interpolation == mode && vars[index]->data.centroid == centroid &&
++          vars[index]->data.sample == sample) {
++         var = vars[index];
++         break;
++      }
++   }
++   if (!var) {
++      if (index == 2)
++         return false;
++      unsigned driver_location = 0;
++      nir_foreach_variable_with_modes(other, b->shader, nir_var_shader_in | nir_var_system_value)
++         driver_location = MAX2(driver_location, other->data.driver_location + 1);
++      var = nir_variable_create(b->shader, nir_var_shader_in, glsl_vec_type(3), "SV_Barycentrics");
++      var->data.location = VARYING_SLOT_BOUNDING_BOX0 + index;
++      var->data.driver_location = driver_location;
++      var->data.interpolation = mode;
++      var->data.centroid = centroid;
++      var->data.sample = sample;
++      vars[index] = var;
++   }
++
++   b->cursor = nir_before_instr(&intr->instr);
++   nir_io_semantics semantics = {0};
++   semantics.location = var->data.location;
++   semantics.num_slots = 1;
++   nir_def *value = nir_load_input(b, 3, 32, nir_imm_int(b, 0),
++                                   .base = var->data.driver_location,
++                                   .dest_type = nir_type_float32,
++                                   .io_semantics = semantics);
++   nir_def_replace(&intr->def, value);
++   return true;
++}
++
+ static nir_variable *
+ add_sysvalue(struct ntd_context *ctx,
+               uint8_t value, char *name,
+@@ -6540,6 +6739,14 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
+    return glsl_count_attribute_slots(type, false);
+ }
+ 
++/* Mesh shader primitive indices are emitted as whole triangles */
++static bool
++scalarize_io_filter(const nir_intrinsic_instr *intr, const void *data)
++{
++   return intr->intrinsic != nir_intrinsic_store_per_primitive_output ||
++          nir_intrinsic_io_semantics(intr).location != VARYING_SLOT_PRIMITIVE_INDICES;
++}
++
+ static const unsigned dxil_validator_min_capable_version = DXIL_VALIDATOR_1_4;
+ static const unsigned dxil_validator_max_capable_version = DXIL_VALIDATOR_1_8;
+ static const unsigned dxil_min_shader_model = SHADER_MODEL_6_0;
+@@ -6612,7 +6819,7 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+    ctx->mod.major_validator = validator_version >> 16;
+    ctx->mod.minor_validator = validator_version & 0xffff;
+ 
+-   if (s->info.stage <= MESA_SHADER_FRAGMENT) {
++   if (s->info.stage <= MESA_SHADER_FRAGMENT || s->info.stage == MESA_SHADER_MESH) {
+       uint64_t in_mask =
+          s->info.stage == MESA_SHADER_VERTEX ?
+          0 : (VARYING_BIT_PRIMITIVE_ID | VARYING_BIT_VIEWPORT | VARYING_BIT_LAYER);
+@@ -6632,7 +6839,16 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+    s->info.disable_output_offset_src_constant_folding = true;
+    NIR_PASS(_, s, dxil_nir_ensure_position_writes);
+    NIR_PASS(_, s, dxil_nir_lower_system_values);
+-   NIR_PASS(_, s, nir_lower_io_to_scalar, nir_var_shader_in | nir_var_system_value | nir_var_shader_out, NULL, NULL);
++   if (s->info.stage == MESA_SHADER_FRAGMENT) {
++      nir_variable *barycentrics[2] = {NULL, NULL};
++      bool lowered = false;
++      NIR_PASS(lowered, s, nir_shader_intrinsics_pass, lower_barycentric_coord_instr,
++               nir_metadata_control_flow, barycentrics);
++      if (lowered)
++         ctx->mod.feats.barycentrics = 1;
++   }
++   NIR_PASS(_, s, nir_lower_io_to_scalar, nir_var_shader_in | nir_var_system_value | nir_var_shader_out,
++            scalarize_io_filter, NULL);
+ 
+    /* Do a round of optimization to try to vectorize loads/stores. Otherwise the addresses used for loads
+     * might be too opaque for the pass to see that they're next to each other. */
+@@ -6746,7 +6962,8 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+    }
+ 
+    if ((ctx->mod.shader_kind == DXIL_HULL_SHADER ||
+-        ctx->mod.shader_kind == DXIL_DOMAIN_SHADER) &&
++        ctx->mod.shader_kind == DXIL_DOMAIN_SHADER ||
++        ctx->mod.shader_kind == DXIL_MESH_SHADER) &&
+        !dxil_container_add_io_signature(&container,
+                                         DXIL_PSG1,
+                                         ctx->mod.num_sig_patch_consts,
+diff --git a/src/microsoft/spirv_to_dxil/dxil_spirv_nir.c b/src/microsoft/spirv_to_dxil/dxil_spirv_nir.c
+index 4763c34..c539555 100644
+--- a/src/microsoft/spirv_to_dxil/dxil_spirv_nir.c
++++ b/src/microsoft/spirv_to_dxil/dxil_spirv_nir.c
+@@ -79,6 +79,8 @@ spirv_caps = {
+    .Int64 = true,
+    .Float64 = true,
+    .Tessellation = true,
++   .MeshShadingEXT = true,
++   .ShaderViewportIndexLayerEXT = true,
+    .PhysicalStorageBufferAddresses = true,
+ };
+ 
+@@ -1046,10 +1048,14 @@ dxil_spirv_nir_passes(nir_shader *nir,
+    NIR_PASS(_, nir, nir_lower_io_array_vars_to_elements_no_indirects, false);
+ 
+ 
++   if (conf->clip_halfz)
++      NIR_PASS(_, nir, nir_lower_clip_halfz);
++
+    if (conf->yz_flip.mode != DXIL_SPIRV_YZ_FLIP_NONE) {
+       assert(nir->info.stage == MESA_SHADER_VERTEX ||
+              nir->info.stage == MESA_SHADER_GEOMETRY ||
+-             nir->info.stage == MESA_SHADER_TESS_EVAL);
++             nir->info.stage == MESA_SHADER_TESS_EVAL ||
++             nir->info.stage == MESA_SHADER_MESH);
+       NIR_PASS(_, nir,
+                  dxil_spirv_nir_lower_yz_flip,
+                  conf, &metadata->requires_runtime_data);
+@@ -1113,7 +1119,7 @@ dxil_spirv_nir_passes(nir_shader *nir,
+    NIR_PASS(_, nir, nir_lower_tex, &lower_tex_options);
+ 
+    NIR_PASS(_, nir, dxil_nir_split_clip_cull_distance);
+-   NIR_PASS(_, nir, dxil_nir_split_typed_samplers);
++   NIR_PASS(_, nir, dxil_nir_split_typed_samplers_to_space, conf->shadow_sampler_space_offset);
+    NIR_PASS(_, nir, dxil_nir_lower_ubo_array_one_to_static);
+    NIR_PASS(_, nir, nir_opt_dce);
+    NIR_PASS(_, nir, nir_remove_dead_derefs);
+diff --git a/src/microsoft/spirv_to_dxil/spirv2dxil.c b/src/microsoft/spirv_to_dxil/spirv2dxil.c
+index cf3edcc..d17478a 100644
+--- a/src/microsoft/spirv_to_dxil/spirv2dxil.c
++++ b/src/microsoft/spirv_to_dxil/spirv2dxil.c
+@@ -57,6 +57,8 @@ stage_to_enum(char *stage)
+       return MESA_SHADER_FRAGMENT;
+    else if (!strcmp(stage, "compute"))
+       return MESA_SHADER_COMPUTE;
++   else if (!strcmp(stage, "mesh"))
++      return MESA_SHADER_MESH;
+    else
+       return MESA_SHADER_NONE;
+ }
+@@ -78,6 +80,14 @@ enum dxil_validator_version val_ver = DXIL_VALIDATOR_1_4;
+ 
+ struct nir_shader_compiler_options nir_options;
+ 
++static void
++log_spirv_message(void *priv, enum nir_spirv_debug_level level, size_t spirv_offset,
++                  const char *message)
++{
++   if (level >= NIR_SPIRV_DEBUG_LEVEL_WARNING)
++      fprintf(stderr, "SPIR-V (offset %zu): %s\n", spirv_offset, message);
++}
++
+ static bool
+ compile_shader(const char *filename, mesa_shader_stage shader_stage, struct shader *shader,
+                struct dxil_spirv_runtime_conf *conf)
+@@ -98,12 +108,13 @@ compile_shader(const char *filename, mesa_shader_stage shader_stage, struct shad
+ 
+    size_t word_count = file_size / WORD_SIZE;
+ 
+-   const struct spirv_to_nir_options *spirv_opts = dxil_spirv_nir_get_spirv_options();
++   struct spirv_to_nir_options spirv_opts = *dxil_spirv_nir_get_spirv_options();
++   spirv_opts.debug.func = log_spirv_message;
+ 
+    shader->nir = spirv_to_nir(
+       (const uint32_t *)file_contents, word_count, NULL,
+       (mesa_shader_stage)shader_stage, shader->entry_point,
+-      spirv_opts, &nir_options);
++      &spirv_opts, &nir_options);
+    free(file_contents);
+    if (!shader->nir) {
+       fprintf(stderr, "SPIR-V to NIR failed\n");
+@@ -168,7 +179,7 @@ main(int argc, char **argv)
+       {"validatorver", required_argument, 0, 'x'},
+       {0, 0, 0, 0}};
+ 
+-   struct shader shaders[MESA_SHADER_COMPUTE + 1];
++   struct shader shaders[MESA_SHADER_MESH + 1];
+    memset(shaders, 0, sizeof(shaders));
+    struct shader cur_shader = {
+       .entry_point = "main",
+@@ -241,8 +252,13 @@ main(int argc, char **argv)
+       return 1;
+    }
+ 
++   if (shaders[MESA_SHADER_FRAGMENT].nir && shaders[MESA_SHADER_MESH].nir) {
++      struct dxil_spirv_metadata metadata = { 0 };
++      dxil_spirv_nir_link(shaders[MESA_SHADER_FRAGMENT].nir, shaders[MESA_SHADER_MESH].nir, &conf,
++                          &metadata);
++   }
+    for (int32_t cur = MESA_SHADER_FRAGMENT; cur >= MESA_SHADER_VERTEX; --cur) {
+-      if (!shaders[cur].nir)
++      if (!shaders[cur].nir || (cur == MESA_SHADER_FRAGMENT && shaders[MESA_SHADER_MESH].nir))
+          continue;
+       for (int32_t prev = cur - 1; prev >= MESA_SHADER_VERTEX; --prev) {
+          if (!shaders[prev].nir)
+@@ -262,7 +278,7 @@ main(int argc, char **argv)
+    struct dxil_logger logger_inner = {.priv = NULL,
+                                       .log = log_spirv_to_dxil_error};
+ 
+-   for (uint32_t i = 0; i <= MESA_SHADER_COMPUTE; ++i) {
++   for (uint32_t i = 0; i <= MESA_SHADER_MESH; ++i) {
+       if (!shaders[i].nir)
+          continue;
+       struct blob dxil_blob;
+diff --git a/src/microsoft/spirv_to_dxil/spirv_to_dxil.c b/src/microsoft/spirv_to_dxil/spirv_to_dxil.c
+index b9205aa..f3a1754 100644
+--- a/src/microsoft/spirv_to_dxil/spirv_to_dxil.c
++++ b/src/microsoft/spirv_to_dxil/spirv_to_dxil.c
+@@ -41,65 +41,62 @@ static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_FRAGMENT == MESA_SHADER_FRAGM
+ static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_COMPUTE == MESA_SHADER_COMPUTE, "must match");
+ static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_KERNEL == MESA_SHADER_KERNEL, "must match");
+ 
+-bool
+-spirv_to_dxil(const uint32_t *words, size_t word_count,
+-              struct dxil_spirv_specialization *specializations,
+-              unsigned int num_specializations, dxil_spirv_shader_stage stage,
+-              const char *entry_point_name,
+-              enum dxil_validator_version validator_version_max,
+-              const struct dxil_spirv_debug_options *dgb_opts,
+-              const struct dxil_spirv_runtime_conf *conf,
+-              const struct dxil_spirv_logger *logger,
+-              struct dxil_spirv_object *out_dxil)
++static nir_shader *
++spirv_stage_to_nir(const struct dxil_spirv_stage *in,
++                   nir_shader_compiler_options *nir_options,
++                   const struct dxil_spirv_debug_options *dbg_opts,
++                   struct dxil_spirv_metadata *metadata)
+ {
+-   if (stage == DXIL_SPIRV_SHADER_NONE || stage == DXIL_SPIRV_SHADER_KERNEL)
+-      return false;
+-
+-   glsl_type_singleton_init_or_ref();
+-
+-   struct nir_to_dxil_options opts = {
+-      .environment = DXIL_ENVIRONMENT_VULKAN,
+-      .shader_model_max = conf->shader_model_max,
+-      .validator_version_max = validator_version_max,
+-   };
+-
++   const struct dxil_spirv_runtime_conf *conf = in->conf;
+    const struct spirv_to_nir_options *spirv_opts = dxil_spirv_nir_get_spirv_options();
+-   nir_shader_compiler_options nir_options;
+    const unsigned supported_bit_sizes = 16 | 32 | 64;
+-   dxil_get_nir_compiler_options(&nir_options, conf->shader_model_max, supported_bit_sizes, supported_bit_sizes);
++   dxil_get_nir_compiler_options(nir_options, conf->shader_model_max, supported_bit_sizes, supported_bit_sizes);
+    // We will manually handle base_vertex when vertex_id and instance_id have
+    // have been already converted to zero-base.
+-   nir_options.lower_base_vertex = conf->first_vertex_and_base_instance_mode != DXIL_SPIRV_SYSVAL_TYPE_ZERO;
++   nir_options->lower_base_vertex = conf->first_vertex_and_base_instance_mode != DXIL_SPIRV_SYSVAL_TYPE_ZERO;
+ 
+    struct nir_spirv_specialization *spec = NULL;
+-   if (specializations && num_specializations > 0) {
+-      spec = vtn_alloc_specialization(num_specializations);
++   if (in->specializations && in->num_specializations > 0) {
++      spec = vtn_alloc_specialization(in->num_specializations);
+ 
+-      for (unsigned i = 0; i < num_specializations; i++) {
+-         vtn_add_specialization_entry(spec, i, specializations[i].id,
+-                                      sizeof(specializations[i].value),
+-                                      &specializations[i].value, false);
++      for (unsigned i = 0; i < in->num_specializations; i++) {
++         vtn_add_specialization_entry(spec, i, in->specializations[i].id,
++                                      sizeof(in->specializations[i].value),
++                                      &in->specializations[i].value, false);
+       }
+    }
+-   nir_shader *nir = spirv_to_nir(words, word_count, spec,
+-                                  (mesa_shader_stage)stage, entry_point_name,
+-                                  spirv_opts, &nir_options);
++   nir_shader *nir = spirv_to_nir(in->words, in->word_count, spec,
++                                  (mesa_shader_stage)in->stage, in->entry_point_name,
++                                  spirv_opts, nir_options);
+    vtn_free_specialization(spec);
+-   if (!nir) {
+-      glsl_type_singleton_decref();
+-      return false;
+-   }
++   if (!nir)
++      return NULL;
+ 
+    nir_validate_shader(nir,
+                        "Validate before feeding NIR to the DXIL compiler");
+ 
+    dxil_spirv_nir_prep(nir);
+ 
+-   dxil_spirv_nir_passes(nir, conf, &out_dxil->metadata);
++   dxil_spirv_nir_passes(nir, conf, metadata);
+ 
+-   if (dgb_opts->dump_nir)
++   if (dbg_opts->dump_nir)
+       nir_print_shader(nir, stderr);
+ 
++   return nir;
++}
++
++static bool
++nir_stage_to_dxil(nir_shader *nir, const struct dxil_spirv_runtime_conf *conf,
++                  enum dxil_validator_version validator_version_max,
++                  const struct dxil_spirv_logger *logger,
++                  struct dxil_spirv_object *out_dxil)
++{
++   struct nir_to_dxil_options opts = {
++      .environment = DXIL_ENVIRONMENT_VULKAN,
++      .shader_model_max = conf->shader_model_max,
++      .validator_version_max = validator_version_max,
++   };
++
+    struct dxil_logger logger_inner = {.priv = logger->priv,
+                                       .log = logger->log};
+ 
+@@ -107,17 +104,108 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
+    if (!nir_to_dxil(nir, &opts, &logger_inner, &dxil_blob)) {
+       if (dxil_blob.allocated)
+          blob_finish(&dxil_blob);
+-      ralloc_free(nir);
+-      glsl_type_singleton_decref();
+       return false;
+    }
+ 
+-   ralloc_free(nir);
+    blob_finish_get_buffer(&dxil_blob, &out_dxil->binary.buffer,
+                           &out_dxil->binary.size);
++   return true;
++}
+ 
++bool
++spirv_to_dxil(const uint32_t *words, size_t word_count,
++              struct dxil_spirv_specialization *specializations,
++              unsigned int num_specializations, dxil_spirv_shader_stage stage,
++              const char *entry_point_name,
++              enum dxil_validator_version validator_version_max,
++              const struct dxil_spirv_debug_options *dgb_opts,
++              const struct dxil_spirv_runtime_conf *conf,
++              const struct dxil_spirv_logger *logger,
++              struct dxil_spirv_object *out_dxil)
++{
++   if (stage == DXIL_SPIRV_SHADER_NONE || stage == DXIL_SPIRV_SHADER_KERNEL)
++      return false;
++
++   glsl_type_singleton_init_or_ref();
++
++   const struct dxil_spirv_stage in = {
++      .words = words,
++      .word_count = word_count,
++      .specializations = specializations,
++      .num_specializations = num_specializations,
++      .stage = stage,
++      .entry_point_name = entry_point_name,
++      .conf = conf,
++   };
++   nir_shader_compiler_options nir_options;
++   nir_shader *nir = spirv_stage_to_nir(&in, &nir_options, dgb_opts, &out_dxil->metadata);
++   const bool success =
++      nir && nir_stage_to_dxil(nir, conf, validator_version_max, logger, out_dxil);
++
++   ralloc_free(nir);
+    glsl_type_singleton_decref();
+-   return true;
++   return success;
++}
++
++/* Order of a stage in a graphics pipeline, or -1 if it can't be part of one. A mesh
++ * shader replaces the vertex processing stages, so it can only come first. */
++static int
++graphics_stage_order(dxil_spirv_shader_stage stage, unsigned index)
++{
++   if (stage == DXIL_SPIRV_SHADER_MESH)
++      return index == 0 ? DXIL_SPIRV_SHADER_GEOMETRY : -1;
++   if (stage == DXIL_SPIRV_SHADER_NONE || stage > DXIL_SPIRV_SHADER_FRAGMENT)
++      return -1;
++   return stage;
++}
++
++bool
++spirv_to_dxil_linked(const struct dxil_spirv_stage *stages, unsigned int stage_count,
++                     enum dxil_validator_version validator_version_max,
++                     const struct dxil_spirv_debug_options *dgb_opts,
++                     const struct dxil_spirv_logger *logger,
++                     struct dxil_spirv_object *out_dxil)
++{
++   if (stage_count == 0 || stage_count > MESA_SHADER_FRAGMENT + 1)
++      return false;
++   for (unsigned i = 0; i < stage_count; i++) {
++      const int order = graphics_stage_order(stages[i].stage, i);
++      if (order < 0 ||
++          (i > 0 && order <= graphics_stage_order(stages[i - 1].stage, i - 1)))
++         return false;
++      memset(&out_dxil[i], 0, sizeof(out_dxil[i]));
++   }
++
++   glsl_type_singleton_init_or_ref();
++
++   /* spirv_to_nir keeps a pointer to its options, so they live until emission. */
++   nir_shader_compiler_options nir_options[MESA_SHADER_FRAGMENT + 1];
++   nir_shader *nir[MESA_SHADER_FRAGMENT + 1] = {0};
++   bool success = true;
++   for (unsigned i = 0; success && i < stage_count; i++) {
++      nir[i] = spirv_stage_to_nir(&stages[i], &nir_options[i], dgb_opts, &out_dxil[i].metadata);
++      success = nir[i] != NULL;
++   }
++
++   /* Link each stage to the one before it, from the last stage backwards, so the
++    * signatures of consecutive stages match. */
++   for (unsigned i = stage_count - 1; success && i > 0; i--) {
++      struct dxil_spirv_metadata metadata = {0};
++      dxil_spirv_nir_link(nir[i], nir[i - 1], stages[i].conf, &metadata);
++      out_dxil[i].metadata.requires_runtime_data |= metadata.requires_runtime_data;
++   }
++
++   for (unsigned i = 0; success && i < stage_count; i++)
++      success = nir_stage_to_dxil(nir[i], stages[i].conf, validator_version_max, logger, &out_dxil[i]);
++
++   for (unsigned i = 0; i < stage_count; i++) {
++      ralloc_free(nir[i]);
++      if (!success)
++         spirv_to_dxil_free(&out_dxil[i]);
++   }
++
++   glsl_type_singleton_decref();
++   return success;
+ }
+ 
+ void
+diff --git a/src/microsoft/spirv_to_dxil/spirv_to_dxil.def b/src/microsoft/spirv_to_dxil/spirv_to_dxil.def
+index 62851f2..23f6dda 100644
+--- a/src/microsoft/spirv_to_dxil/spirv_to_dxil.def
++++ b/src/microsoft/spirv_to_dxil/spirv_to_dxil.def
+@@ -1,4 +1,5 @@
+ EXPORTS
+     spirv_to_dxil
++    spirv_to_dxil_linked
+     spirv_to_dxil_free
+     spirv_to_dxil_get_version
+diff --git a/src/microsoft/spirv_to_dxil/spirv_to_dxil.h b/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
+index 8f4684c..4485fda 100644
+--- a/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
++++ b/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
+@@ -46,6 +46,8 @@ typedef enum {
+    DXIL_SPIRV_SHADER_GEOMETRY = 3,
+    DXIL_SPIRV_SHADER_FRAGMENT = 4,
+    DXIL_SPIRV_SHADER_COMPUTE = 5,
++   DXIL_SPIRV_SHADER_TASK = 6,
++   DXIL_SPIRV_SHADER_MESH = 7,
+    DXIL_SPIRV_SHADER_KERNEL = 14,
+ } dxil_spirv_shader_stage;
+ 
+@@ -199,6 +201,13 @@ struct dxil_spirv_runtime_conf {
+ 
+    // Affects which features can be used by the shader
+    enum dxil_shader_model shader_model_max;
++
++   // Maps clip-space depth from [-w, w] (OpenGL) to [0, w]; vertex/geometry/tess eval only
++   bool clip_halfz;
++
++   // Register space offset of comparison samplers declared from samplers the shader also uses
++   // for regular sampling (both would otherwise occupy the same registers)
++   uint32_t shadow_sampler_space_offset;
+ };
+ 
+ struct dxil_spirv_debug_options {
+@@ -235,6 +244,30 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
+               const struct dxil_spirv_logger *logger,
+               struct dxil_spirv_object *out_dxil);
+ 
++/* One stage of a graphics pipeline compiled by spirv_to_dxil_linked. */
++struct dxil_spirv_stage {
++   const uint32_t *words;
++   size_t word_count;
++   struct dxil_spirv_specialization *specializations;
++   unsigned int num_specializations;
++   dxil_spirv_shader_stage stage;
++   const char *entry_point_name;
++   const struct dxil_spirv_runtime_conf *conf;
++};
++
++/**
++ * Compile the stages of one graphics pipeline, given in pipeline order, and
++ * link their interfaces so the DXIL signatures of consecutive stages match.
++ * A mesh shader takes the place of the vertex processing stages.
++ * out_dxil receives one object per stage; free each with spirv_to_dxil_free.
++ */
++bool
++spirv_to_dxil_linked(const struct dxil_spirv_stage *stages, unsigned int stage_count,
++                     enum dxil_validator_version validator_version_max,
++                     const struct dxil_spirv_debug_options *debug_options,
++                     const struct dxil_spirv_logger *logger,
++                     struct dxil_spirv_object *out_dxil);
++
+ /**
+  * Free the buffer allocated by spirv_to_dxil.
+  */

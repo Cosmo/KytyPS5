@@ -10,7 +10,9 @@
 
 namespace Libs::Graphics {
 
-RenderContext::RenderContext(GraphicContext& graphics): m_graphics(graphics), m_render_executor(*this), m_command_scheduler(*this, graphics) {
+RenderContext::RenderContext(GraphicContext& graphics)
+    : m_graphics(graphics), m_render_executor(*this), m_command_scheduler(*this, graphics),
+      m_pipeline_cache(graphics) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 }
 

@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
 
 #include <cinttypes>
+#include <fmt/format.h>
 
 namespace Libs::Graphics {
 
@@ -18,6 +19,18 @@ void Check(HRESULT result, const char* operation) {
 }
 
 } // namespace D3D12
+
+// Forwards debug-layer warnings and errors to the emulator log; the layer otherwise only writes
+// them to the debugger output.
+static void CALLBACK DebugMessage(D3D12_MESSAGE_CATEGORY /*category*/, D3D12_MESSAGE_SEVERITY severity,
+                                  D3D12_MESSAGE_ID id, LPCSTR description, void* /*context*/) {
+	if (severity > D3D12_MESSAGE_SEVERITY_WARNING) {
+		return;
+	}
+	const char* kind = severity == D3D12_MESSAGE_SEVERITY_WARNING ? "warning" : "error";
+	Log::WriteToConsoleAndLog(
+	    fmt::format("D3D12 debug layer {} {}: {}\n", kind, static_cast<int>(id), description));
+}
 
 static std::string Utf8(const wchar_t* text) {
 	const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
@@ -76,7 +89,18 @@ void GraphicContext::Create(bool enable_debug_layer) {
 	queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 	Check(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue)), "CreateCommandQueue");
 
-	LOGF("D3D12 device: %s (debug layer %s)\n", device_name.c_str(), debug_layer ? "on" : "off");
+	if (debug_layer) {
+		D3D12::ComPtr<ID3D12InfoQueue1> info_queue;
+		DWORD                           cookie = 0;
+		if (FAILED(device->QueryInterface(IID_PPV_ARGS(&info_queue))) ||
+		    FAILED(info_queue->RegisterMessageCallback(DebugMessage, D3D12_MESSAGE_CALLBACK_FLAG_NONE,
+		                                               nullptr, &cookie))) {
+			LOGF("D3D12 debug layer messages are only visible in a debugger\n");
+		}
+	}
+
+	Log::WriteToConsoleAndLog(fmt::format("D3D12 device: {} (debug layer {})\n", device_name,
+	                                      debug_layer ? "on" : "off"));
 }
 
 void GraphicContext::Destroy() {

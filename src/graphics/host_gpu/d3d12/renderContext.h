@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/d3d12/bufferCache.h"
 #include "graphics/host_gpu/d3d12/commandScheduler.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
+#include "graphics/host_gpu/d3d12/pipelineCache.h"
 #include "graphics/host_gpu/d3d12/render.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/rangeSet.h"
