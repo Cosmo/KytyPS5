@@ -172,7 +172,8 @@ std::optional<RunRequest> RunRequestFromArguments(winrt::hstring const& argument
 	}
 	try {
 		const winrt::Windows::Foundation::Uri uri(arguments);
-		if (uri.SchemeName() != L"kyty" || uri.Host() != L"run") {
+		// the scheme is KYTY_UWP_PROTOCOL of the build ("kyty", or another name for a build installed next to it)
+		if (std::wstring_view(uri.SchemeName()).substr(0, 4) != L"kyty" || uri.Host() != L"run") {
 			return std::nullopt;
 		}
 		for (const auto& entry: uri.QueryParsed()) {
