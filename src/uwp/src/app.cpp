@@ -23,6 +23,7 @@
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.ViewManagement.h>
 #include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 
@@ -66,7 +67,7 @@ constexpr wchar_t GameMarkup[] = LR"xaml(
     </Style>
   </Grid.Resources>
 
-  <SwapChainPanel x:Name="Panel" />
+  <SwapChainPanel x:Name="Panel" HorizontalAlignment="Center" VerticalAlignment="Center" />
   <Grid x:Name="Launch" Background="#0B0E14" IsHitTestVisible="False">
     <Grid.OpacityTransition><ScalarTransition Duration="0:0:0.5" /></Grid.OpacityTransition>
     <Image x:Name="Backdrop" Stretch="UniformToFill" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0">
@@ -375,6 +376,23 @@ xaml::UIElement CreateEmulatorPage(std::filesystem::path game) {
 	page.FindName(L"Title").as<xaml::Controls::TextBlock>().Text(title);
 	ShowLaunchBackdrop(page.FindName(L"Backdrop").as<xaml::Controls::Image>(), BackdropImage(game));
 	auto panel = page.FindName(L"Panel").as<xaml::Controls::SwapChainPanel>();
+	// The game's picture is 16:9: the panel is the largest 16:9 rectangle that fits the window (black bars around it), so the picture is never stretched.
+	page.SizeChanged([panel](auto const& sender, auto const&) {
+		const auto   area   = sender.template as<xaml::FrameworkElement>();
+		const double width  = area.ActualWidth();
+		const double height = area.ActualHeight();
+		if (width <= 0.0 || height <= 0.0) {
+			return;
+		}
+		double panel_width  = width;
+		double panel_height = width * 9.0 / 16.0;
+		if (panel_height > height) {
+			panel_height = height;
+			panel_width  = height * 16.0 / 9.0;
+		}
+		panel.Width(panel_width);
+		panel.Height(panel_height);
+	});
 	const auto                     report_size = [](xaml::Controls::SwapChainPanel const& panel) {
         EmulatorHost::Get().SetPanelSize(static_cast<float>(panel.ActualWidth()),
 		                                                     static_cast<float>(panel.ActualHeight()),
@@ -497,7 +515,13 @@ void App::Show(winrt::hstring const& activation_arguments) {
 			window.Content(CreateGamePage(request->folder));
 		}
 	}
+	// On a PC the window opens 16:9 (the games' picture is); a console is always full screen. The preferred size applies from the next start of the app,
+	// the resize to this one.
+	namespace view = winrt::Windows::UI::ViewManagement;
+	view::ApplicationView::PreferredLaunchWindowingMode(view::ApplicationViewWindowingMode::PreferredLaunchViewSize);
+	view::ApplicationView::PreferredLaunchViewSize(winrt::Windows::Foundation::Size {1280.0f, 720.0f});
 	window.Activate();
+	(void)view::ApplicationView::GetForCurrentView().TryResizeView(winrt::Windows::Foundation::Size {1280.0f, 720.0f});
 }
 
 xaml::Markup::IXamlType App::GetXamlType(xaml::Interop::TypeName const& type) {
