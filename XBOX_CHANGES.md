@@ -15,4 +15,4 @@ This branch (`xbox-clean`) is KytyPS5 plus the changes needed to run on the Xbox
 
 | Commit | What | Upstream files touched | How it was checked |
 | --- | --- | --- | --- |
-| (none yet) | | | |
+| UWP app: launcher, settings, controllers, overlay | New folder `src/uwp` (its own CMake project, no emulator yet): WinUI 2 launcher with game library, settings page, game menu, overlay, Xbox controllers for four players with PS5 mapping, packaging and Device Portal script | none | built with clang-cl, import check against WindowsApp.lib clean; ran on a PC (Developer Mode): library finds games in a game folder, controller detected; Xbox not tried yet |
