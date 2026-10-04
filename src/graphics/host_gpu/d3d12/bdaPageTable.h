@@ -3,6 +3,7 @@
 
 #include "common/common.h"
 #include "graphics/host_gpu/d3d12/buffer.h"
+#include "graphics/host_gpu/renderer/cache/bdaLayout.h"
 
 #include <array>
 #include <cstdint>
@@ -21,7 +22,7 @@ struct GraphicContext;
 // "address" as a descriptor heap index (bits 32-55) and a byte offset (bits 0-31) into that raw
 // buffer view. Each cached guest page therefore maps to its buffer's bindless descriptor and the
 // page's offset in the buffer (0: not cached). Accesses to other pages are recorded in a fault
-// buffer and resolved by caching those pages for later work.
+// buffer and resolved by caching those pages for later work. The table is two-level (BdaLayout).
 class BdaPageTable {
 public:
 	BdaPageTable(GraphicContext& graphics, CommandScheduler& scheduler, StreamBuffer& staging,
@@ -41,6 +42,8 @@ private:
 
 	// New memory is not zeroed; both tables start out empty before their first use.
 	void EnsureCleared();
+	// Copies `size` bytes into the table at byte `offset`.
+	void Write(uint64_t offset, const void* data, uint64_t size);
 
 	GraphicContext&                        m_graphics;
 	CommandScheduler&                      m_scheduler;
@@ -49,6 +52,7 @@ private:
 	Buffer                                 m_page_table;
 	Buffer                                 m_fault_buffer;
 	Buffer                                 m_download_buffer;
+	BdaBlocks                              m_blocks;
 	std::array<uint64_t, MaxPendingFaults> m_fault_areas {};
 	uint32_t                               m_current_area   = 0;
 	bool                                   m_cleared        = false;

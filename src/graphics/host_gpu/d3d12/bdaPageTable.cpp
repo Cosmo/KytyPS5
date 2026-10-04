@@ -14,6 +14,7 @@
 #include <bit>
 #include <cinttypes>
 #include <cstring>
+#include <fmt/format.h>
 #include <limits>
 #include <vector>
 
@@ -34,7 +35,8 @@ BdaPageTable::BdaPageTable(GraphicContext& graphics, CommandScheduler& scheduler
                            StreamBuffer& staging, BufferCache& buffer_cache, uint64_t page_count)
     : m_graphics(graphics), m_scheduler(scheduler), m_staging(staging),
       m_buffer_cache(buffer_cache),
-      m_page_table(graphics, scheduler, MemoryUsage::DeviceLocal, 0, page_count * sizeof(uint64_t)),
+      m_page_table(graphics, scheduler, MemoryUsage::DeviceLocal, 0,
+                   BdaLayout::TABLE_ELEMENTS * sizeof(uint64_t)),
       m_fault_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 0, page_count / 8),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 0,
                         MaxPendingFaults * PageFaultAreaSize) {
@@ -70,33 +72,62 @@ Buffer* BdaPageTable::FaultBuffer() {
 	return &m_fault_buffer;
 }
 
+void BdaPageTable::Write(uint64_t offset, const void* data, uint64_t size) {
+	const auto* bytes = static_cast<const uint8_t*>(data);
+	while (size != 0) {
+		const auto chunk  = std::min(size, m_staging.Size());
+		const auto source = m_staging.Copy(bytes, chunk, 4);
+		m_page_table.CopyFrom(m_scheduler.Current(), m_staging, source, offset, chunk);
+		bytes += chunk;
+		offset += chunk;
+		size -= chunk;
+	}
+}
+
 void BdaPageTable::Map(uint64_t first_page, uint64_t page_count, uint32_t page_bits,
                        const Buffer& buffer) {
 	EnsureCleared();
 	const uint64_t        index = buffer.BindlessIndex();
 	std::vector<uint64_t> entries;
-	entries.reserve(page_count);
-	for (uint64_t i = 0; i < page_count; ++i) {
-		const uint64_t offset = i << page_bits;
-		EXIT_IF(offset > std::numeric_limits<uint32_t>::max());
-		entries.push_back((index << 32u) | offset);
-	}
-	const auto* bytes   = reinterpret_cast<const uint8_t*>(entries.data());
-	uint64_t    address = first_page * sizeof(uint64_t);
-	uint64_t    size    = entries.size() * sizeof(uint64_t);
-	while (size != 0) {
-		const auto chunk  = std::min(size, m_staging.Size());
-		const auto offset = m_staging.Copy(bytes, chunk, 4);
-		m_page_table.CopyFrom(m_scheduler.Current(), m_staging, offset, address, chunk);
-		bytes += chunk;
-		address += chunk;
-		size -= chunk;
+	for (uint64_t i = 0; i < page_count;) {
+		const uint64_t page  = first_page + i;
+		const uint64_t count = std::min(page_count - i, BdaLayout::PagesLeftInBlock(page));
+		uint64_t       directory_value = 0;
+		if (!m_blocks.Allocate(page, &directory_value)) {
+			EXIT("BDA page table: all %" PRIu64 " slots in use\n", BdaLayout::SLOT_COUNT);
+		}
+		if (directory_value != 0) {
+			Write((page >> BdaLayout::BLOCK_BITS) * sizeof(uint64_t), &directory_value,
+			      sizeof(directory_value));
+			if (std::has_single_bit(m_blocks.Used())) {
+				Log::WriteToConsoleAndLog(fmt::format(
+				    "BDA page table: {} blocks of guest addresses in use ({} MB table)\n",
+				    m_blocks.Used(), m_page_table.Size() >> 20u));
+			}
+		}
+		entries.clear();
+		for (uint64_t j = i; j < i + count; ++j) {
+			const uint64_t offset = j << page_bits;
+			EXIT_IF(offset > std::numeric_limits<uint32_t>::max());
+			entries.push_back((index << 32u) | offset);
+		}
+		Write(m_blocks.EntryElement(page) * sizeof(uint64_t), entries.data(),
+		      entries.size() * sizeof(uint64_t));
+		i += count;
 	}
 }
 
 void BdaPageTable::Unmap(uint64_t first_page, uint64_t page_count) {
 	EnsureCleared();
-	m_page_table.Fill(first_page * sizeof(uint64_t), page_count * sizeof(uint64_t), 0);
+	for (uint64_t i = 0; i < page_count;) {
+		const uint64_t page  = first_page + i;
+		const uint64_t count = std::min(page_count - i, BdaLayout::PagesLeftInBlock(page));
+		// Blocks without a slot read the zero slot, which is never written.
+		if (const auto element = m_blocks.EntryElement(page); element != 0) {
+			m_page_table.Fill(element * sizeof(uint64_t), count * sizeof(uint64_t), 0);
+		}
+		i += count;
+	}
 }
 
 void BdaPageTable::ProcessFaults() {
