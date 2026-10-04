@@ -116,6 +116,9 @@ public:
 	void GetConnectionInfo(bool* flag, int* count);
 	void SetVibration(uint8_t large_motor, uint8_t small_motor);
 	int  GetActiveControllerId();
+#if defined(KYTY_PLATFORM_UWP)
+	HostFeedback GetHostFeedback();
+#endif
 	void SetLightBar(uint8_t r, uint8_t g, uint8_t b);
 	bool SetTriggerEffect(const PadTriggerEffectParam& param);
 	void  CycleSetting(Setting setting);
@@ -704,6 +707,17 @@ int GameController::GetActiveControllerId() {
 	return m_active_id;
 }
 
+#if defined(KYTY_PLATFORM_UWP)
+HostFeedback GameController::GetHostFeedback() {
+	Common::LockGuard lock(m_mutex);
+	if (m_vibration_until <= SDL_GetTicks()) {
+		return {};
+	}
+	const auto scale = GetSettingScale(Setting::VibrationIntensity);
+	return {Scale(m_vibration[0], scale), Scale(m_vibration[1], scale)};
+}
+#endif
+
 void GameController::SetLightBar(uint8_t r, uint8_t g, uint8_t b) {
 	Common::LockGuard lock(m_mutex);
 	if (const auto& color = Config::GetControllerColor()) {
@@ -850,6 +864,15 @@ void ResetInputState() {
 int GetActiveControllerId() {
 	return g_controller != nullptr ? g_controller->GetActiveControllerId() : -1;
 }
+
+#if defined(KYTY_PLATFORM_UWP)
+HostFeedback GetHostFeedback() {
+	if (g_controller == nullptr) {
+		return {};
+	}
+	return g_controller->GetHostFeedback();
+}
+#endif
 
 int KYTY_SYSV_ABI PadInit() {
 	PRINT_NAME();

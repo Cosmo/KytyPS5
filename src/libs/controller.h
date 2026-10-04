@@ -75,6 +75,16 @@ void SetSensor(int id, Sensor sensor, const float* data, uint64_t time_us);
 void ResetInputState();
 int  GetActiveControllerId();
 
+#if defined(KYTY_PLATFORM_UWP)
+// What the game asks of the host controller now, with the intensity setting applied: zero when it asks for nothing or the request ran out. The UWP app
+// polls this to drive the Xbox controller's motors (it cannot use the SDL gamepad code).
+struct HostFeedback {
+	uint8_t large_motor = 0;
+	uint8_t small_motor = 0;
+};
+[[nodiscard]] HostFeedback GetHostFeedback();
+#endif
+
 enum class Setting { SpeakerVolume, VibrationIntensity, TriggerEffectIntensity };
 
 void  CycleSetting(Setting setting);
