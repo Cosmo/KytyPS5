@@ -204,8 +204,8 @@ function Invoke-Package {
     if (-not (Test-Path "$layout\AppxManifest.xml")) { Fail 'no package layout; run the build first' }
     # The app is stamped with the git revision when it is built; a build from a tree with uncommitted changes is "dirty", and the emulator then keeps no
     # pipeline cache (the shaders are translated again at every start).
-    $stamp = Select-String -Path "$layout\kyty_uwp.exe" -Pattern '-dirty' -SimpleMatch -Quiet
-    if ($stamp) { Write-Host 'WARNING: this build is dirty (made from uncommitted changes): the pipeline cache is off. Commit and run build again.' -ForegroundColor Yellow }
+    $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes("$layout\kyty_uwp.exe"))
+    if ($text -match '[0-9a-f]{7,}-dirty') { Write-Host 'WARNING: this build is dirty (made from uncommitted changes): the pipeline cache is off. Commit and run build again.' -ForegroundColor Yellow }
     $certificate = Get-ChildItem Cert:\CurrentUser\My | Where-Object {
         $_.Subject -eq 'CN=KytyPS5' -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date)
     } | Select-Object -First 1
