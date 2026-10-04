@@ -2,6 +2,9 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "xbox/lazyCounters.h"
+#include "xbox/lazyRegions.h"
+#include "xbox/tunables.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/virtualMemory.h"
@@ -21,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -919,6 +923,7 @@ void WriteBacking(uint64_t vaddr, const void* data, uint64_t size) noexcept {
 }
 
 void InvalidateMemory(uint64_t vaddr, uint64_t size) {
+	EnsureGuestCommitted(vaddr, size); // Xbox fork (T3): a host call is about to write into this range
 	if (size == 0) {
 		return;
 	}
@@ -932,6 +937,27 @@ void InstallGpuResources(Graphics::RenderContext* resources) noexcept {
 
 bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept {
 	return g_gpu_resources != nullptr && g_gpu_resources->HandleFault(access, fault_vaddr);
+}
+
+bool HandleCommitFault(uint64_t fault_vaddr, bool is_write) noexcept {
+	return g_guest_address_space != nullptr && g_guest_address_space->HandleCommitFault(fault_vaddr, is_write);
+}
+
+bool EnsureGuestCommitted(uint64_t vaddr, uint64_t size) {
+	return g_guest_address_space == nullptr || g_guest_address_space->EnsureCommitted(vaddr, size);
+}
+
+void RestoreHostProtection(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode old_mode) noexcept {
+#if !defined(KYTY_GPU_BACKEND_D3D12)
+	// Only the Vulkan renderer owns a page manager (page watchers); the D3D12 skeleton has none.
+	if (g_gpu_resources != nullptr) {
+		g_gpu_resources->RestoreHostProtection(vaddr, size, old_mode);
+		return;
+	}
+#endif
+	if (g_guest_address_space != nullptr) {
+		(void)g_guest_address_space->ProtectTransient(vaddr, size, old_mode);
+	}
 }
 
 struct PrtAperture {
@@ -970,6 +996,9 @@ bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
 }
 
 static bool SelfTestSub64SharedPlaceholderAlias() {
+	if (g_guest_address_space->LazyEnabled()) {
+		return true; // Xbox fork (T3): no shared backing to test
+	}
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	constexpr uint64_t PageSize    = 0x4000;
 	const auto         granularity = g_guest_address_space->GetGranularity();

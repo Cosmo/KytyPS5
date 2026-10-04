@@ -53,7 +53,7 @@ list(FILTER kyty_uwp_emulator_src EXCLUDE REGEX "/presentation/window/(window|ho
 list(FILTER kyty_uwp_emulator_src EXCLUDE REGEX "_spv\\.h$")
 
 # C++/WinRT reports errors as exceptions; windows.h needs NOMINMAX for the standard algorithms.
-set_source_files_properties(${kyty_uwp_src} PROPERTIES COMPILE_OPTIONS "/EHsc" COMPILE_DEFINITIONS "NOMINMAX;KYTY_UWP_PROTOCOL=\"${KYTY_UWP_PROTOCOL}\"")
+set_source_files_properties(${kyty_uwp_src} PROPERTIES COMPILE_OPTIONS "/EHsc" COMPILE_DEFINITIONS "NOMINMAX")
 
 add_executable(kyty_uwp WIN32 ${kyty_uwp_src} ${kyty_uwp_emulator_src}
 	"${fault_buffer_shader_header}" ${gpu_tiler_shader_headers} ${gpu_blit_shader_headers})
