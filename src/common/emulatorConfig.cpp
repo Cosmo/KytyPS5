@@ -166,7 +166,8 @@ bool RedZoneProtectionEnabled() {
 }
 
 bool XboxGpuLimitsEnabled() {
-	return g_config->xbox_gpu_limits_enabled;
+	// The D3D12 self test runs before the emulator sets its configuration up.
+	return g_config != nullptr && g_config->xbox_gpu_limits_enabled;
 }
 #endif
 
