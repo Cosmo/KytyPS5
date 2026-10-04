@@ -68,6 +68,18 @@ if (Test-Path "$layout\AppxManifest.xml") {
 }
 
 function Step($text) { Write-Host "== $text" -ForegroundColor Cyan }
+
+# The last lines of a log, read from its last bytes: a game's output can make a log hundreds of MB, and Get-Content -Tail reads all of it.
+function Get-LogTail([string]$Path, [int]$Lines) {
+    $stream = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+    try {
+        $count = [Math]::Min([long]131072, $stream.Length)
+        $null = $stream.Seek(-$count, 'End')
+        $buffer = New-Object byte[] $count
+        $null = $stream.Read($buffer, 0, $count)
+    } finally { $stream.Dispose() }
+    [Text.Encoding]::UTF8.GetString($buffer) -split "`r?`n" | Select-Object -Last $Lines
+}
 function Fail($text) { Write-Host "FAILED: $text" -ForegroundColor Red; exit 1 }
 
 function Enter-DevShell {
@@ -448,7 +460,7 @@ function Invoke-XboxLogs {
             continue
         }
         Step "$name (the end; the whole file is in $out)"
-        Get-Content "$out\$name" -Tail 40
+        Get-LogTail "$out\$name" 40
     }
 }
 
@@ -496,12 +508,13 @@ function Invoke-Run {
         }
     }
     if ($exited) { Step "app exited after ~${t}s" } else { Step "app running after ${Seconds}s" }
-    if (Test-Path $log) { Get-Content $log -Tail 20 } else { Write-Host '(no app log written)' }
-    if (Test-Path $emulatorLog) {
-        Step 'emulator log (last lines)'
-        Get-Content $emulatorLog -Tail 30
-    }
+    # Stopped before the logs are read, so the run lasts as long as asked.
     if (-not $exited -and -not $Keep) { Get-Process kyty_uwp -ErrorAction SilentlyContinue | Stop-Process -Force }
+    if (Test-Path $log) { Get-LogTail $log 20 } else { Write-Host '(no app log written)' }
+    if (Test-Path $emulatorLog) {
+        Step "emulator log (last lines; $([int]((Get-Item $emulatorLog).Length / 1MB)) MB in all)"
+        Get-LogTail $emulatorLog 30
+    }
 }
 
 function Invoke-Folders {
