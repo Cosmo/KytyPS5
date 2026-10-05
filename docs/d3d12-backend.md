@@ -53,7 +53,7 @@ Samplers (`samplerCache.*`) are descriptors in a sampler heap, one per distinct 
 
 `renderer/renderDraw.cpp` and `renderCompute.cpp` (shared) prepare guest draws and dispatches: resources, targets, the pipeline state; `d3d12/renderCommands.cpp` and `renderExecutor.cpp` record them: render and depth targets in their states (a depth target that the same draw samples is bound read-only, a limit D3D12 puts on feedback loops), vertex and index buffers, the descriptor tables, the viewport (D3D12 has no negative height: the vertex stage flips Y instead, and clip-space depth in [-w, w] is mapped to [0, w] there), triangle fans and legacy quads as triangle lists built from the guest indices, indirect dispatches through a command signature whose first arguments set the translator's runtime data. Each draw and dispatch is bracketed by the GPU trace.
 
-The presenter (`presenter.cpp`) copies the guest's flip image into a texture of its own and draws it onto the composition swap chain with a fullscreen triangle (`gpu_blit_present.frag`; D3D12 has no blit); a second guest layer is blended over it as premultiplied alpha. The swap chain is clamped to 3840 x 2160 (a console loses its device when asked for more). A file `d3d12-dump-frames.txt` in LocalState makes every 600th presented frame be saved as `frame-<n>.bmp`, to see what a run shows.
+The presenter (`presenter.cpp`) copies the guest's flip image into a texture of its own and draws it onto the composition swap chain with a fullscreen triangle (`gpu_blit_present.frag`; D3D12 has no blit); a second guest layer is blended over it as premultiplied alpha. The swap chain is clamped to 3840 x 2160 (a console loses its device when asked for more).
 
 ## The Series X
 

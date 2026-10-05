@@ -20,9 +20,6 @@
 #include <atomic>
 #include <cstring>
 #include <deque>
-#include <filesystem>
-#include <fmt/format.h>
-#include <fstream>
 #include <memory>
 #include <vector>
 
@@ -231,25 +228,6 @@ public:
 	}
 
 	void EndRecord(ID3D12GraphicsCommandList* list) { Transition(list, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT); }
-
-	// Copies the current back buffer (in the render target state) into `readback`, a buffer of RowPitch() x Height() bytes.
-	void RecordCopyToReadback(ID3D12GraphicsCommandList* list, ID3D12Resource* readback) {
-		Transition(list, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-		D3D12_TEXTURE_COPY_LOCATION from {};
-		from.pResource        = m_buffers[m_swapchain3->GetCurrentBackBufferIndex()].Get();
-		from.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-		D3D12_TEXTURE_COPY_LOCATION to {};
-		to.pResource                          = readback;
-		to.Type                               = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-		to.PlacedFootprint.Footprint.Format   = Format;
-		to.PlacedFootprint.Footprint.Width    = m_width;
-		to.PlacedFootprint.Footprint.Height   = m_height;
-		to.PlacedFootprint.Footprint.Depth    = 1;
-		to.PlacedFootprint.Footprint.RowPitch = RowPitch();
-		list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-		Transition(list, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
-	}
-	[[nodiscard]] uint32_t RowPitch() const noexcept { return (m_width * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) / D3D12_TEXTURE_DATA_PITCH_ALIGNMENT * D3D12_TEXTURE_DATA_PITCH_ALIGNMENT; }
 
 	void Present() {
 		// The composition swap chain has no frame statistics to pace with (measured), so the interval does it; the other modes do not wait.
@@ -476,11 +454,6 @@ struct Presenter::Impl {
 
 	void Present();
 
-	// A diagnostic: with a file d3d12-dump-frames.txt in the working directory, every 600th presented frame (at most 8) is written as frame-<n>.bmp, to see what
-	// a run shows without a screen capture.
-	[[nodiscard]] bool DumpDue() { return dump_enabled && dumped < 8 && frame_number % 600 == 599; }
-	void               WriteDump(ID3D12Resource* readback);
-
 	Image& ResolveSurface(const ImageInfo& info) {
 		TextureCache::ImageDesc desc {};
 		desc.info      = info;
@@ -503,9 +476,6 @@ struct Presenter::Impl {
 	FramePool            frames;
 	Common::Mutex        present_mutex;
 	std::array<Layer, 2> layers {};
-	bool                 dump_enabled = std::filesystem::exists("d3d12-dump-frames.txt");
-	uint64_t             frame_number = 0;
-	uint32_t             dumped       = 0;
 };
 
 Presenter::Presenter(WindowContext& window): m_impl(std::make_unique<Impl>(window)) {}
@@ -623,73 +593,19 @@ void Presenter::Impl::Present() {
 				list->ClearRenderTargetView(target, overlay->color.data(), 0, nullptr);
 			}
 		}
-		D3D12::ComPtr<ID3D12Resource> dump;
-		if (DumpDue()) {
-			D3D12_HEAP_PROPERTIES heap {};
-			heap.Type = D3D12_HEAP_TYPE_READBACK;
-			D3D12_RESOURCE_DESC desc {};
-			desc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
-			desc.Width            = static_cast<uint64_t>(swapchain.RowPitch()) * swapchain.Height();
-			desc.Height           = 1;
-			desc.DepthOrArraySize = 1;
-			desc.MipLevels        = 1;
-			desc.SampleDesc.Count = 1;
-			desc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-			D3D12::Check(window.graphic_ctx.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&dump)), "create a frame dump buffer");
-			swapchain.RecordCopyToReadback(list, dump.Get());
-		}
 		swapchain.EndRecord(list);
 		const auto tick = present_scheduler.Submit();
-		if (dump != nullptr) {
-			present_scheduler.Wait(tick);
-			WriteDump(dump.Get());
-		}
 		for (const auto& layer: layers) {
 			if (layer.frame != nullptr) {
 				layer.frame->present_tick = tick;
 			}
 		}
 	}
-	frame_number++;
 	swapchain.Present();
 	renderer.GetPipelineCache().SaveWhenIdle();
 	if (window.frame_presented) {
 		window.frame_presented();
 	}
-}
-
-void Presenter::Impl::WriteDump(ID3D12Resource* readback) {
-	const auto width = swapchain.Width();
-	const auto height = swapchain.Height();
-	const auto pitch  = swapchain.RowPitch();
-	void*      mapped = nullptr;
-	if (FAILED(readback->Map(0, nullptr, &mapped))) {
-		return;
-	}
-	const auto name = fmt::format("frame-{}.bmp", frame_number + 1);
-	std::ofstream file(name, std::ios::binary);
-	const uint32_t image_size = width * height * 4;
-	uint8_t header[54] {};
-	header[0] = 'B';
-	header[1] = 'M';
-	const uint32_t file_size = 54 + image_size;
-	std::memcpy(header + 2, &file_size, 4);
-	const uint32_t offset = 54, info_size = 40;
-	std::memcpy(header + 10, &offset, 4);
-	std::memcpy(header + 14, &info_size, 4);
-	const int32_t  w = static_cast<int32_t>(width), h = -static_cast<int32_t>(height);
-	std::memcpy(header + 18, &w, 4);
-	std::memcpy(header + 22, &h, 4);
-	header[26] = 1;
-	header[28] = 32;
-	std::memcpy(header + 34, &image_size, 4);
-	file.write(reinterpret_cast<const char*>(header), sizeof(header));
-	for (uint32_t y = 0; y < height; y++) {
-		file.write(static_cast<const char*>(mapped) + static_cast<size_t>(y) * pitch, static_cast<std::streamsize>(width) * 4);
-	}
-	readback->Unmap(0, nullptr);
-	dumped++;
-	Log::WriteToConsoleAndLog(fmt::format("D3D12: wrote {} ({}x{})\n", name, width, height));
 }
 
 void Presenter::Discard(Frame& frame) {
