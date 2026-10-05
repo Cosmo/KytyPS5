@@ -7,6 +7,9 @@
 #include "common/hostException.h"
 #include "common/logging/log.h"
 #include "common/platform/sysDbg.h"
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#include "common/platform/sysWindowsVirtual.h"
+#endif
 #include "common/profiler.h"
 #include "common/singleton.h"
 #include "common/stringUtils.h"
@@ -1992,6 +1995,20 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			    fmt::format("AMD CPU compatibility: {} {} ({})\n", module_name, status, details));
 		}
 	}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// Guest code that is meant to be writable and executable (the UWP app) starts writable and becomes executable on the first execute fault of each
+	// page. That fault can come in the middle of a guest function (one that crosses into a page that never ran), and its exception frame lands on the
+	// red zone below the function's stack pointer: the function reads back a saved pointer as 0. So the code is made executable now: the code
+	// segments, and the trampolines the patcher wrote.
+	for (const auto& [segment_addr, segment_size]: executable_segments) {
+		Common::VirtualMemory::Windows::MakeWriteExecuteExecutable(segment_addr, segment_size);
+	}
+	if (program->instruction_trampoline_size != 0) {
+		Common::VirtualMemory::Windows::MakeWriteExecuteExecutable(program->base_vaddr + program->base_size_aligned,
+		                                                          program->instruction_trampoline_size);
+	}
+#endif
 
 	if (!is_shared) {
 		SetupTlsHandler(program);
