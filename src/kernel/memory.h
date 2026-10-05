@@ -108,6 +108,12 @@ static_assert(sizeof(KernelMemoryPoolBlockStats) == 16,
               "KernelMemoryPoolBlockStats struct size is incorrect");
 
 void                   RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func);
+
+// Called when the game asks for a fixed range of addresses that is partly taken by host memory (the host's own heap sits at a random
+// address, which can be inside the range the game wants). The handler may restart the process, which gets another layout; if it returns,
+// the request fails as before.
+using address_collision_handler_t = void (*)(uint64_t start, uint64_t size);
+void SetAddressCollisionHandler(address_collision_handler_t handler);
 void                   SetFlexibleMemorySize(uint64_t size);
 int AllocateDirectMemory(int64_t search_start, int64_t search_end, size_t size, size_t alignment,
                          int memory_type, int64_t* phys_addr_out, bool automatic = false);

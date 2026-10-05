@@ -48,6 +48,13 @@ public:
 	// the emulator returns.
 	void Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel const& panel,
 	           std::filesystem::path                                      game_dir);
+	// UI thread, before Start: how many times the app has restarted for this game because of an address collision (see
+	// RestartForAddressCollision).
+	void SetRestartAttempts(uint32_t attempts) { m_restart_attempts = attempts; }
+	// Emulator thread: the game asked for the fixed range [start, start + size) and host memory (the process heap, at an address chosen at random
+	// when the process started) sits in part of it. A restart gives another layout, so the app restarts with the same game; it comes back only
+	// when that fails or the attempts are used up.
+	void RestartForAddressCollision(uint64_t start, uint64_t size);
 	// UI thread, before Start: `handler` runs on the UI thread once the game presents steadily
 	// (30 frames within a second), so the launch screen can give way to it.
 	void OnGameVisible(std::function<void()> handler);
@@ -89,6 +96,8 @@ private:
 	winrt::Windows::UI::Core::CoreDispatcher                             m_dispatcher {nullptr};
 	std::thread                                                          m_thread;
 	std::atomic_bool                                                     m_started = false;
+	std::filesystem::path                                                m_game_dir;
+	std::atomic<uint32_t>                                                m_restart_attempts = 0;
 	std::atomic_bool                                                     m_restart = false;
 
 	mutable std::mutex      m_mutex;

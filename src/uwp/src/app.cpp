@@ -165,6 +165,8 @@ constexpr wchar_t ProblemMarkup[] = LR"(
 struct RunRequest {
 	std::filesystem::path folder;
 	std::string           title_id;
+	// How many times the app restarted for this game (retry=<n>, see EmulatorHost::RestartForAddressCollision).
+	uint32_t retry = 0;
 };
 
 std::optional<RunRequest> RunRequestFromArguments(winrt::hstring const& arguments) {
@@ -177,13 +179,21 @@ std::optional<RunRequest> RunRequestFromArguments(winrt::hstring const& argument
 		if (std::wstring_view(uri.SchemeName()).substr(0, 4) != L"kyty" || uri.Host() != L"run") {
 			return std::nullopt;
 		}
+		RunRequest request;
+		bool       found = false;
 		for (const auto& entry: uri.QueryParsed()) {
 			if (entry.Name() == L"game") {
-				return RunRequest {std::filesystem::path(std::wstring(entry.Value())), {}};
+				request.folder = std::filesystem::path(std::wstring(entry.Value()));
+				found          = true;
+			} else if (entry.Name() == L"title") {
+				request.title_id = winrt::to_string(entry.Value());
+				found            = true;
+			} else if (entry.Name() == L"retry") {
+				request.retry = static_cast<uint32_t>(std::wcstoul(std::wstring(entry.Value()).c_str(), nullptr, 10));
 			}
-			if (entry.Name() == L"title") {
-				return RunRequest {{}, winrt::to_string(entry.Value())};
-			}
+		}
+		if (found) {
+			return request;
 		}
 	} catch (const winrt::hresult_error&) {
 	}
@@ -507,7 +517,11 @@ void App::Show(winrt::hstring const& activation_arguments) {
 	auto window = xaml::Window::Current();
 	if (window.Content() == nullptr) {
 		WaitForGameFolders();
-		if (auto request = RunRequestFromArguments(arguments); !request) {
+		const auto run_request = RunRequestFromArguments(arguments);
+		if (run_request) {
+			EmulatorHost::Get().SetRestartAttempts(run_request->retry);
+		}
+		if (auto request = run_request; !request) {
 			window.Content(CreateLibraryPage());
 		} else if (!request->title_id.empty()) {
 			window.Content(CreateTitlePage(request->title_id));

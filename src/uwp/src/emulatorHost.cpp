@@ -9,6 +9,7 @@
 #include "gameLibrary.h"
 #include "gameSource.h"
 #include "graphics/host_gpu/d3d12/selfTest.h"
+#include "kernel/memory.h"
 #include "log.h"
 #include "settings.h"
 
@@ -80,6 +81,10 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 	// The settings page's choices (LocalState\kyty-uwp.json).
 	const auto settings = LoadSettings();
 
+	m_game_dir = game_dir;
+	Libs::LibKernel::Memory::SetAddressCollisionHandler(
+	    [](uint64_t start, uint64_t size) { EmulatorHost::Get().RestartForAddressCollision(start, size); });
+
 	m_thread = std::thread([this, game_dir = std::move(game_dir), game_patch, settings] {
 		// The emulator's main thread: the window logic runs here, not on the UI thread.
 		Common::VirtualMemory::Init();
@@ -133,6 +138,23 @@ void EmulatorHost::RequestExit() {
 void EmulatorHost::QuitToLibrary() {
 	m_restart = true;
 	RequestExit();
+}
+
+void EmulatorHost::RestartForAddressCollision(uint64_t start, uint64_t size) {
+	constexpr uint32_t MaxAttempts = 8;
+	Log("the game asks for 0x%llx bytes at 0x%llx, but host memory sits in that range\n", static_cast<unsigned long long>(size),
+	    static_cast<unsigned long long>(start));
+	const uint32_t attempts = m_restart_attempts;
+	if (attempts >= MaxAttempts) {
+		Log("the app restarted %u times already: going on, the request fails\n", attempts);
+		return;
+	}
+	const auto arguments = winrt::hstring(L"kyty://run?game=") + winrt::Windows::Foundation::Uri::EscapeComponent(winrt::hstring(m_game_dir.wstring())) +
+	                       L"&retry=" + winrt::to_hstring(attempts + 1);
+	Log("restarting the app (restart %u): another start puts the host's memory elsewhere\n", attempts + 1);
+	// The process ends when the restart goes through; this only returns when it fails.
+	const auto reason = winrt::Windows::ApplicationModel::Core::CoreApplication::RequestRestartAsync(arguments).get();
+	Log("restart for an address collision failed: %d\n", static_cast<int>(reason));
 }
 
 void EmulatorHost::Finish() {

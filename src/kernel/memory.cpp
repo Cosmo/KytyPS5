@@ -1079,6 +1079,12 @@ static constexpr AlignedPos GetAlignedPos(uint64_t pos, size_t alignment) {
 
 static_assert(!GetAlignedPos(UINT64_MAX - 1, 4).valid);
 
+static std::atomic<address_collision_handler_t> g_address_collision_handler {nullptr};
+
+void SetAddressCollisionHandler(address_collision_handler_t handler) {
+	g_address_collision_handler.store(handler);
+}
+
 void RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func) {
 	EXIT_IF(g_alloc_callback != nullptr || g_free_callback != nullptr);
 	EXIT_IF(alloc_func == nullptr || free_func == nullptr);
@@ -3502,6 +3508,11 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr, size_t len, int flags, 
 		}
 		if ((flags & GUEST_MAP_NO_OVERWRITE) != 0 && g_virtual_ranges->HasOverlap(in_addr, len)) {
 			return KERNEL_ERROR_ENOMEM;
+		}
+		if (const auto handler = g_address_collision_handler.load();
+		    handler != nullptr && g_guest_address_space->OverlapsOwned(in_addr, len) && !g_guest_address_space->Owns(in_addr, len)) {
+			// part of the range is not the guest's: host memory sits in it
+			handler(in_addr, len);
 		}
 		if (ReplaceFixedRangeWithReserved(in_addr, len)) {
 			out_addr            = in_addr;
