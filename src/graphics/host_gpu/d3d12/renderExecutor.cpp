@@ -152,9 +152,11 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 			                            : std::nullopt;
 			switch (binding.kind) {
 				case IR::DescriptorBindingKind::Buffers:
-					for (const auto resource: binding.resources) {
-						WriteRawView(device, prepared->buffers.at(resource), views.Cpu(view_index++),
-						             buffer, read_state);
+					// The prepared buffers follow this binding's resource list in order; the resource numbers themselves have gaps (a number can
+					// belong to another kind of binding), so they are not positions.
+					EXIT_IF(prepared->buffers.size() != binding.resources.size());
+					for (const auto& view: prepared->buffers) {
+						WriteRawView(device, view, views.Cpu(view_index++), buffer, read_state);
 					}
 					break;
 				case IR::DescriptorBindingKind::Gds:
