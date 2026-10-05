@@ -110,6 +110,9 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.printf_direction          = settings.game_output ? Config::LogDirection::Console : Config::LogDirection::Silent;
 		// The guest uses instructions only AMD CPUs have: on another CPU the emulator patches them (its --amd-cpu option).
 		config.amd_cpu_enabled = !IsAmdCpu();
+		// Guest memory is committed on first touch, so a fault can come inside any guest function, and its exception frame must not land on the
+		// red zone below the guest's stack pointer (the emulator's --redzone option: the guest's code is patched to keep it clear).
+		config.red_zone_protection_enabled = true;
 		config.xbox_gpu_limits_enabled     = settings.xbox_gpu_limits;
 		Emulator::Run(options);
 
