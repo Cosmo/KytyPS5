@@ -127,12 +127,7 @@ struct ShaderModule {
 	bool                                         mesh_task = false;
 };
 
-// A draw's depth target and its first color_count color targets.
-struct DrawTargets {
-	RenderDepthInfo depth;
-	RenderColorInfo colors[RENDER_COLOR_ATTACHMENTS_MAX];
-	uint32_t        color_count = 0;
-};
+struct DrawTargets;
 
 // A draw's topology and shader stages (from PipelineCache::GetGraphicsPrograms).
 struct DrawRenderState {

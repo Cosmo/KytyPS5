@@ -7,9 +7,14 @@
 #include "common/slotVector.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
-#include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+
+#if defined(KYTY_GPU_BACKEND_D3D12)
+#include "graphics/host_gpu/d3d12/bdaPageTable.h"
+#else
+#include "graphics/host_gpu/renderer/cache/bdaPageTable.h"
+#endif
 
 #include <array>
 #include <map>
@@ -27,13 +32,17 @@ class TextureCache;
 using BufferId = Common::SlotId;
 inline constexpr BufferId NULL_BUFFER_ID {0};
 
+// Copies [the previous upload's end, end) of an upload batch go to `buffer`.
+struct BufferUpload {
+	Buffer* buffer;
+	size_t  end;
+};
+
 class BufferCache {
 public:
 	static constexpr uint32_t CACHING_PAGEBITS  = 14;
 	static constexpr uint64_t CACHING_PAGESIZE  = uint64_t {1} << CACHING_PAGEBITS;
 	static constexpr uint64_t CACHING_NUMPAGES  = (LOWER_ADDRESS_SIZE + LibKernel::Memory::kExtendedMemorySize) >> CACHING_PAGEBITS;
-	static constexpr uint64_t BDA_PAGETABLE_SIZE =
-	    CACHING_NUMPAGES * sizeof(vk::DeviceAddress);
 	// Tags the BDA page-table entries of pages a DMA shader accessed; an access to another page
 	// records a fault.
 	static constexpr vk::DeviceAddress BDA_ACCESSED = 1;
@@ -73,8 +82,10 @@ public:
 		EXIT("BufferCache: invalid utility-buffer usage\n");
 	}
 	[[nodiscard]] const Buffer* GetGdsBuffer() const noexcept { return &m_gds_buffer; }
-	[[nodiscard]] Buffer* GetBdaPageTableBuffer() noexcept { return &m_bda_pagetable_buffer; }
-	[[nodiscard]] Buffer* GetFaultBuffer() noexcept { return m_fault_manager.GetFaultBuffer(); }
+	[[nodiscard]] Buffer* GetBdaPageTableBuffer() noexcept {
+		return m_bda_page_table.PageTableBuffer();
+	}
+	[[nodiscard]] Buffer* GetFaultBuffer() noexcept { return m_bda_page_table.FaultBuffer(); }
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferForImage(uint64_t vaddr, uint64_t size);
 	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds);
 	void CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,
@@ -113,15 +124,8 @@ private:
 		bool                has_stream_leap;
 	};
 
-	// Copies [previous upload's end, end) go to `buffer`.
-	struct BufferUpload {
-		Buffer* buffer;
-		size_t  end;
-	};
-
 	using PageTable = MultiLevelPageTable<BufferId, CACHING_PAGEBITS, 44, 20>;
 	static_assert(CACHING_PAGESIZE == (uint64_t {1} << PageTable::kPageBits));
-	void WriteDataBuffer(Buffer& buffer, uint64_t address, const void* source, uint64_t size);
 	void TouchBuffer(const Buffer& buffer);
 	[[nodiscard]] OverlapResult ResolveOverlaps(uint64_t vaddr, uint64_t size);
 	void JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumulate_stream_score);
@@ -143,9 +147,7 @@ private:
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
-	FaultManager                                      m_fault_manager;
 	Buffer                                            m_gds_buffer;
-	Buffer                                            m_bda_pagetable_buffer;
 	Common::SlotVector<Buffer>                        m_slot_buffers;
 	Common::LeastRecentlyUsedCache<BufferId, uint64_t> m_lru_cache;
 	BufferMap                                         m_buffers;
@@ -162,6 +164,7 @@ private:
 	StreamBuffer                                      m_stream_buffer;
 	StreamBuffer                                      m_download_buffer;
 	StreamBuffer                                      m_device_buffer;
+	BdaPageTable                                      m_bda_page_table;
 	TextureCache&                                     m_texture_cache;
 	uint64_t                                          m_total_used_memory  = 0;
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
