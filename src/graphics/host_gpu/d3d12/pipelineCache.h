@@ -49,18 +49,38 @@ struct RootLayout {
 		bool operator==(const Range&) const = default;
 	};
 
+	// The buffers of a mesh program run as a compute shader (ShaderRecompiler::IR::MeshEmulation),
+	// as root descriptors after the tables: Write is the compute shader's records and indices (two
+	// UAVs), Read the vertex stage's records (one SRV).
+	enum class MeshScratch : uint8_t { None, Write, Read };
+
 	std::vector<Range> views;
 	std::vector<Range> samplers;
 	bool               push_constants = false;
 	bool               runtime_data   = false;
 	bool               graphics       = false;
-	// The programs read guest memory by address through bindless descriptors (BdaPageTable).
+	// The programs read guest memory by address through bindless descriptors (BdaPageTable): by
+	// indexing the descriptor heap (shader model 6.6) ...
 	bool               heap_indexing  = false;
+	// ... or, where the device cannot, through a descriptor table over the heap's first
+	// descriptors, the guest buffer table (HostShaderFeatures::guest_pointer_table), which follows
+	// the other tables.
+	bool               guest_table    = false;
+	MeshScratch        mesh_scratch   = MeshScratch::None;
 
 	bool operator==(const RootLayout&) const = default;
 
 	// The root parameter of the runtime data, which follows the push constants.
 	[[nodiscard]] uint32_t RuntimeDataParameter() const noexcept { return push_constants ? 1 : 0; }
+	// The root parameter of the guest buffer table, which follows the view and sampler tables.
+	[[nodiscard]] uint32_t GuestTableParameter() const noexcept {
+		return (push_constants ? 1u : 0u) + (runtime_data ? 1u : 0u) + (views.empty() ? 0u : 1u) +
+		       (samplers.empty() ? 0u : 1u);
+	}
+	// The root parameter of the first mesh scratch buffer, which follows the tables.
+	[[nodiscard]] uint32_t MeshScratchParameter() const noexcept {
+		return GuestTableParameter() + (guest_table ? 1u : 0u);
+	}
 
 	void Add(const ShaderRecompiler::IR::CompiledShaderInfo& program, bool program_runtime_data);
 };
@@ -111,16 +131,16 @@ public:
 		D3D12::TracedPipeline trace;
 	};
 
-	GraphicsPrograms
-	GetGraphicsPrograms(const HW::VertexShaderInfo& vertex_regs,
-	                    const HW::PixelShaderInfo& pixel_regs, const HW::ShaderRegisters& sh,
-	                    const HW::Context& context, const HW::UserConfig& user_config,
-	                    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
-	                    bool pixel_active, std::array<ShaderVertexInputInfo, 3>& vertex_info,
-	                    ShaderPixelInputInfo& pixel_info);
-	const Shader& GetComputeProgram(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
-	                                ShaderComputeInputInfo& input_info);
-	Pipeline&     GetComputePipeline(const ShaderComputeInputInfo& input_info, const Shader& shader);
+	// Reads the shaders and registers bound in `command` into the state's shader stages.
+	void          GetGraphicsPrograms(const CommandBuffer& command, DrawRenderState& state);
+	// An empty shader skips the dispatch.
+	const Shader& GetComputeProgram(const HW::ComputeShaderInfo& regs, ShaderComputeInputInfo& input_info);
+	Pipeline&     GetComputePipeline(const ShaderComputeInputInfo& input_info);
+	// The compute pipeline of a mesh program that runs as a compute shader (the vertex program's
+	// ShaderVertexInputInfo::mesh.compute_emulation); its draw uses GetGraphicsPipeline with the
+	// vertex stage that reads what it wrote.
+	Pipeline&     GetMeshComputePipeline(const ShaderVertexInputInfo& vertex_info,
+	                                     const CompiledProgram&       program);
 	// `strip_cut` is the index that restarts strips (a D3D12_INDEX_BUFFER_STRIP_CUT_VALUE).
 	Pipeline& GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
 	                              const RenderDepthInfo&                 depth,

@@ -4,8 +4,10 @@
 #include "common/common.h"
 #include "common/stringUtils.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
@@ -84,6 +86,8 @@ struct EmitterState {
 		    input_info.compute->lds_storage) {
 			lds_storage_class = spv::StorageClassStorageBuffer;
 		}
+		mesh_compute = program.stage == ShaderType::Mesh && input_info.vertex != nullptr &&
+		               input_info.vertex->mesh.compute_emulation;
 	}
 
 	Builder                                          builder;
@@ -113,6 +117,10 @@ struct EmitterState {
 	std::array<BufferDefinition, 4>                  storage_buffers {};
 	std::vector<uint32_t>                           memory_byte_offsets;
 	uint32_t                                         bda_pagetable_variable  = 0;
+	// An unbounded array of storage buffers (the buffers' persistent descriptors) that guest memory
+	// is read through where physical storage buffer pointers cannot be used
+	// (HostShaderFeatures::guest_pointer_table); 0 otherwise.
+	uint32_t                                         guest_buffer_table      = 0;
 	uint32_t                                         fault_buffer_variable   = 0;
 	uint32_t                                         bda_pointer_function    = 0;
 	uint32_t                                         indirect_format_function = 0;
@@ -140,6 +148,11 @@ struct EmitterState {
 	uint32_t                   mesh_primitive_data                   = 0;
 	uint32_t                   mesh_primitives                       = 0;
 	uint32_t                   mesh_cull                             = 0;
+	// The mesh program runs as a compute shader that writes its vertices and triangles to two
+	// buffers (IR::MeshEmulation).
+	bool                       mesh_compute                          = false;
+	uint32_t                   mesh_records                          = 0;
+	uint32_t                   mesh_indices                          = 0;
 	uint32_t                   entry_label                           = 0;
 	uint32_t                   current_label                         = 0;
 	const IR::Block*           current_block                         = nullptr;
@@ -535,6 +548,11 @@ uint32_t EmitF16BitsToF32(EmitterState& state, uint32_t bits);
 void EmitProgram(EmitterState& state);
 
 void DefineGetBdaPointer(EmitterState& state);
+// The dword at `bda`, a get_bda_pointer result (the buffer's descriptor slot in bits 32 to 55, the
+// byte offset in it in the low 32 bits): a physical storage buffer load, or a read through the
+// guest buffer table where the host has no physical pointers. 4-byte aligned; `bda` is not 0.
+// `coherent` (RDNA2 DLC) makes the load volatile, through a Coherent block for physical pointers.
+uint32_t LoadGuestPointerDword(EmitterState& state, uint32_t bda, bool coherent = false);
 void DefineIndirectBufferFormats(ValueEmitContext& ctx);
 void DefineIndirectBufferLoads(ValueEmitContext& ctx);
 void DefineBvhIntersect(EmitterState& state);

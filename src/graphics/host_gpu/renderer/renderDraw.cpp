@@ -531,6 +531,10 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
 	}
 	m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+	if (state.vertex_info[0].stage.handle == nullptr) {
+		// The host cannot run the draw's vertex stage (reported where it was refused).
+		return false;
+	}
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "ResolveRenderColorTarget");
 	}

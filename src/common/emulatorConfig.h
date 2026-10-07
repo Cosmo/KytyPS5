@@ -102,6 +102,9 @@ struct ConfigOptions {
 	// model 6.4, 16-bit ops as 32-bit, no barycentrics, no mesh shaders), to reproduce Xbox
 	// problems on a PC.
 	bool xbox_gpu_limits_enabled = false;
+	// Debugging (D3D12 build): run merged geometry programs as compute shaders (the emulation of
+	// mesh shaders) even where the device has mesh shaders, to compare the two.
+	bool mesh_compute_forced = false;
 	// Development: the pipeline cache of a game (its translated shaders) is kept across builds, also dirty ones; only the shader compiler's own
 	// signature still ties it. A build that translates shaders differently then uses the old translations, which can draw wrongly or crash, so it
 	// is off unless a setting turns it on.
@@ -174,6 +177,7 @@ std::filesystem::path FontFolder();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
 bool XboxGpuLimitsEnabled();
+bool MeshComputeForced();
 bool PipelineCacheAnyBuild();
 #endif
 

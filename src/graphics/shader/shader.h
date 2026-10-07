@@ -93,6 +93,15 @@ struct ShaderMeshInputInfo: ShaderWorkgroupInputInfo {
 	uint32_t max_primitives       = 0;
 	uint32_t provoking_vertex     = 0;
 	bool     fast_launch          = false;
+	// The host has no mesh shaders: the program runs as a compute shader (IR::MeshEmulation).
+	bool     compute_emulation    = false;
+
+	// The slots a group reserves in the emulation: one per possible vertex, and one per triangle a
+	// thread can make.
+	[[nodiscard]] constexpr uint32_t EmulatedVertexSlots() const { return max_vertices; }
+	[[nodiscard]] constexpr uint32_t EmulatedPrimitiveSlots() const {
+		return max_primitives < threads_num[0] ? max_primitives : threads_num[0];
+	}
 
 	[[nodiscard]] constexpr uint32_t InputPrimitiveSize() const {
 		switch (static_cast<Prospero::PrimitiveType>(input_primitive)) {
