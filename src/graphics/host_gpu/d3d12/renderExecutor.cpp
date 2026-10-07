@@ -347,6 +347,16 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 			list->SetComputeRootDescriptorTable(parameter++, table);
 		}
 	}
+	if (layout.guest_table) {
+		// Guest memory is read through the persistent descriptors at the start of the view heap.
+		EXIT_IF(parameter != layout.GuestTableParameter());
+		const auto table = heap.BindlessTable(buffer);
+		if (graphics) {
+			list->SetGraphicsRootDescriptorTable(parameter++, table);
+		} else {
+			list->SetComputeRootDescriptorTable(parameter++, table);
+		}
+	}
 }
 
 void RenderExecutor::RecordDispatch(CommandBuffer& buffer, const PipelineCache::Pipeline& pipeline,

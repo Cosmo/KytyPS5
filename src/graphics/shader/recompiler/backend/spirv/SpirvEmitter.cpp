@@ -44,8 +44,9 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	        : 1u;
 	DefineModule(state);
 	EmitProgram(state);
-	state.builder.AddEntryPoint(ExecutionModelForStage(state.program.stage), state.main_func,
-	                            "main", state.interface_variables);
+	state.builder.AddEntryPoint(state.mesh_compute ? spv::ExecutionModelGLCompute
+	                                               : ExecutionModelForStage(state.program.stage),
+	                            state.main_func, "main", state.interface_variables);
 
 	return state.builder.Build();
 }

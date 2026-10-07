@@ -21,10 +21,7 @@ uint32_t NodeWord(EmitterState& s, uint32_t block, uint32_t word) {
 	const auto offset = Binary(s, spv::OpShiftLeftLogical, TypeU32(s), word, ConstantU32(s, 2));
 	const auto address =
 	    Binary(s, spv::OpIAdd, TypeU64(s), block, Unary(s, spv::OpUConvert, TypeU64(s), offset));
-	const auto pointer = Unary(s, spv::OpConvertUToPtr, TypePhysicalU32Pointer(s), address);
-	const auto result = s.builder.AllocateId();
-	s.builder.AddFunction(spv::OpLoad, TypeU32(s), result, pointer, spv::MemoryAccessAlignedMask, 4u);
-	return result;
+	return LoadGuestPointerDword(s, address);
 }
 
 uint32_t Triangle(EmitterState& s, uint32_t block, uint32_t kind, uint32_t bary,
