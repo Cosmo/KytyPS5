@@ -134,6 +134,10 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.guest_ram_budget_mb         = settings.guest_ram_budget_mb;
 		config.guest_ram_pager_mode        = settings.guest_ram_pager_mode;
 		config.guest_commit_limit_mb       = settings.guest_commit_limit_mb;
+		config.texture_mip_skip            = settings.texture_mip_skip;
+		config.texture_mip_skip_min_size   = settings.texture_mip_skip_min_size;
+		config.gpu_memory_savings          = settings.gpu_memory_savings;
+		config.video_decode_threads        = settings.video_decode_threads;
 		config.pipeline_cache_any_build    = settings.shader_cache_any_build;
 		config.app_memory_usage            = [] { return static_cast<uint64_t>(winrt::Windows::System::MemoryManager::AppMemoryUsage()); };
 		config.app_memory_limit_bytes      = settings.app_memory_limit_mb != 0 ? static_cast<uint64_t>(settings.app_memory_limit_mb) << 20u

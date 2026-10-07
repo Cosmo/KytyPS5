@@ -192,9 +192,10 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	}
 	backing.format         = info.pixel_format;
 	backing.image_type     = HostImageType(info.type);
-	backing.extent         = info.extent;
+	backing.mip_skip       = info.host_skip;
+	backing.extent         = {std::max(info.extent.width >> info.host_skip, 1u), std::max(info.extent.height >> info.host_skip, 1u), info.extent.depth};
 	backing.layers         = info.IsVolume() ? 1u : info.resources.layers;
-	backing.mip_levels     = info.resources.levels;
+	backing.mip_levels     = info.resources.levels - info.host_skip;
 	backing.samples        = info.samples;
 	backing.flags          = info.IsVolume() ? vk::ImageCreateFlagBits::e2DArrayCompatible
 	                                         : vk::ImageCreateFlags {};
@@ -303,6 +304,16 @@ void Image::Transition(CommandBuffer& command, uint32_t resource, uint32_t state
 		// Still in its creation state; the first use initializes the placed resource.
 		command.Handle()->DiscardResource(target.resource, nullptr);
 		target.needs_discard = false;
+	}
+	if (range && backing.mip_skip != 0) {
+		// the range is in the guest's levels (low quality: the host image has fewer)
+		const uint32_t skip = backing.mip_skip;
+		const uint32_t end  = range->base_level + range->level_count;
+		if (end <= skip) {
+			return;
+		}
+		range->base_level  = range->base_level > skip ? range->base_level - skip : 0;
+		range->level_count = end - skip - range->base_level;
 	}
 	const bool volume = backing.image_type == vk::ImageType::e3D;
 	const auto levels = range ? ImageSubresourceRange {range->base_level, range->level_count,

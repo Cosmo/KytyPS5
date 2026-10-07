@@ -327,6 +327,19 @@ ImageViewHandle Image::FindView(const ImageViewInfo& view_info) {
 		}
 	}
 
+	// Low quality: the host image has fewer levels than the guest's. The cache keeps the view in the guest's terms, the view itself is made in the host's.
+	auto guest_view = normalized;
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	if (image.mip_skip != 0) {
+		const uint32_t skip       = image.mip_skip;
+		const uint32_t end        = normalized.base_level + normalized.level_count;
+		const float    guest_lod  = static_cast<float>(normalized.base_level) + static_cast<float>(normalized.min_lod) / 256.0f;
+		normalized.base_level     = normalized.base_level > skip ? normalized.base_level - skip : 0;
+		normalized.level_count    = end > skip + normalized.base_level ? end - skip - normalized.base_level : 1;
+		const float host_lod      = std::max(guest_lod - static_cast<float>(skip), static_cast<float>(normalized.base_level));
+		normalized.min_lod        = static_cast<decltype(normalized.min_lod)>((host_lod - static_cast<float>(normalized.base_level)) * 256.0f);
+	}
+#endif
 	const bool format_compatible = normalized.format != vk::Format::eUndefined &&
 	                               ImageViewOps::FormatsCompatible(image.format, normalized.format);
 	const bool slice_view =
@@ -357,7 +370,7 @@ ImageViewHandle Image::FindView(const ImageViewInfo& view_info) {
 	}
 
 	const auto view = CreateView(normalized);
-	views.push_back({normalized, view});
+	views.push_back({guest_view, view});
 	return view;
 }
 
