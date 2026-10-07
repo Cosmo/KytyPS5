@@ -695,6 +695,7 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {
 	Memory::GuestBufferScope buffer_scope(reinterpret_cast<uint64_t>(buf), nbytes);
 
 	if (d == 1 || d == 2) {
+		CrashTrail::Output(std::string_view(static_cast<const char*>(buf), nbytes));
 		auto*      out      = (d == 1 ? stdout : stderr);
 		const auto written  = std::fwrite(buf, 1, nbytes, out);
 		const auto flush_ok = std::fflush(out) == 0;

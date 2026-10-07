@@ -1,13 +1,16 @@
 #include "padHost.h"
 
 #include "libs/controller.h"
+#include "log.h"
 
 #include <windows.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <mutex>
+#include <thread>
 
 // The app's pad state goes to the emulator's controller library as host input (the library's keyboard-style path, which is always connected once the
 // emulator started): player 1 is the game's pad. The state is forwarded as changes, since every call adds a state to the pad's history.
@@ -180,6 +183,37 @@ void StepPlayerMotion(int player) {
 		return;
 	}
 	StepMotion(Target(g_last));
+}
+
+void StartAutoPress(uint32_t interval_ms) {
+	static std::atomic_bool started = false;
+	if (interval_ms == 0 || started.exchange(true)) {
+		return;
+	}
+	Log("auto press: Cross (A on an Xbox controller) is pressed every %u ms\n", interval_ms);
+	constexpr DWORD HOLD_MS = 120;
+	std::thread([interval_ms] {
+		uint32_t presses = 0;
+		for (;;) {
+			Sleep(interval_ms);
+			if (C::GetActiveControllerId() == -1) {
+				continue; // the game's controller library does not exist yet
+			}
+			const auto id = C::HOST_INPUT_CONTROLLER_ID;
+			{
+				std::lock_guard lock(g_mutex);
+				C::SetButton(id, PAD_BUTTON_CROSS, true);
+			}
+			Sleep(HOLD_MS);
+			{
+				std::lock_guard lock(g_mutex);
+				C::SetButton(id, PAD_BUTTON_CROSS, false);
+			}
+			if (++presses == 1 || presses % 30 == 0) {
+				Log("auto press: %u presses so far\n", presses);
+			}
+		}
+	}).detach();
 }
 
 HostPadFeedback GetPlayerFeedback(int player) {

@@ -100,6 +100,8 @@ public:
 		m_memory_tracker.QueueBdaSync(vaddr, size);
 	}
 	void               RunGarbageCollector();
+	// Experiment: where the buffers' GPU memory is, as a log line.
+	void               LogMemoryBreakdown();
 
 private:
 	friend struct BufferCacheTestAccess;
