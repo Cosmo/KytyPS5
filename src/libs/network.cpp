@@ -2331,8 +2331,9 @@ int64_t KYTY_SYSV_ABI Send(int s, const void* buf, uint64_t len, int flags) {
 int64_t KYTY_SYSV_ABI Sendto(int s, const void* buf, uint64_t len, int flags, const void* addr,
                              uint32_t addrlen) {
 	PRINT_NAME();
-	// Xbox fork (T3): the host reads the data from this guest buffer; a lazily committed page would fail the call instead of faulting
-	::Libs::LibKernel::Memory::EnsureGuestCommitted(reinterpret_cast<uint64_t>(buf), len);
+	// Xbox fork (T3): the host reads the data from this guest buffer; a lazily committed page would fail the call instead of faulting (and so would
+	// one the pager took out of memory: the buffer stays until the call returns)
+	::Libs::LibKernel::Memory::GuestBufferScope buffer_scope(reinterpret_cast<uint64_t>(buf), len);
 
 	LOGF("\t s     = %d\n"
 	     "\t buf   = 0x%016" PRIx64 "\n"
@@ -2457,11 +2458,9 @@ int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* 
                                uint32_t* addrlen) {
 	PRINT_NAME();
 	// Xbox fork (T3): the host writes the received data into these guest buffers; a lazily committed page would fail the call instead of faulting
-	::Libs::LibKernel::Memory::EnsureGuestCommitted(reinterpret_cast<uint64_t>(buf), len);
-	if (addr != nullptr) {
-		::Libs::LibKernel::Memory::EnsureGuestCommitted(reinterpret_cast<uint64_t>(addr), 128);
-		::Libs::LibKernel::Memory::EnsureGuestCommitted(reinterpret_cast<uint64_t>(addrlen), sizeof(uint32_t));
-	}
+	::Libs::LibKernel::Memory::GuestBufferScope buffer_scope(reinterpret_cast<uint64_t>(buf), len);
+	::Libs::LibKernel::Memory::GuestBufferScope addr_scope(reinterpret_cast<uint64_t>(addr), addr != nullptr ? 128 : 0);
+	::Libs::LibKernel::Memory::GuestBufferScope addrlen_scope(reinterpret_cast<uint64_t>(addrlen), addr != nullptr ? sizeof(uint32_t) : 0);
 
 	LOGF("\t s     = %d\n"
 	     "\t buf   = 0x%016" PRIx64 "\n"
