@@ -77,9 +77,11 @@ add_custom_command(TARGET kyty_uwp POST_BUILD
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:kyty_uwp> "${KYTY_UWP_LAYOUT}/"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/uwp/AppxManifest.xml" "${KYTY_UWP_LAYOUT}/"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_WINPTHREAD_DLL}" "${KYTY_UWP_LAYOUT}/"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_SPIRV_TO_DXIL_ROOT}/bin/spirv_to_dxil.dll" "${KYTY_DXIL_DLL}" "${KYTY_UWP_LAYOUT}/"
 	COMMAND ${CMAKE_COMMAND} -E copy_directory "${KYTY_UWP_DIR}/Assets" "${KYTY_UWP_LAYOUT}/Assets"
 	COMMAND ${CMAKE_COMMAND} -E make_directory "${KYTY_UWP_LAYOUT}/fonts"
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${kyty_uwp_fonts} "${KYTY_UWP_LAYOUT}/fonts/"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${KYTY_NOTO_SANS_FONTS} "${KYTY_UWP_LAYOUT}/fonts/"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_NOTO_SANS_DIR}/LICENSE" "${KYTY_UWP_LAYOUT}/fonts/NotoSans-LICENSE.txt"
 	COMMENT "Updating the UWP package layout")
 # A changed manifest or asset links the app again, so that it reaches the layout too.
 file(GLOB kyty_uwp_assets CONFIGURE_DEPENDS "${KYTY_UWP_DIR}/Assets/*")
