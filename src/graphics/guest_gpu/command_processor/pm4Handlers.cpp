@@ -5,6 +5,7 @@
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/frameDump.h"
 #include "graphics/host_gpu/gpuBackend.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
@@ -14,6 +15,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <fmt/format.h>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -1377,7 +1379,11 @@ KYTY_CP_OP_PARSER(CpOpCondExec) {
 	EXIT_NOT_IMPLEMENTED(addr == 0);
 	EXIT_NOT_IMPLEMENTED(payload_dw + exec_count >= dw);
 
-	if (*reinterpret_cast<const volatile uint32_t*>(addr) == 0) {
+	const uint32_t condition = *reinterpret_cast<const volatile uint32_t*>(addr);
+	cp.LogGuestRead("cond-exec", addr, sizeof(uint32_t),
+	                fmt::format("value {} -> {} {} dwords of packets", condition, condition == 0 ? "SKIP" : "run", exec_count));
+	if (condition == 0) {
+		CommandProcessor::LogSkippedPackets(buffer + payload_dw, exec_count);
 		return payload_dw + exec_count;
 	}
 

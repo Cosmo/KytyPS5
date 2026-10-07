@@ -103,6 +103,8 @@ public:
 	// A read-only view lets the image be sampled while it is the depth target.
 	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView(ImageViewHandle view,
 	                                                           bool            read_only = false);
+	// Frame dump (debugging): the first mip of the first layer of a 2D color image as tight rows of `row_bytes` bytes (the GPU is flushed and waited for). False when it cannot be read.
+	[[nodiscard]] bool ReadbackColor(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height, uint32_t& row_bytes);
 #else
 	using Barriers = std::vector<vk::ImageMemoryBarrier2>;
 	[[nodiscard]] Barriers GetBarriers(vk::ImageLayout                      destination_layout,
@@ -170,6 +172,10 @@ public:
 		return backing.image == nullptr ? 0 : Common::AlignUp(info.data.size, 1024);
 	}
 	[[nodiscard]] uint64_t HashGuestEdges() const;
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// The GPU memory of the image's D3D12 allocations.
+	[[nodiscard]] uint64_t GpuBytes() const;
+#endif
 	[[nodiscard]] vk::ImageLayout ReadLayout() const noexcept {
 		return info.IsDepth() ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
 		                      : vk::ImageLayout::eShaderReadOnlyOptimal;

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -105,6 +106,11 @@ public:
 	void SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
 	                    const volatile void* address, uint32_t count_in_dwords);
 	[[nodiscard]] bool ShouldSkipPredicatedPackets() const { return m_predicate_skip; }
+	// Debugging (the frame dump's draw log, see frameDump.h): what the command processor read from guest memory to decide something, and whether the GPU has written that memory without the
+	// guest copy being brought up to date since (the value read is then stale).
+	void LogGuestRead(const char* what, uint64_t address, uint64_t size, const std::string& result);
+	// ... and the draws and dispatches among `dwords` dwords of packets that a predicate skips.
+	static void LogSkippedPackets(const uint32_t* first, uint32_t dwords);
 
 	Pm4ProcessResult Process(Pm4Execution& execution, std::span<const uint32_t> commands);
 	void             ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain);
