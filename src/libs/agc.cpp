@@ -4087,6 +4087,7 @@ int Initialize() {
 		return result;
 	}
 	EXIT_IF(reinterpret_cast<uint64_t>(address) != DriverDmemBase);
+	LibKernel::Memory::EnsureGuestCommitted(DriverDmemBase, DriverDmemSize); // lazy guest memory: written by the host below
 	std::memset(address, 0, DriverDmemSize);
 	struct FunctionShaderBindings {
 		uint64_t code;
