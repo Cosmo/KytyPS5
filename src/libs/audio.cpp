@@ -21,6 +21,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <magic_enum.hpp>
 #include <vector>
@@ -182,6 +183,10 @@ private:
 		SDL_AudioDeviceID device          = 0;
 #if defined(KYTY_PLATFORM_UWP)
 		Input::Stream* host_stream = nullptr; // The UWP app's capture, instead of an SDL stream.
+		// For the log: the silent state the game was told last (-1: not asked yet), and its reads with sound from the microphone and without.
+		int      reported_state = -1;
+		uint32_t reads_live     = 0;
+		uint32_t reads_silent   = 0;
 #endif
 	};
 
@@ -201,7 +206,7 @@ private:
 	static void            OpenSdlDevice(PortIn* port, Format format);
 	static void            CloseSdlDevice(PortIn* port);
 #if defined(KYTY_PLATFORM_UWP)
-	static uint32_t HostInput(const PortIn& port, void* dest);
+	static uint32_t HostInput(const PortIn& port, void* dest, bool* live);
 #endif
 	static const void*     PrepareOutputBuffer(const PortOut& port, const void* data,
 	                                           std::vector<uint8_t>* buffer, float gain,
@@ -814,6 +819,11 @@ int Audio::AudioInClose(Id handle) {
 	if (port->busy) {
 		return AUDIO_IN_ERROR_BUSY;
 	}
+#if defined(KYTY_PLATFORM_UWP)
+	std::printf("AudioIn: the game closes port %d after %u reads with sound from the microphone and %u without\n", handle.GetId(),
+	            port->reads_live, port->reads_silent);
+	std::fflush(stdout);
+#endif
 	CloseSdlDevice(port);
 	*port = {};
 	return OK;
@@ -826,7 +836,14 @@ int Audio::AudioInGetSilentState(Id handle) {
 		return AUDIO_IN_ERROR_INVALID_HANDLE;
 	}
 #if defined(KYTY_PLATFORM_UWP)
-	return Input::Present(port->host_stream) ? 0 : AUDIO_IN_SILENT_STATE_DEVICE_NONE;
+	const int state = Input::Present(port->host_stream) ? 0 : AUDIO_IN_SILENT_STATE_DEVICE_NONE;
+	// In the log when the answer changes: whether the game sees a microphone.
+	if (state != port->reported_state) {
+		port->reported_state = state;
+		std::printf("AudioIn: the game asks port %d for the microphone: %s\n", handle.GetId(), state == 0 ? "there" : "none");
+		std::fflush(stdout);
+	}
+	return state;
 #else
 	if (port->stream == nullptr || !RecordingDevicePresent(port->device)) {
 		return AUDIO_IN_SILENT_STATE_DEVICE_NONE;
@@ -838,7 +855,8 @@ int Audio::AudioInGetSilentState(Id handle) {
 #if defined(KYTY_PLATFORM_UWP)
 // AudioInInput from the UWP app's capture, paced like the SDL capture: a block of samples_num frames once that much is captured (up to
 // AUDIO_IN_GRAIN_MAX_ASYNC frames of what there is for an asynchronous port), silence without a microphone or when too little came in time.
-uint32_t Audio::HostInput(const PortIn& port, void* dest) {
+uint32_t Audio::HostInput(const PortIn& port, void* dest, bool* live_read) {
+	*live_read = false;
 	if (dest == nullptr) {
 		Input::Clear(port.host_stream);
 		return 0;
@@ -856,7 +874,9 @@ uint32_t Audio::HostInput(const PortIn& port, void* dest) {
 	}
 	const uint32_t frames = port.samples_num;
 	if (live && port.asynchronous) {
-		return Input::Read(port.host_stream, dest, AUDIO_IN_GRAIN_MAX_ASYNC * port.bytes_per_frame) / port.bytes_per_frame;
+		const uint32_t read = Input::Read(port.host_stream, dest, AUDIO_IN_GRAIN_MAX_ASYNC * port.bytes_per_frame) / port.bytes_per_frame;
+		*live_read          = read != 0;
+		return read;
 	}
 	if (live) {
 		const uint32_t requested = frames * port.bytes_per_frame;
@@ -866,6 +886,7 @@ uint32_t Audio::HostInput(const PortIn& port, void* dest) {
 			Common::Thread::SleepMicro(1000);
 		}
 		if (Input::Read(port.host_stream, dest, requested) == requested) {
+			*live_read = true;
 			return frames;
 		}
 	}
@@ -889,12 +910,20 @@ int Audio::AudioInInput(Id handle, void* dest) {
 		snapshot   = *port;
 	}
 #if defined(KYTY_PLATFORM_UWP)
-	const uint32_t host_frames = HostInput(snapshot, dest);
+	bool           live_read   = false;
+	const uint32_t host_frames = HostInput(snapshot, dest, &live_read);
 	{
 		Common::LockGuard lock(m_mutex);
 		auto&             port = m_in_ports[handle.GetId()];
 		port.last_input_time   = dest != nullptr ? LibKernel::KernelGetProcessTime() : 0;
 		port.busy              = false;
+		if (dest != nullptr) {
+			if (live_read && port.reads_live == 0) {
+				std::printf("AudioIn: port %d gets the first sound from the microphone\n", handle.GetId());
+				std::fflush(stdout);
+			}
+			(live_read ? port.reads_live : port.reads_silent)++;
+		}
 	}
 	return dest != nullptr ? static_cast<int>(host_frames) : 0;
 #endif
@@ -1160,8 +1189,8 @@ namespace AudioIn {
 
 LIB_NAME("AudioIn", "AudioIn");
 
-static int OpenPort(int user_id, int type, int index, uint32_t len, uint32_t freq,
-                    uint32_t param, bool asynchronous) {
+static int OpenPortChecked(int user_id, int type, int index, uint32_t len, uint32_t freq,
+                           uint32_t param, bool asynchronous) {
 	LOGF("\t user_id = %d\n"
 	     "\t type    = %d\n"
 	     "\t index   = %d\n"
@@ -1204,6 +1233,20 @@ static int OpenPort(int user_id, int type, int index, uint32_t len, uint32_t fre
 	}
 
 	return id.ToInt();
+}
+
+// Every open in the log, whatever the log is set to (games open the microphone rarely): what the game asked for and what it got.
+static int OpenPort(int user_id, int type, int index, uint32_t len, uint32_t freq, uint32_t param, bool asynchronous) {
+	const int result = OpenPortChecked(user_id, type, index, len, freq, param, asynchronous);
+	if (result >= 0) {
+		std::printf("AudioIn: the game opens %sport %d (user %d, type %d, index %d, %u frames, %u Hz, param 0x%x)\n",
+		            asynchronous ? "asynchronous " : "", result, user_id, type, index, len, freq, param);
+	} else {
+		std::printf("AudioIn: the game cannot open a%s port (user %d, type %d, index %d, %u frames, %u Hz, param 0x%x): error 0x%08x\n",
+		            asynchronous ? "n asynchronous" : "", user_id, type, index, len, freq, param, static_cast<uint32_t>(result));
+	}
+	std::fflush(stdout);
+	return result;
 }
 
 int KYTY_SYSV_ABI AudioInOpen(int user_id, int type, int index, uint32_t len,
