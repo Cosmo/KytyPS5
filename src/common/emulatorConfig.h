@@ -102,6 +102,17 @@ struct ConfigOptions {
 	// model 6.4, 16-bit ops as 32-bit, no barycentrics, no mesh shaders), to reproduce Xbox
 	// problems on a PC.
 	bool xbox_gpu_limits_enabled = false;
+	// Debugging: which limits of the DXIL compiler apply with xbox_gpu_limits_enabled: bit 0 shader model 6.4, bit 1 16-bit operations lowered.
+	uint32_t xbox_limits_dxil_parts = 3;
+	// Debugging: save the shaders of the pipeline with this number when it is created (0: none).
+	uint32_t dump_pipeline = 0;
+	// Debugging (D3D12 build): a folder whose DXIL files replace shaders of pipelines when they are created: <size>.ps.dxil replaces the pixel stage
+	// (and <size>.vs.dxil the vertex stage) of the pipelines whose pixel program's SPIR-V is <size> bytes. Signed or not; the emulator validates and signs
+	// them. Empty: off. For trying hand-edited or differently built DXIL of one shader without rebuilding the emulator.
+	std::filesystem::path shader_override_folder;
+	// Debugging (D3D12 build): a thread watches the GPU and ends the emulator, with the report of a GPU hang, as soon as the device is removed or the
+	// oldest GPU work has not finished for this many seconds (0: off). It also logs how many draws of the pipelines with overridden shaders finished.
+	uint32_t gpu_hang_exit_seconds = 0;
 	// Debugging (D3D12 build): run merged geometry programs as compute shaders (the emulation of
 	// mesh shaders) even where the device has mesh shaders, to compare the two.
 	bool mesh_compute_forced = false;
@@ -185,6 +196,10 @@ std::filesystem::path FontFolder();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
 bool XboxGpuLimitsEnabled();
+uint32_t XboxLimitsDxilParts();
+uint32_t DumpPipeline();
+std::filesystem::path ShaderOverrideFolder();
+uint32_t              GpuHangExitSeconds();
 bool MeshComputeForced();
 uint32_t GuestRamBudgetMb();
 uint32_t GuestRamPagerMode();
