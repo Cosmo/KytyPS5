@@ -670,6 +670,35 @@ private:
 	std::map<uint64_t, MapEntry> m_maps;
 };
 
+// The pager's store, for the host ops of the lazy regions (there is one address space per process).
+static std::atomic<Xbox::PagerStore*> g_pager_store {nullptr};
+// Debugging the pager: what happened to a window (printed for the windows the registers point into when the game crashes).
+struct PagerWindowHistory {
+	uint32_t evicts = 0, page_ins = 0;
+	int64_t  last_evict_ms = 0, last_page_in_ms = 0;
+	uint32_t last_page_in_thread = 0;
+};
+static std::mutex                                      g_history_mutex;
+static std::unordered_map<uint64_t, PagerWindowHistory> g_history;
+static int64_t                                         HistoryNowMs() {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+static void HistoryEvict(uint64_t window) {
+	std::lock_guard lock(g_history_mutex);
+	auto&           h = g_history[window];
+	h.evicts++;
+	h.last_evict_ms = HistoryNowMs();
+}
+static void HistoryPageIn(uint64_t window) {
+	std::lock_guard lock(g_history_mutex);
+	auto&           h = g_history[window];
+	h.page_ins++;
+	h.last_page_in_ms     = HistoryNowMs();
+	h.last_page_in_thread = GetCurrentThreadId();
+}
+
+static thread_local bool     t_fault_thread = false; // the helper thread that serves faults on windows in the store
+
 class GuestAddressSpace {
 public:
 	explicit GuestAddressSpace(uint64_t backing_size) {
@@ -684,6 +713,19 @@ public:
 		m_lazy_enabled = Xbox::Tunables::LazyMemory();
 		if (m_lazy_enabled) {
 			LOGF_COLOR(Log::Color::Green, "\t lazy guest memory: direct and flexible memory are committed on first touch, no backing section\n");
+			// Xbox fork, experiment: the pager (the environment variable wins over the setting)
+			auto budget_mb = static_cast<uint64_t>(Xbox::Tunables::GuestRamBudgetMbFromEnvironment());
+			if (budget_mb == 0) {
+				budget_mb = Config::GuestRamBudgetMb();
+			}
+			if (budget_mb == Config::kGuestRamBudgetAuto) {
+				// not set: where the OS gives the app little memory (the Series X: 5 GiB) the pager is on, with that limit as its cap; elsewhere it is off
+				const uint64_t limit = Config::AppMemoryLimit();
+				budget_mb            = limit != 0 && limit <= (uint64_t {8} << 30u) ? limit >> 20u : 0;
+			}
+			if (budget_mb != 0) {
+				StartPager(budget_mb << 20u);
+			}
 			return;
 		}
 #endif
@@ -701,6 +743,9 @@ public:
 	}
 
 	~GuestAddressSpace() {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		StopPager();
+#endif
 		delete m_backing;
 		m_backing = nullptr;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -714,6 +759,11 @@ public:
 				const auto region_start = reinterpret_cast<uint64_t>(info.BaseAddress);
 				const auto region_end   = region_start + static_cast<uint64_t>(info.RegionSize);
 				if (info.State == MEM_COMMIT) {
+					if (info.Type == MEM_MAPPED) {
+						// a view of the pager (a window that came back from its store)
+						EXIT_IF(UnmapViewOfFile2(GetCurrentProcess(), info.AllocationBase, MEM_PRESERVE_PLACEHOLDER) == 0);
+						continue;
+					}
 					EXIT_IF(VirtualFree(reinterpret_cast<void*>(region_start), info.RegionSize,
 					                    MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) == 0);
 					continue;
@@ -871,12 +921,22 @@ public:
 		{
 			const auto flags = m_lazy.FlagsOf(address);
 			if ((flags & Xbox::Lazy::kFull) != 0) {
-				return (flags & Xbox::Lazy::kProt) == 0;
+				if ((flags & (Xbox::Lazy::kSwept | Xbox::Lazy::kEvicting)) == 0) {
+					return (flags & Xbox::Lazy::kProt) == 0;
+				}
+				// The pager's: a window it swept (no-access) or is copying out (read-only) is touched. It is read-write again and not cold; an
+				// eviction in progress notices and gives up. (If another thread was first, there is nothing to do and the access can be retried.)
+				std::lock_guard lock(m_lazy_mutex);
+				LazyHost        host;
+				m_lazy.Touch(address >> Xbox::Lazy::Regions::kWindowBits, host);
+				return true;
 			}
 		}
 		// Fast path without any lock: a fault on a page that is committed cannot be a commit fault. It is a page watcher or a bad access, and
 		// those are frequent; they must not queue up behind the lock below. (Unless another thread committed this window an instant ago.)
-		{
+		// Not for a window in the pager's store: another thread may just be bringing it back, and its pages are committed (zero) before they are
+		// filled. This fault waits for the lock, and then finds the window ready.
+		if ((m_lazy.FlagsOf(address) & Xbox::Lazy::kEvicted) == 0) {
 			MEMORY_BASIC_INFORMATION info {};
 			if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != 0) {
 				if (info.State == MEM_COMMIT) {
@@ -888,6 +948,23 @@ public:
 				}
 			}
 		}
+		// Bringing a window back from the store reads a file and fills 16 guard pages (each of them a nested exception): too deep for the stack of the
+		// thread that faulted. Exception frames and the frames below them stay on that stack as junk, and the game reads stack it never wrote (a float
+		// from an exception frame as a pointer, crashes minutes in). A helper thread does the work and this thread only waits.
+		if (m_fault_thread.joinable() && !t_fault_thread && (m_lazy.FlagsOf(address) & Xbox::Lazy::kEvicted) != 0) {
+			return RunOnFaultThread(address, is_write);
+		}
+		return CommitFaultLocked(address, is_write);
+#else
+		(void)address;
+		(void)is_write;
+#endif
+		return false;
+	}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// The part of HandleCommitFault that commits (and pages in) the window.
+	bool CommitFaultLocked(uint64_t address, bool is_write) {
 		std::lock_guard lock(m_lazy_mutex);
 		LazyHost        host;
 		switch (m_lazy.CommitAt(address, host)) {
@@ -903,13 +980,120 @@ public:
 				return protect == PAGE_READWRITE || (protect == PAGE_READONLY && !is_write);
 			}
 			case Xbox::Lazy::Regions::CommitResult::Failed:
-				EXIT("Memory: out of commit while committing guest memory at 0x%016" PRIx64 "\n", address);
+				EXIT("Memory: out of commit while committing guest memory at 0x%016" PRIx64 " (guest resident %" PRIu64 " MB, error %u, %" PRIu64 " windows evicted on a failed commit, window flags %u)\n", address,
+				     Xbox::Lazy::GetCounters().committed.load() >> 20u, static_cast<uint32_t>(GetLastError()), m_lazy.RoomEvicted(), static_cast<uint32_t>(m_lazy.FlagsOf(address)));
 		}
 #else
 		(void)address;
 		(void)is_write;
 #endif
 		return false;
+	}
+
+
+	// Debugging the pager: for each value (the registers of a crash) that points into guest memory, what happened to its window.
+	void DumpPagerContext(const uint64_t* values, size_t count) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (!m_lazy_enabled || m_pager_store == nullptr) {
+			return;
+		}
+		const auto now = HistoryNowMs();
+		std::printf("--- Pager context: windows the registers point into ---\n");
+		for (size_t i = 0; i < count; ++i) {
+			const uint64_t value = values[i];
+			if (!m_lazy.Contains(value, 1)) {
+				continue;
+			}
+			const uint64_t      window = value >> Xbox::Lazy::Regions::kWindowBits;
+			PagerWindowHistory  h {};
+			bool                known = false;
+			{
+				std::lock_guard lock(g_history_mutex);
+				if (const auto it = g_history.find(window); it != g_history.end()) {
+					h     = it->second;
+					known = true;
+				}
+			}
+			std::printf("  value %zu = 0x%016" PRIx64 " window 0x%" PRIx64 " flags 0x%02x %s: evicts %u, page ins %u, last evict %" PRId64
+			            " ms ago, last page in %" PRId64 " ms ago (thread %u)\n",
+			            i, value, window, static_cast<unsigned>(m_lazy.FlagsOf(value)), known ? "history" : "never evicted", h.evicts, h.page_ins,
+			            h.evicts != 0 ? now - h.last_evict_ms : -1, h.page_ins != 0 ? now - h.last_page_in_ms : -1, h.last_page_in_thread);
+		}
+		std::fflush(stdout);
+#else
+		(void)values;
+		(void)count;
+#endif
+	}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// Gives a range of lazy memory (all of it reserved, nothing committed) back as placeholders. A window that came back from the pager's store and
+	// went out again is a private reservation of its own, so the range can be several allocations: one call for each. Returns how many (0: failed).
+	static size_t ReleaseLazyRange(uint64_t vaddr, uint64_t size) {
+		size_t     count  = 0;
+		auto       cursor = vaddr;
+		const auto end    = vaddr + size;
+		while (cursor < end) {
+			MEMORY_BASIC_INFORMATION info {};
+			if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0) {
+				return 0;
+			}
+			const auto region_end = std::min<uint64_t>(end, reinterpret_cast<uint64_t>(info.BaseAddress) + static_cast<uint64_t>(info.RegionSize));
+			if (VirtualFree(reinterpret_cast<void*>(cursor), region_end - cursor, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) == 0) {
+				return 0;
+			}
+			++count;
+			cursor = region_end;
+		}
+		return count;
+	}
+#endif
+
+	// A host call is about to read or write this buffer through the system (file and network I/O): committed, brought back from the pager's store, and
+	// kept in memory until UnpinBuffer. The pin comes first, so that the pager cannot take a window between the two.
+	uint64_t PinBuffer(uint64_t address, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (!m_lazy_enabled || size == 0) {
+			return 0;
+		}
+		uint64_t id = 0;
+		{
+			std::lock_guard lock(m_lazy_mutex);
+			id = m_lazy.TempPin(address, size);
+		}
+		EnsureCommitted(address, size);
+		return id;
+#else
+		(void)address;
+		(void)size;
+		return 0;
+#endif
+	}
+	void UnpinBuffer(uint64_t id) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (id != 0) {
+			std::lock_guard lock(m_lazy_mutex);
+			m_lazy.TempUnpin(id);
+		}
+#else
+		(void)id;
+#endif
+	}
+
+	// A thread or a fiber runs on this memory: the pager must leave it alone (Xbox::Lazy::Regions::Pin), and gives back what it took already.
+	void PinRange(uint64_t address, uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (!m_lazy_enabled || size == 0) {
+			return;
+		}
+		std::lock_guard lock(m_lazy_mutex);
+		LazyHost        host;
+		m_lazy.Pin(address, size);
+		m_lazy.Reclaim(address, size, host);
+#else
+		(void)address;
+		(void)size;
+#endif
 	}
 
 	// Commits the windows of a range before a host call (file read, network receive) writes into it. Parts that are not lazy are ignored.
@@ -941,6 +1125,16 @@ public:
 	}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// A line for the pager's failures and decisions in the emulator log (LOGF_COLOR only reaches the console, which nobody sees on the Series X).
+	static void PagerLog(const char* format, ...) {
+		char    buffer[512];
+		va_list args;
+		va_start(args, format);
+		vsnprintf(buffer, sizeof(buffer), format, args);
+		va_end(args);
+		Log::WriteToConsoleAndLog(buffer);
+	}
+
 	struct LazyHost final: Xbox::Lazy::HostOps {
 		static VirtualMemory::Mode Native(Xbox::Lazy::Mode mode) {
 			switch (mode) {
@@ -950,23 +1144,438 @@ public:
 			}
 			return VirtualMemory::Mode::ReadWrite;
 		}
+		// Debugging the pager (guest_commit_limit_mb): a wall for the guest's commits, like the console's limit of memory that the PC does not have.
+		static bool WallReached(uint64_t size) {
+			static const uint64_t limit = static_cast<uint64_t>(Config::GuestCommitLimitMb()) << 20u;
+			return limit != 0 && Xbox::Lazy::GetCounters().committed.load(std::memory_order_relaxed) + size > limit;
+		}
 		bool Commit(uint64_t address, uint64_t size) override {
+			if (WallReached(size)) {
+				return false;
+			}
 			if (!VirtualMemory::Windows::CommitLazy(address, size)) {
-				LOGF_COLOR(Log::Color::Red, "\t lazy guest memory: commit of 0x%016" PRIx64 " bytes at 0x%016" PRIx64 " failed, error %u\n", size, address,
+				PagerLog("\t lazy guest memory: commit of 0x%016" PRIx64 " bytes at 0x%016" PRIx64 " failed, error %u\n", size, address,
 				           static_cast<uint32_t>(GetLastError()));
 				return false;
 			}
 			Xbox::Lazy::AddCommitted(size);
 			return true;
 		}
-		void Decommit(uint64_t address, uint64_t size) override {
-			EXIT_IF(!VirtualMemory::Windows::DecommitLazy(address, size));
+		// A `view` is one window that came back from the store (CommitFromStore): it is unmapped, and the window is reserved private memory again.
+		void Decommit(uint64_t address, uint64_t size, bool view) override {
+			if (view) {
+				EXIT_IF(UnmapViewOfFile2(GetCurrentProcess(), reinterpret_cast<void*>(address), MEM_PRESERVE_PLACEHOLDER) == 0);
+				EXIT_IF(!VirtualMemory::Windows::ReserveLazy(address, size));
+				Xbox::Lazy::GetCounters().views.fetch_sub(1, std::memory_order_relaxed);
+			} else {
+				EXIT_IF(!VirtualMemory::Windows::DecommitLazy(address, size));
+			}
 			Xbox::Lazy::SubCommitted(size);
 		}
 		bool Protect(uint64_t address, uint64_t size, Xbox::Lazy::Mode mode) override {
 			return VirtualMemory::Windows::ProtectLazy(address, size, Native(mode));
 		}
+		// The pager's store: a window comes back from its slot as a view of a section of its own. The contents are read into the section through a
+		// view that only this thread knows (the window is inaccessible all that time: a thread that touches it faults and waits for the lock the caller
+		// holds), and the window becomes the section's view in one step. No thread ever sees the window empty, which a window committed first and
+		// filled after would be for one that reads it without a fault.
+		bool CommitFromStore(uint64_t window, uint64_t address, uint64_t size, uint32_t slot) override {
+			if (WallReached(size)) {
+				return false;
+			}
+			auto* store = g_pager_store.load(std::memory_order_acquire);
+			EXIT_IF(store == nullptr);
+			const auto start   = std::chrono::steady_clock::now();
+			HANDLE     section = VirtualMemory::Windows::CreateGuestSection(size);
+			if (section == nullptr) {
+				PagerLog("\t pager: no section for a window at 0x%016" PRIx64 ", error %u\n", address, static_cast<uint32_t>(GetLastError()));
+				return false;
+			}
+			void* scratch = VirtualMemory::Windows::MapSectionAlias(section, size);
+			if (scratch == nullptr) {
+				const auto error = static_cast<uint32_t>(GetLastError()); // before anything else can change it
+				PagerLog("\t pager: no view of a section for a window at 0x%016" PRIx64 ", error %u (%lld views, guest %" PRIu64 " MB, app memory %" PRIu64 " MB)\n", address,
+				         error, static_cast<long long>(Xbox::Lazy::GetCounters().views.load()), Xbox::Lazy::GetCounters().committed.load() >> 20u,
+				         Config::AppMemoryUsage() >> 20u);
+				CloseHandle(section);
+				return false;
+			}
+			if (!store->Read(slot, 0, scratch, size)) {
+				EXIT("Memory: the pager could not read a window of guest memory back (slot %u)\n", slot);
+			}
+			if (!store->CheckChecksum(slot, Xbox::PagerStore::Checksum(scratch, size) ^ (window * 0x9E3779B97F4A7C15ull))) {
+				store->counters.corrupt++;
+				PagerLog("\t pager: slot %u came back different from what was written\n", slot);
+			}
+			UnmapViewOfFile(scratch);
+			// the reserved window becomes a placeholder, and the placeholder the view
+			if (VirtualFree(reinterpret_cast<void*>(address), size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) == 0) {
+				PagerLog("\t pager: the window at 0x%016" PRIx64 " did not become a placeholder, error %u\n", address, static_cast<uint32_t>(GetLastError()));
+				CloseHandle(section);
+				return false;
+			}
+			void* view = VirtualMemory::Windows::MapPlaceholderView(section, address, 0, size, VirtualMemory::Mode::ReadWrite);
+			CloseHandle(section); // the view keeps the section
+			if (view == nullptr || reinterpret_cast<uint64_t>(view) != address) {
+				PagerLog("\t pager: the view of a window at 0x%016" PRIx64 " failed, error %u\n", address, static_cast<uint32_t>(GetLastError()));
+				EXIT_IF(!VirtualMemory::Windows::ReserveLazy(address, size));
+				return false;
+			}
+			Xbox::Lazy::GetCounters().views.fetch_add(1, std::memory_order_relaxed);
+			Xbox::Lazy::AddCommitted(size);
+			HistoryPageIn(window);
+			store->counters.page_ins++;
+			store->counters.page_in_ns += static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+			return true;
+		}
+		// A view becomes private memory (the contents and the protections of its pages stay): an unmap cuts through the window and keeps a part of it.
+		bool MakePrivate(uint64_t address, uint64_t size) override {
+			constexpr uint64_t   kPage = 0x1000;
+			std::vector<DWORD>   protections(size / kPage);
+			for (uint64_t i = 0; i < protections.size(); ++i) {
+				MEMORY_BASIC_INFORMATION info {};
+				EXIT_IF(VirtualQuery(reinterpret_cast<const void*>(address + i * kPage), &info, sizeof(info)) == 0);
+				protections[i] = info.Protect & 0xFF;
+			}
+			EXIT_IF(!VirtualMemory::Windows::ProtectLazy(address, size, VirtualMemory::Mode::ReadWrite));
+			std::vector<uint8_t> copy(size);
+			std::memcpy(copy.data(), reinterpret_cast<const void*>(address), size);
+			EXIT_IF(UnmapViewOfFile2(GetCurrentProcess(), reinterpret_cast<void*>(address), MEM_PRESERVE_PLACEHOLDER) == 0);
+			EXIT_IF(!VirtualMemory::Windows::ReserveLazy(address, size));
+			EXIT_IF(!VirtualMemory::Windows::CommitLazy(address, size)); // the window stays committed: the counter does not change
+			Xbox::Lazy::GetCounters().views.fetch_sub(1, std::memory_order_relaxed);
+			std::memcpy(reinterpret_cast<void*>(address), copy.data(), size);
+			for (uint64_t i = 0; i < protections.size(); ++i) {
+				if (protections[i] == PAGE_READONLY || protections[i] == PAGE_NOACCESS) {
+					EXIT_IF(!VirtualMemory::Windows::ProtectLazy(address + i * kPage, kPage,
+					                                             protections[i] == PAGE_READONLY ? VirtualMemory::Mode::Read : VirtualMemory::Mode::NoAccess));
+				}
+			}
+			return true;
+		}
+		// Close to the limit of the app's memory (the OS ends the app there; the margin is for what the GPU and the heap take in one step).
+		bool Tight(uint64_t size) override {
+			const uint64_t limit = Config::AppMemoryLimit();
+			if (limit == 0 || g_pager_store.load(std::memory_order_acquire) == nullptr) { // (without the pager there is nothing to make room with)
+				return false;
+			}
+			constexpr uint64_t kHardHeadroom = uint64_t {384} << 20u;
+			const uint64_t     used          = Config::AppMemoryUsage();
+			return used != 0 && used + size + kHardHeadroom > limit;
+		}
+		// A view (read-only: a thread that touches the window waits for the lock at its fault) becomes private memory with the same contents. The mapping
+		// of a view of a section is a limited resource (this fails at about 16800 of them on the Series X); private memory is not.
+		bool Privatize(uint64_t address, uint64_t size, const void* data) override {
+			EXIT_IF(UnmapViewOfFile2(GetCurrentProcess(), reinterpret_cast<void*>(address), MEM_PRESERVE_PLACEHOLDER) == 0);
+			EXIT_IF(!VirtualMemory::Windows::ReserveLazy(address, size));
+			// the commit of the view was given back an instant ago: a thread outside the lock may have taken it
+			bool committed = false;
+			for (int attempt = 0; attempt < 200 && !committed; ++attempt) {
+				committed = VirtualMemory::Windows::CommitLazy(address, size);
+				if (!committed) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+			}
+			if (!committed) {
+				EXIT("Memory: out of commit while turning a view of guest memory into private memory at 0x%016" PRIx64 "\n", address);
+			}
+			std::memcpy(reinterpret_cast<void*>(address), data, size);
+			Xbox::Lazy::GetCounters().views.fetch_sub(1, std::memory_order_relaxed);
+			return true;
+		}
+		// MakeRoom: the window is read-only and the caller holds the lock (a writer waits for it at its fault), so what is copied is what is stored.
+		bool Spill(uint64_t window, uint64_t address, uint64_t size, uint32_t& slot) override {
+			auto* store = g_pager_store.load(std::memory_order_acquire);
+			if (store == nullptr) {
+				return false;
+			}
+			const auto*    memory = reinterpret_cast<const void*>(address); // written from the window itself: no buffer to allocate in a fault handler
+			const uint64_t sum    = Xbox::PagerStore::Checksum(memory, size);
+			const uint32_t s      = store->Alloc();
+			if (!store->Write(s, memory, size)) {
+				store->Free(s);
+				return false;
+			}
+			if (Xbox::PagerStore::Checksum(memory, size) != sum) { // a write that did not fault
+				store->counters.torn++;
+				store->Free(s);
+				return false;
+			}
+			store->SetChecksum(s, sum ^ (window * 0x9E3779B97F4A7C15ull));
+			store->counters.evicted++;
+			store->counters.emergency++;
+			HistoryEvict(window);
+			slot = s;
+			return true;
+		}
+		void FreeSlot(uint32_t slot) override {
+			if (auto* store = g_pager_store.load(std::memory_order_acquire)) {
+				store->Free(slot);
+			}
+		}
 	};
+
+	// ---- Xbox fork: the pager. While the lazily committed guest memory is above the budget (guest_ram_budget_mb in kyty-uwp.json), the pager takes
+	// the coldest windows out of memory: it sweeps candidates (no-access), and a window that nobody touched for a second is copied to the store (a
+	// file) and decommitted. A touch brings it back: a fault, or a host call that is about to access it. The states of a window are in
+	// xbox/lazyRegions.h; this is the thread and the store.
+	void StartPager(uint64_t budget_bytes) {
+		auto store = std::make_unique<Xbox::PagerStore>();
+		// the working directory is the app's LocalState (the UWP app sets it); the file is deleted when the process ends
+		if (!store->Open(L"guest-store.tmp")) {
+			LOGF_COLOR(Log::Color::Red, "\t pager: could not create its store file, error %u: guest memory stays in memory\n", static_cast<uint32_t>(GetLastError()));
+			return;
+		}
+		m_pager_store = std::move(store);
+		g_pager_store.store(m_pager_store.get(), std::memory_order_release);
+		m_budget = budget_bytes;
+		m_pager_mode = Config::GuestRamPagerMode();
+			m_fault_thread = std::jthread([this](std::stop_token stop) { FaultLoop(stop); });
+			m_pager = std::jthread([this](std::stop_token stop) { PagerLoop(stop); });
+			if (m_pager_mode == 1) {
+				LOGF_COLOR(Log::Color::Green, "\t pager: sweep only, nothing leaves memory\n");
+			}
+		LOGF_COLOR(Log::Color::Green, "\t pager: guest memory above %" PRIu64 " MB is taken out of memory and kept in a file\n", budget_bytes >> 20u);
+	}
+
+	// A fault on a window in the store is served by a helper thread (see HandleCommitFault); the faulting thread waits here.
+	struct FaultRequest {
+		uint64_t address;
+		bool     is_write;
+		bool     done   = false;
+		bool     result = false;
+	};
+	bool RunOnFaultThread(uint64_t address, bool is_write) {
+		FaultRequest     request {address, is_write};
+		std::unique_lock lock(m_fault_mutex);
+		m_fault_queue.push_back(&request);
+		m_fault_wake.notify_one();
+		m_fault_done.wait(lock, [&request] { return request.done; });
+		return request.result;
+	}
+	void FaultLoop(std::stop_token stop) {
+		t_fault_thread = true;
+		std::unique_lock lock(m_fault_mutex);
+		while (!stop.stop_requested()) {
+			m_fault_wake.wait_for(lock, std::chrono::milliseconds(100), [this] { return !m_fault_queue.empty(); });
+			while (!m_fault_queue.empty()) {
+				auto* request = m_fault_queue.front();
+				m_fault_queue.pop_front();
+				lock.unlock();
+				const bool result = CommitFaultLocked(request->address, request->is_write);
+				lock.lock();
+				request->result = result;
+				request->done   = true;
+				m_fault_done.notify_all();
+			}
+		}
+	}
+
+	void StopPager() {
+		if (m_fault_thread.joinable()) {
+			m_fault_thread.request_stop();
+			m_fault_thread.join();
+		}
+		if (m_pager.joinable()) {
+			m_pager.request_stop();
+			m_pager.join();
+		}
+		g_pager_store.store(nullptr, std::memory_order_release);
+	}
+
+	void PagerLoop(std::stop_token stop) {
+		using Clock                    = std::chrono::steady_clock;
+		constexpr uint64_t kWindow     = Xbox::Lazy::Regions::kWindow;
+		constexpr uint64_t kWindowBits = Xbox::Lazy::Regions::kWindowBits;
+		constexpr auto     kDwell      = std::chrono::milliseconds(1000);
+		constexpr uint64_t kSweepChunk = 2048; // windows swept per hold of the lock
+		auto&              counters    = m_pager_store->counters;
+		const auto         resident    = [] { return Xbox::Lazy::GetCounters().committed.load(std::memory_order_relaxed); };
+		struct Swept {
+			uint64_t         window;
+			Clock::time_point at;
+		};
+		std::deque<Swept>    swept;
+		uint64_t             hand = 0;
+		std::vector<uint8_t> copy(kWindow);
+		auto                 last_report = Clock::now();
+		uint64_t             previous[6] = {}; // swept, evicted, aborted, page ins, page in ns, written
+		// The budget in force. A commit that failed (Regions::MakeRoom evicted on the spot) is the wall of the process: the GPU and the heap share its
+		// memory and grow, and the guest was at the wall with no room for them. The budget drops to what the guest held then minus a margin, and creeps
+		// back up (8 MB a second) once the wall was not hit for half a minute.
+		constexpr uint64_t kWallMargin = uint64_t {256} << 20u;
+		constexpr uint64_t kHeadroom   = uint64_t {768} << 20u;
+		constexpr uint64_t kFloor      = uint64_t {512} << 20u; // the guest holds this much at least, whatever the others take
+		const uint64_t     app_limit   = Config::AppMemoryLimit();
+		// Views of sections (the pager's page ins) are a limited resource: the Series X stops mapping at about 16800 of them. Above the cap cold views
+		// become private memory. (Mode 3, for testing on a PC: a cap of 300.)
+		const int64_t view_cap = m_pager_mode == 3 ? 300 : 6000;
+		uint64_t           budget      = m_budget;
+		uint64_t           last_room   = 0;
+		auto               last_wall   = Clock::now();
+		auto               last_creep  = Clock::now();
+		while (!stop.stop_requested()) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			const auto     now = Clock::now();
+			if (const uint64_t room = m_lazy.RoomEvicted(); room != last_room) {
+				last_room = room;
+				last_wall = now;
+				const uint64_t held   = resident();
+				const uint64_t target = held > kWallMargin ? held - kWallMargin : 0;
+				const uint64_t lowered = std::max(m_budget / 2, std::min(budget, target));
+				if (lowered < budget) {
+					PagerLog("\t pager: a commit failed with %" PRIu64 " MB of guest memory: budget %" PRIu64 " MB -> %" PRIu64 " MB\n", held >> 20u, budget >> 20u, lowered >> 20u);
+					budget = lowered;
+				}
+			} else if (budget < m_budget && now - last_wall >= std::chrono::seconds(30) && now - last_creep >= std::chrono::seconds(1)) {
+				budget     = std::min(m_budget, budget + (uint64_t {8} << 20u));
+				last_creep = now;
+			}
+			// The OS ends the app at its limit of memory, and the GPU and the heap are in it too, growing in steps of up to 128 MB: the guest may hold what the
+			// limit leaves after them and a headroom. (Without a probe, or a limit: the budget as it is.)
+			uint64_t effective = budget;
+			if (app_limit != 0) {
+				if (const uint64_t used = Config::AppMemoryUsage(); used != 0) {
+					const uint64_t held  = resident();
+					const uint64_t other = used > held ? used - held : 0;
+					const uint64_t room  = app_limit > other + kHeadroom ? app_limit - other - kHeadroom : 0;
+					effective            = std::min(budget, std::max(kFloor, room));
+				}
+			}
+			const uint64_t low = effective - effective / 16;
+			// 1. Windows swept a second ago: the ones nobody touched leave memory while the guest is above the low mark; the others are let go.
+			while (!swept.empty() && now - swept.front().at >= kDwell && !stop.stop_requested()) {
+				const uint64_t window = swept.front().window;
+				swept.pop_front();
+				std::shared_lock copy_lock(m_copy_lock); // an unmap waits for us: the window is not freed while it is copied
+				LazyHost         host;
+				// Enough is out (or sweep only, for debugging: nothing leaves memory): the window stays, read-write. A view stays as private memory when
+				// there are too many views: this is the way back from the limit of mappings (see Privatize).
+				const bool enough    = m_pager_mode == 1 || resident() <= low;
+				bool       privatize = false;
+				bool       begun     = false;
+				{
+					std::lock_guard lock(m_lazy_mutex);
+					if (enough) {
+						privatize = m_pager_mode != 1 && Xbox::Lazy::GetCounters().views.load(std::memory_order_relaxed) > view_cap && m_lazy.IsView(window);
+						if (!privatize) {
+							m_lazy.Touch(window, host);
+							continue;
+						}
+					}
+					begun = m_lazy.BeginEvict(window, host);
+				}
+				if (!begun) {
+					continue; // touched meanwhile
+				}
+				if (privatize) {
+					// the window is read-only now: what is copied here is what it holds when it becomes private memory (a write is a fault that waits for the lock)
+					std::memcpy(copy.data(), reinterpret_cast<const void*>(window << kWindowBits), kWindow);
+					std::lock_guard lock(m_lazy_mutex);
+					if ((m_lazy.FlagsOf(window << kWindowBits) & Xbox::Lazy::kEvicting) != 0 &&
+					    std::memcmp(copy.data(), reinterpret_cast<const void*>(window << kWindowBits), kWindow) != 0) {
+						counters.torn++;
+						m_lazy.Touch(window, host);
+					} else if (m_lazy.CommitPrivatize(window, copy.data(), host)) {
+						counters.privatized++;
+					} else {
+						m_lazy.Touch(window, host); // touched meanwhile, or the host could not
+					}
+					continue;
+				}
+				const uint32_t slot = m_pager_store->Alloc();
+				// the window is read-only now: a write is a fault that aborts the eviction below, so what is copied here is what is stored
+				std::memcpy(copy.data(), reinterpret_cast<const void*>(window << kWindowBits), kWindow);
+				const uint64_t sum     = Xbox::PagerStore::Checksum(copy.data(), kWindow);
+				const bool     written = m_pager_store->Write(slot, copy.data(), kWindow);
+				bool           left    = false;
+				{
+					std::lock_guard lock(m_lazy_mutex);
+					if (written) {
+						// Still read-only (nobody touched it through a fault): it must still equal the copy. A difference is a write that did not
+						// fault (a host call that changes the protection itself), and the window stays.
+						if ((m_lazy.FlagsOf(window << kWindowBits) & Xbox::Lazy::kEvicting) != 0 &&
+						    std::memcmp(copy.data(), reinterpret_cast<const void*>(window << kWindowBits), kWindow) != 0) {
+							counters.torn++;
+							m_lazy.Touch(window, host);
+						} else {
+							m_pager_store->SetChecksum(slot, sum ^ (window * 0x9E3779B97F4A7C15ull));
+							left = m_lazy.CommitEvict(window, slot, host);
+							if (left && m_pager_mode == 2) {
+								m_lazy.CommitAt(window << kWindowBits, host); // debugging: straight back in (a decommit and a commit, and the contents through the store)
+							}
+						}
+					} else {
+						m_lazy.Touch(window, host); // the store failed: the window stays
+					}
+				}
+				if (left) {
+					counters.evicted++;
+					HistoryEvict(window);
+				} else {
+					m_pager_store->Free(slot);
+					counters.aborted++;
+				}
+			}
+			// 2. Above the budget and nothing waiting: sweep the next windows, from where the last sweep ended.
+			const bool over_budget = resident() > effective;
+			const auto views_now   = Xbox::Lazy::GetCounters().views.load(std::memory_order_relaxed);
+			if (swept.empty() && (over_budget || views_now > view_cap)) {
+				// above the budget any window will do; with too many views only views are swept (and become private memory)
+				const uint64_t need   = over_budget ? (resident() - low) / kWindow : static_cast<uint64_t>(views_now - view_cap);
+				const uint64_t target = std::min<uint64_t>(need + need / 2 + 16, 65536);
+				uint64_t       count  = 0;
+				bool           wrapped = false;
+				while (count < target && !stop.stop_requested()) {
+					std::lock_guard lock(m_lazy_mutex);
+					LazyHost        host;
+					uint64_t        in_chunk = 0;
+					bool            any      = false;
+					m_lazy.ForEachFullWindow(hand, [&](uint64_t window) {
+						any  = true;
+						hand = window + 1;
+						if (!over_budget && !m_lazy.IsView(window)) {
+							return false;
+						}
+						if (m_lazy.SweepIfCold(window, host)) {
+							swept.push_back({window, now});
+							++count;
+							++in_chunk;
+						}
+						return in_chunk >= kSweepChunk || count >= target;
+					});
+					if (!any) { // the end of the address space: start again at the top, once
+						if (wrapped) {
+							break;
+						}
+						wrapped = true;
+						hand    = 0;
+					}
+				}
+				counters.swept += count;
+			}
+			if (now - last_report >= std::chrono::seconds(10)) {
+				size_t evicted_now = 0;
+				{
+					std::shared_lock lock(m_lazy_mutex);
+					evicted_now = m_lazy.EvictedCount();
+				}
+				const uint64_t current[6] = {counters.swept.load(), counters.evicted.load(), counters.aborted.load(), counters.page_ins.load(), counters.page_in_ns.load(),
+				                             counters.written.load()};
+				const auto     seconds    = std::chrono::duration<double>(now - last_report).count();
+				const uint64_t page_ins   = current[3] - previous[3];
+				Log::WriteToConsoleAndLog(fmt::format(
+				    "pager: resident {} MB of {} MB, {} windows in the store ({} MB); last {:.0f} s: swept {}, evicted {} ({:.0f} MB/s written), aborted {}, paged in {} (avg {:.0f} us), "
+				    "store reads {}, errors {}, torn {}, corrupt {}, evicted on a failed commit {}, app memory {} of {} MB, views {} (turned private {})\n",
+				    resident() >> 20u, effective >> 20u, evicted_now, (evicted_now * kWindow) >> 20u, seconds, current[0] - previous[0], current[1] - previous[1],
+				    static_cast<double>(current[5] - previous[5]) / 1048576.0 / seconds, current[2] - previous[2], page_ins,
+				    page_ins != 0 ? static_cast<double>(current[4] - previous[4]) / 1000.0 / static_cast<double>(page_ins) : 0.0, counters.read_hits.load(), counters.errors.load(), counters.torn.load(), counters.corrupt.load(), counters.emergency.load(), Config::AppMemoryUsage() >> 20u, app_limit >> 20u, Xbox::Lazy::GetCounters().views.load(), counters.privatized.load()));
+				std::copy(std::begin(current), std::end(current), std::begin(previous));
+				last_report = now;
+			}
+		}
+	}
 
 	// A guest protection for lazy memory: reads and writes are all the host distinguishes (the guest never gets execute rights here).
 	bool LazyProtect(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
@@ -985,7 +1594,7 @@ public:
 
 	// Host copy of committed guest pages that may be read-only or no-access (page watchers): make them readable for the copy and restore.
 	// A guest thread that touches such a page during the copy does not fault; see the T3 design note, "the known race".
-	static void HostCopyFromGuest(uint64_t address, uint8_t* destination, uint64_t size) {
+	void HostCopyFromGuest(uint64_t address, uint8_t* destination, uint64_t size) {
 		auto       cursor = address;
 		const auto end    = address + size;
 		while (cursor < end) {
@@ -998,7 +1607,17 @@ public:
 			const auto bytes   = run_end - cursor;
 			const DWORD protect = info.Protect & 0xFF;
 			if (info.State != MEM_COMMIT) {
-				std::memset(destination + (cursor - address), 0, bytes);
+				// Zero, except for windows that the pager moved to its store (a window that was committed when the range was looked at may be
+				// there by now): reading those goes through the fault that brings them back.
+				for (auto a = cursor; a < run_end;) {
+					const auto next = std::min<uint64_t>(run_end, ((a >> Xbox::Lazy::Regions::kWindowBits) + 1) << Xbox::Lazy::Regions::kWindowBits);
+					if (m_lazy.IsEvicted(a)) {
+						std::memcpy(destination + (a - address), reinterpret_cast<const void*>(a), next - a);
+					} else {
+						std::memset(destination + (a - address), 0, next - a);
+					}
+					a = next;
+				}
 			} else if (protect == PAGE_NOACCESS) {
 				EXIT_IF(!VirtualMemory::Windows::ProtectLazy(cursor, bytes, VirtualMemory::Mode::Read));
 				std::memcpy(destination + (cursor - address), reinterpret_cast<const void*>(cursor), bytes);
@@ -1068,7 +1687,25 @@ public:
 					continue;
 				}
 				m_lazy.ForEachSegment(cursor, length, [&](uint64_t address, uint64_t bytes, bool committed) {
-					segments.push_back({address, bytes, committed ? 2 : 1});
+					if (committed) {
+						segments.push_back({address, bytes, 2});
+						return;
+					}
+					// Not committed: zero, except the windows that are in the pager's store. Their contents are read from the store right here, under
+					// the lock that keeps their slots (a page in takes the lock exclusively), without bringing the window back into memory.
+					auto* piece = static_cast<uint8_t*>(data) + (address - vaddr);
+					std::memset(piece, 0, bytes);
+					auto* store = g_pager_store.load(std::memory_order_acquire);
+					for (uint64_t a = address; store != nullptr && m_lazy.EvictedCount() != 0 && a < address + bytes;) {
+						const uint64_t window = a >> Xbox::Lazy::Regions::kWindowBits;
+						const uint64_t next   = std::min(address + bytes, (window + 1) << Xbox::Lazy::Regions::kWindowBits);
+						uint32_t       slot   = 0;
+						if (m_lazy.IsEvicted(a) && m_lazy.EvictedSlot(window, slot) &&
+						    store->Read(slot, a - (window << Xbox::Lazy::Regions::kWindowBits), piece + (a - address), next - a)) {
+							store->counters.read_hits++;
+						}
+						a = next;
+					}
 				});
 				cursor += length;
 			}
@@ -1226,10 +1863,11 @@ public:
 				pieces.emplace_back(current, part_end - current);
 				current = part_end;
 			}
+			size_t released = 0;
 			for (const auto& [piece_vaddr, piece_size]: pieces) {
-				EXIT_IF(VirtualFree(reinterpret_cast<void*>(piece_vaddr), piece_size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) == 0);
+				released += ReleaseLazyRange(piece_vaddr, piece_size);
 			}
-			EXIT_IF(pieces.size() > 1 && !CoalescePlaceholders(vaddr, size));
+			EXIT_IF(released == 0 || (released > 1 && !CoalescePlaceholders(vaddr, size)));
 			EXIT_IF(!RemoveMappedUnlocked(vaddr, size, MappingType::Backing));
 			AddFreeUnlocked(vaddr, size);
 			return true;
@@ -1784,5 +2422,13 @@ private:
 	Xbox::Lazy::Regions                        m_lazy;
 	std::shared_mutex                          m_lazy_mutex; // shared: lookups for host copies; exclusive: every change and the commit itself
 	std::shared_mutex                          m_copy_lock;
+	std::unique_ptr<Xbox::PagerStore>          m_pager_store;
+	uint64_t                                   m_budget = 0;
+	uint32_t                                   m_pager_mode = 0; // Config::GuestRamPagerMode
+	std::mutex                                 m_fault_mutex;
+	std::condition_variable                    m_fault_wake, m_fault_done;
+	std::deque<FaultRequest*>                  m_fault_queue;
+	std::jthread                               m_fault_thread;
+	std::jthread                               m_pager; // last: it stops first when the address space is destroyed
 #endif
 };
