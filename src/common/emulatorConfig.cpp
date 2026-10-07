@@ -222,6 +222,10 @@ bool XboxGpuLimitsEnabled() {
 	// The D3D12 self test runs before the emulator sets its configuration up.
 	return g_config != nullptr && g_config->xbox_gpu_limits_enabled;
 }
+
+bool PipelineCacheAnyBuild() {
+	return g_config != nullptr && g_config->pipeline_cache_any_build;
+}
 #endif
 
 const Keymap& GetKeymap() {
