@@ -26,6 +26,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptorCommit.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -12355,7 +12356,7 @@ public:
         Require(name, "clamped buffer rebind",
                 binding.buffer == owner.Handle() &&
                     binding.offset == owner.Offset(buffer_address) &&
-                    binding.range == 0x5000,
+                    binding.size == 0x5000,
                 "descriptor rebind lost its clamped guest range or retained a stale host owner");
       }
 
@@ -12381,7 +12382,7 @@ public:
         Require(name, "halfword buffer base and exact tail",
                 bindings.buffers[0].buffer == owner.Handle() &&
                     bindings.buffers[0].offset + 2 == owner.Offset(buffer_address) &&
-                    bindings.buffers[0].range == 14 &&
+                    bindings.buffers[0].size == 14 &&
                     bindings.shader_data[buffer_program.bindings.memory_offset_dword] == 2,
                 "native binding lost the byte adjustment or rounded the final halfword range");
       }
@@ -12413,7 +12414,7 @@ public:
           const auto &owner = resources.GetBufferCache().GetBuffer(source.id);
           Require(name, description, source.address == address && source.size == expected &&
                       binding.buffer == owner.Handle() && binding.offset <= owner.Offset(address) &&
-                      binding.range == expected + owner.Offset(address) - binding.offset,
+                      binding.size == expected + owner.Offset(address) - binding.offset,
                   "descriptor discovery or rebind changed the write boundary or base adjustment");
         };
         writer_snapshot.specialization_reads = {{address + 0x500, 4},
@@ -12441,7 +12442,7 @@ public:
         value.dwords[1] |= 16u << 16u;
         check_range(storage_limit - (graphics.StorageMinAlignment() - 1),
                     "read-only structured sentinel reserves native alignment prefix");
-        Require(name, "read-only native range fits device", writer_bindings.buffers[0].range <= storage_limit,
+        Require(name, "read-only native range fits device", writer_bindings.buffers[0].size <= storage_limit,
                 "read-only cap omitted the native descriptor alignment prefix");
         value.dwords[2] = 0x300; // A finite 12 KiB descriptor remains finite despite the mock limit.
         std::array<PreparedBindings *, 1> stages{&writer_bindings};
@@ -14507,7 +14508,7 @@ public:
         const auto &buffer = buffer_bindings.buffers[0];
         Require(name, "rediscovered target buffer read",
                 target.image_id == expanded_array_id &&
-                    buffer.range == buffer_size &&
+                    buffer.size == buffer_size &&
                     buffer_bindings.images.empty() &&
                     texture_cache.GetImage(target.image_id).backing.state.layout ==
                         (sync_image ? vk::ImageLayout::eTransferSrcOptimal
@@ -15955,6 +15956,7 @@ public:
       cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
                           vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr,
                           1, barriers.data(), 0, nullptr);
+      BdaBlocks blocks;
       for (const auto &[guest_base, backing] : test.bda_mappings) {
         const auto page_offset = guest_base &
                                  (BufferCache::CACHING_PAGESIZE - 1);
@@ -15968,8 +15970,19 @@ public:
         auto address = buffer.device_address + backing - page_offset;
         auto page = BufferCache::PageIndex(guest_base);
         for (uint64_t mapped = 0; mapped < pages; mapped++) {
+          uint64_t directory_value = 0;
+          Require(test.name, "dispatch",
+                  blocks.Allocate(page + mapped, &directory_value),
+                  "BDA test mappings fill the page table");
+          if (directory_value != 0) {
+            cmd.updateBuffer(m_bda_pagetable_buffer.buffer,
+                             ((page + mapped) >> BdaLayout::BLOCK_BITS) *
+                                 sizeof(uint64_t),
+                             sizeof(directory_value), &directory_value);
+          }
           cmd.updateBuffer(m_bda_pagetable_buffer.buffer,
-                           (page + mapped) * sizeof(vk::DeviceAddress),
+                           blocks.EntryElement(page + mapped) *
+                               sizeof(vk::DeviceAddress),
                            sizeof(address), &address);
           address += BufferCache::CACHING_PAGESIZE;
         }
@@ -19187,7 +19200,8 @@ private:
     const auto usage = vk::BufferUsageFlagBits::eStorageBuffer |
                        vk::BufferUsageFlagBits::eTransferDst;
     m_bda_pagetable_buffer =
-        CreateDeviceBuffer(shader_name, BufferCache::BDA_PAGETABLE_SIZE, usage);
+        CreateDeviceBuffer(shader_name,
+                           BdaLayout::TABLE_ELEMENTS * sizeof(vk::DeviceAddress), usage);
     m_fault_buffer = CreateDeviceBuffer(
         shader_name, BufferCache::CACHING_NUMPAGES / 8, usage);
   }

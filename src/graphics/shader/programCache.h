@@ -68,6 +68,10 @@ public:
 	                    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
 	                    bool pixel_active, std::array<ShaderVertexInputInfo, 3>& vertex_info,
 	                    ShaderPixelInputInfo& pixel_info);
+	// The programs compiled so far by ShaderType, as the log's "Shaders:" line counts them.
+	using ProgramCounts = std::array<size_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1>;
+	[[nodiscard]] ProgramCounts GetProgramCounts() const;
+
 	CompiledProgram GetComputeProgram(const HW::ComputeShaderInfo& regs,
 	                                  const HW::ShaderRegisters&   sh,
 	                                  ShaderComputeInputInfo&      input_info);
