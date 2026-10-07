@@ -185,6 +185,8 @@ private:
 	uint64_t               m_vibration_until = 0;
 	PadTriggerEffectParam  m_trigger_effect {};
 	PadTriggerEffectStateInformation m_trigger_state {};
+	// Per trigger, how often a weapon effect has fired.
+	std::array<uint32_t, 2> m_trigger_shots {};
 	// Setting changes share the output lock; audio only needs an atomic scale snapshot.
 	std::array<std::atomic<uint32_t>, 3> m_setting_steps {};
 };
@@ -407,6 +409,43 @@ enum TriggerState : int32_t {
 	TRIGGER_STATE_VIBRATION_STANDBY = 6,
 	TRIGGER_STATE_VIBRATION_ACTIVE  = 7,
 };
+
+#if defined(KYTY_PLATFORM_UWP)
+// What an adaptive trigger's effect does where the trigger is (value 0..255), for a controller that can only rumble its trigger: the resistance
+// and the vibration's amplitude (0..8) and frequency there. Positions are counted as TriggerEffectState counts them.
+struct TriggerFeel {
+	uint8_t resistance = 0;
+	uint8_t vibration  = 0;
+	uint8_t frequency  = 0;
+};
+
+static TriggerFeel TriggerEffectFeel(const PadTriggerEffectCommand& command, int value) {
+	const int   pos      = value == 0 ? 0 : value == 255 ? 9 : 1 + value / 32;
+	const auto* data     = command.data;
+	const auto  strength = [](int level) { return static_cast<uint8_t>(std::clamp(level, 0, 8)); };
+	switch (command.mode) {
+		case 1: // feedback from position data[0], strength data[1]
+			return {pos >= data[0] ? strength(data[1]) : uint8_t {0}};
+		case 2: // weapon: resistance from data[0] until it gives at data[1], strength data[2]
+			return {value >= data[0] * 32 && value < std::min(data[1] * 32, 254) ? strength(data[2]) : uint8_t {0}};
+		case 3: // vibration from position data[0], amplitude data[1], frequency data[2]
+			return {0, pos >= data[0] ? strength(data[1]) : uint8_t {0}, data[2]};
+		case 4: // a strength per position
+			return {strength(data[pos])};
+		case 5: { // slope from data[0] (strength data[2]) to data[1] (strength data[3])
+			const int start = data[0];
+			const int end   = data[1];
+			if (pos < start || end <= start) {
+				return {};
+			}
+			return {strength(pos >= end ? data[3] : data[2] + (data[3] - data[2]) * (pos - start) / (end - start))};
+		}
+		case 6: // an amplitude per position (data[1..10]), frequency data[0]
+			return {0, strength(data[1 + pos]), data[0]};
+		default: return {};
+	}
+}
+#endif
 
 static int32_t TriggerEffectState(const PadTriggerEffectCommand& command, int value,
                                   int32_t previous) {
@@ -880,11 +919,22 @@ int GameController::GetActiveControllerId() {
 #if defined(KYTY_PLATFORM_UWP)
 HostFeedback GameController::GetHostFeedback() {
 	Common::LockGuard lock(m_mutex);
-	if (m_vibration_until <= SDL_GetTicks()) {
-		return {};
+	HostFeedback      feedback;
+	if (m_vibration_until > SDL_GetTicks()) {
+		const auto scale     = GetSettingScale(Setting::VibrationIntensity);
+		feedback.large_motor = Scale(m_vibration[0], scale);
+		feedback.small_motor = Scale(m_vibration[1], scale);
 	}
-	const auto scale = GetSettingScale(Setting::VibrationIntensity);
-	return {Scale(m_vibration[0], scale), Scale(m_vibration[1], scale)};
+	const auto trigger_scale = GetSettingScale(Setting::TriggerEffectIntensity) * 255.0f / 8.0f;
+	for (int i = 0; i < 2; i++) {
+		const auto feel = TriggerEffectFeel(m_trigger_effect.command[i],
+		                                    m_state.axes[static_cast<int>(Axis::TriggerLeft) + i]);
+		feedback.trigger_resistance[i] = Scale(feel.resistance, trigger_scale);
+		feedback.trigger_vibration[i]  = Scale(feel.vibration, trigger_scale);
+		feedback.trigger_frequency[i]  = feel.frequency;
+		feedback.trigger_shots[i]      = m_trigger_shots[i];
+	}
+	return feedback;
 }
 #endif
 
@@ -925,9 +975,14 @@ void GameController::UpdateTriggerEffectState() {
 	// Track every input event so a weapon remains fired even when the game polls after release
 	// starts.
 	for (int i = 0; i < 2; i++) {
+		const auto previous      = m_trigger_state.state[i];
 		m_trigger_state.state[i] = TriggerEffectState(
 		    m_trigger_effect.command[i], m_state.axes[static_cast<int>(Axis::TriggerLeft) + i],
-		    m_trigger_state.state[i]);
+		    previous);
+		if (m_trigger_state.state[i] == TRIGGER_STATE_WEAPON_FIRED &&
+		    previous != TRIGGER_STATE_WEAPON_FIRED) {
+			m_trigger_shots[i]++;
+		}
 	}
 }
 
@@ -1149,11 +1204,62 @@ int GetActiveControllerId() {
 }
 
 #if defined(KYTY_PLATFORM_UWP)
+// The haptics as short bumps, per actuator: a pulse when its signal suddenly gets louder than it has been (a knock, a step, an ice cube against
+// the controller's side), never for a signal that stays (rain, an engine, a long soft passage). A rumble motor cannot follow the voice coils'
+// signal; their attacks it can show.
+struct HapticSide {
+	float    average     = 0.0f; // the signal's level, followed slowly
+	float    pulse       = 0.0f; // the current pulse's strength (0..1): how sudden the rise was
+	uint64_t pulse_until = 0;
+	uint64_t quiet_until = 0; // no next pulse before
+};
+static Common::Mutex             g_haptic_mutex;
+static std::array<HapticSide, 2> g_haptics {};
+static uint64_t                  g_haptic_time = 0;
+// From RMS to about the signal's amplitude.
+constexpr float HAPTIC_LEVEL_GAIN = 2.0f;
+// A rise counts when the level is more than twice the average and above it by at least HAPTIC_ONSET_MIN.
+constexpr float    HAPTIC_AVERAGE_MS  = 200.0f;
+constexpr float    HAPTIC_ONSET_RATIO = 2.0f;
+constexpr float    HAPTIC_ONSET_MIN   = 0.08f;
+constexpr uint64_t HAPTIC_PULSE_MS    = 45;
+// From a pulse's start to the next one at the earliest, so that a rattle stays a row of bumps rather than a buzz.
+constexpr uint64_t HAPTIC_QUIET_MS = 90;
+
+void SetHapticLevels(float left, float right) {
+	Common::LockGuard          lock(g_haptic_mutex);
+	const auto                 now    = SDL_GetTicks();
+	const float                follow = 1.0f - std::exp(-static_cast<float>(now - g_haptic_time) / HAPTIC_AVERAGE_MS);
+	const std::array<float, 2> levels {std::clamp(left * HAPTIC_LEVEL_GAIN, 0.0f, 1.0f), std::clamp(right * HAPTIC_LEVEL_GAIN, 0.0f, 1.0f)};
+	g_haptic_time = now;
+	for (size_t i = 0; i < levels.size(); i++) {
+		auto&       side = g_haptics[i];
+		const float rise = levels[i] - side.average;
+		if (now >= side.quiet_until && levels[i] > side.average * HAPTIC_ONSET_RATIO && rise > HAPTIC_ONSET_MIN) {
+			side.pulse       = std::min(rise, 1.0f);
+			side.pulse_until = now + HAPTIC_PULSE_MS;
+			side.quiet_until = now + HAPTIC_QUIET_MS;
+		}
+		side.average += (levels[i] - side.average) * follow;
+	}
+}
+
 HostFeedback GetHostFeedback() {
 	if (g_players[0] == nullptr) {
 		return {};
 	}
-	return g_players[0]->GetHostFeedback();
+	auto                 feedback = g_players[0]->GetHostFeedback();
+	std::array<float, 2> level {};
+	{
+		Common::LockGuard lock(g_haptic_mutex);
+		const auto        now = SDL_GetTicks();
+		for (size_t i = 0; i < level.size(); i++) {
+			level[i] = now < g_haptics[i].pulse_until ? g_haptics[i].pulse : 0.0f;
+		}
+	}
+	feedback.haptic_left  = static_cast<uint8_t>(std::lround(level[0] * 255.0f));
+	feedback.haptic_right = static_cast<uint8_t>(std::lround(level[1] * 255.0f));
+	return feedback;
 }
 #endif
 
