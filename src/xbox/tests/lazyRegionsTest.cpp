@@ -90,6 +90,32 @@ void Verify(const Mock& host, const Model& model, const Regions& regions, const 
 			CHECK(model.committed[p] == 0, "%s: unmapped page %llu is committed", what, (unsigned long long)p);
 		}
 	}
+	// The window flags (kBase is aligned to 64 KiB, so a window is 16 pages): a flag that is set must hold, and a window that lies in one region and is
+	// committed must carry kFull (the fast paths depend on it for speed, not for correctness).
+	for (uint64_t first = 0; first < kPages; first += 16) {
+		const uint8_t flags         = regions.FlagsOf(Addr(first));
+		bool          all_committed = true, one_region = true, any_prot = false, any_noaccess = false;
+		for (uint64_t p = first; p < first + 16; ++p) {
+			all_committed = all_committed && model.committed[p] != 0;
+			one_region    = one_region && model.region[p] != 0 && model.region[p] == model.region[first];
+			if (model.committed[p]) {
+				any_prot     = any_prot || model.wanted[p] != Mode::ReadWrite;
+				any_noaccess = any_noaccess || model.wanted[p] == Mode::NoAccess;
+			}
+		}
+		if (flags & Xbox::Lazy::kFull) {
+			CHECK(all_committed, "%s: window at page %llu has kFull but is not committed as a whole", what, (unsigned long long)first);
+			CHECK(!any_noaccess || (flags & Xbox::Lazy::kNoAccess), "%s: window at page %llu holds a no-access page but kNoAccess is clear", what, (unsigned long long)first);
+			CHECK(!any_prot || (flags & Xbox::Lazy::kProt), "%s: window at page %llu holds a protected page but kProt is clear", what, (unsigned long long)first);
+		}
+		if (all_committed && one_region) {
+			CHECK(flags & Xbox::Lazy::kFull, "%s: window at page %llu is committed by one region but kFull is clear", what, (unsigned long long)first);
+		}
+		const bool readable = regions.AllReadable(Addr(first), 16 * kPage);
+		const bool writable = regions.AllWritable(Addr(first), 16 * kPage);
+		CHECK(!readable || (all_committed && !any_noaccess), "%s: window at page %llu: AllReadable but a page is not readable", what, (unsigned long long)first);
+		CHECK(!writable || (all_committed && !any_prot), "%s: window at page %llu: AllWritable but a page is not writable", what, (unsigned long long)first);
+	}
 }
 
 void RandomRun(uint64_t seed, int steps) {
