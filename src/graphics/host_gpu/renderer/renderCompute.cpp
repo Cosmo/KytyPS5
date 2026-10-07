@@ -227,6 +227,12 @@ static void BackAddressBases(RenderContext& context, const ShaderStageRuntime& s
 // scalar data.
 static void PrepareRayQuery(RenderContext& context, const ShaderStageRuntime& stage,
                             PreparedBindings& bindings) {
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// Ray queries are Vulkan only: D3D12's shader profile never asks for them.
+	(void)context;
+	(void)stage;
+	(void)bindings;
+#else
 	const auto& program = stage.module->info;
 	const auto  dword   = program.bindings.ray_query_dword;
 	if (dword == ShaderRecompiler::IR::PushData::NoStart) return;
@@ -235,6 +241,7 @@ static void PrepareRayQuery(RenderContext& context, const ShaderStageRuntime& st
 	const auto address = context.GetRayTracing()->Prepare(flat[low] | uint64_t {flat[high]} << 32u);
 	bindings.shader_data[dword]     = static_cast<uint32_t>(address);
 	bindings.shader_data[dword + 1] = static_cast<uint32_t>(address >> 32u);
+#endif
 }
 
 static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& input,
