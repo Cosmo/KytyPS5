@@ -189,7 +189,7 @@ void GpuTrace::WatchdogLoop(ID3D12Device* device, uint32_t hang_seconds) {
 			if (level > reported[traced]) {
 				reported[traced] = level;
 				const std::string name(traced->name.begin(), traced->name.end());
-				Log::WriteToConsoleAndLog(fmt::format("GPU watchdog: {} (overridden shaders): {} draws finished ({:.1f} s after the watchdog started)\n", name, count, since_start()));
+				Log::WriteToConsoleAndLog(fmt::format("GPU watchdog: {} (watched): {} draws finished ({:.1f} s after the watchdog started)\n", name, count, since_start()));
 			}
 		}
 	}
