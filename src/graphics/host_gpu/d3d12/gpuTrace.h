@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -37,6 +38,13 @@ public:
 	// The pipelines of the work started but not finished, oldest first.
 	[[nodiscard]] std::vector<const TracedPipeline*> Unfinished(size_t max_count) const;
 
+	// Debugging (gpu_hang_exit_seconds): a thread that ends the process, with the report of a GPU hang, as soon as the device is removed or the
+	// oldest work started but not finished stays the same for `hang_seconds`. It also logs how many draws of the watched pipelines finished.
+	void StartWatchdog(ID3D12Device* device, uint32_t hang_seconds);
+	void StopWatchdog();
+	// The pipelines whose finished draws the watchdog counts (those with overridden shaders); they must outlive the trace.
+	void Watch(const TracedPipeline* pipeline);
+
 private:
 	static constexpr uint32_t SLOTS    = 1u << 16u;
 	static constexpr uint32_t STARTED  = 1;
@@ -44,11 +52,19 @@ private:
 
 	void Write(ID3D12GraphicsCommandList* list, uint32_t slot, uint32_t value,
 	           D3D12_WRITEBUFFERIMMEDIATE_MODE mode);
+	// The oldest work started but not finished: its serial number (every traced draw and dispatch has one) and pipeline. False when there is none.
+	bool OldestUnfinished(uint32_t& serial, const TracedPipeline*& pipeline) const;
+	void WatchdogLoop(ID3D12Device* device, uint32_t hang_seconds);
 
 	ID3D12Resource*                                     m_buffer = nullptr;
 	const volatile uint32_t*                            m_values = nullptr;
 	std::atomic<uint32_t>                               m_next   = 0;
 	std::unique_ptr<std::atomic<const TracedPipeline*>[]> m_pipelines;
+
+	std::thread                        m_watchdog;
+	std::atomic_bool                   m_watchdog_stop {false};
+	mutable std::mutex                 m_watched_mutex;
+	std::vector<const TracedPipeline*> m_watched;
 
 	std::mutex m_lists_mutex;
 	std::unordered_map<ID3D12GraphicsCommandList*, ComPtr<ID3D12GraphicsCommandList2>> m_lists;
