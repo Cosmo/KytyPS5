@@ -32,6 +32,11 @@ std::vector<RectListParameter> RectListParameters(
 RectListShaders BuildRectListShaders(std::span<const RectListParameter> parameters,
                                      uint32_t                           param_export_mask);
 
+// A geometry shader expanding each rect-list triangle into the same quad the tessellation
+// shaders produce, for hosts that draw rect lists with geometry shaders.
+std::vector<uint32_t> BuildRectListGeometryShader(std::span<const RectListParameter> parameters,
+                                                  uint32_t                           param_export_mask);
+
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_SHADER_RECTLISTSHADER_H_
