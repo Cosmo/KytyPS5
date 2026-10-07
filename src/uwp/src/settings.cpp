@@ -65,7 +65,11 @@ AppSettings LoadSettings() {
 	read("overlay_log_lines", settings.overlay_log_lines);
 	read("xbox_gpu_limits", settings.xbox_gpu_limits);
 	read("mesh_compute", settings.mesh_compute);
+	read("guest_ram_budget_mb", settings.guest_ram_budget_mb);
+	read("guest_ram_pager_mode", settings.guest_ram_pager_mode);
+	read("guest_commit_limit_mb", settings.guest_commit_limit_mb);
 	read("shader_cache_any_build", settings.shader_cache_any_build);
+	read("app_memory_limit_mb", settings.app_memory_limit_mb);
 	read("impulse_triggers", settings.impulse_triggers);
 	read("haptic_rumble", settings.haptic_rumble);
 	read("headset_speaker", settings.headset_speaker);
