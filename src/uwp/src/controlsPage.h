@@ -7,8 +7,8 @@
 
 namespace Kyty::Uwp {
 
-// How the Xbox controller plays a PS5 game (the mapping in input.cpp): the buttons and sticks, the DualSense's extras with View held, and the
-// app's own chords. B (Escape, the back button) goes to `back`.
+// How the Xbox controller plays a PS5 game (the mapping in input.cpp): the buttons and sticks, the DualSense's extras with View held, what comes
+// back to the controller, and the app's own chords. B (Escape, the back button) goes to `back`.
 [[nodiscard]] winrt::Windows::UI::Xaml::UIElement CreateControlsPage(std::function<void()> back);
 
 } // namespace Kyty::Uwp
