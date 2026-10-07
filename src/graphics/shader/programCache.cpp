@@ -337,22 +337,14 @@ struct ShaderProgramCache::Impl {
 		} else if (source_changed) {
 			entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 			if (const auto* permutation = entry->second.FindPermutation<true>(runtime, push_data_cursor)) {
-				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
-				permutation->program.bindings.AdvancePushData(push_data_cursor);
-				return permutation->handle;
+				return bind(*permutation);
 			}
 		}
 		entry->second.permutations.push_back(CompilePermutation(
 		    stage_name, options, std::move(translated), entry->second.specialization, push_data_cursor,
 		    entry->second.FunctionCode()));
-		const auto& permutation = entry->second.permutations.back();
-		input_info.stage = {.program = &permutation.program, .resources = &entry->second.resources};
-		permutation.program.bindings.AdvancePushData(push_data_cursor);
 
-		std::array<size_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> counts {};
-		for (const auto& [key, source]: programs) {
-			counts[static_cast<size_t>(key.stage)] += source.permutations.size();
-		}
+		const auto counts = Counts();
 		// Guest geometry shaders are compiled through the host mesh stage.
 		std::printf("Shaders: VS %zu | PS %zu | CS %zu | GS %zu | LS %zu | HS %zu | TES %zu\n",
 		            counts[static_cast<size_t>(ShaderType::Vertex)],
@@ -362,7 +354,15 @@ struct ShaderProgramCache::Impl {
 		            counts[static_cast<size_t>(ShaderType::Local)],
 		            counts[static_cast<size_t>(ShaderType::TessellationControl)],
 		            counts[static_cast<size_t>(ShaderType::TessellationEvaluation)]);
-		return permutation.handle;
+		return bind(entry->second.permutations.back());
+	}
+
+	[[nodiscard]] ProgramCounts Counts() const {
+		ProgramCounts counts {};
+		for (const auto& [key, source]: programs) {
+			counts[static_cast<size_t>(key.stage)] += source.permutations.size();
+		}
+		return counts;
 	}
 
 	Impl(const HostShaderLimits& limits, ShaderRecompiler::IR::ImageHeapSource* image_heap)
@@ -386,11 +386,21 @@ ShaderProgramCache::ShaderProgramCache(const HostShaderLimits&                li
 
 ShaderProgramCache::~ShaderProgramCache() = default;
 
+ShaderProgramCache::ProgramCounts ShaderProgramCache::GetProgramCounts() const {
+	return m_impl->Counts();
+}
+
 ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
-    const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
-    const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
-    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
-    std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info) {
+    const HW::Shader& shaders, const HW::Context& context, const HW::UserConfig& user_config,
+    std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
+    bool& pixel_active, uint32_t& mrt_mask) {
+	const auto& sh                  = context.GetShaderRegisters();
+	const auto& vertex_regs         = shaders.GetVs();
+	const auto& pixel_regs          = shaders.GetPs();
+	const bool  object_primitive_id = context.HasObjectPrimitiveIdOutput();
+	const auto  color_output_mask   = DrawColorOutputMask(context);
+	// Without color outputs, a pixel shader still runs for its depth or coverage side effects.
+	pixel_active = DrawHasActivePixelShader(context, shaders);
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
