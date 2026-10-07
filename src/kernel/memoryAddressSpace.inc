@@ -861,6 +861,16 @@ public:
 		if (!m_lazy_enabled) {
 			return false;
 		}
+		// Fastest path, no system call and no lock: the window flags (xbox/lazyRegions.h). A window committed as a whole has no commit fault. If some
+		// page of it is protected, the fault is a page watcher's (or the guest's own protection): the next handler decides. Otherwise the fault raced
+		// with the commit and the access can be retried. (VirtualQuery below takes time in proportion to the run of equal pages around the address:
+		// hundreds of microseconds in guest memory, for each of thousands of page watcher faults per second.)
+		{
+			const auto flags = m_lazy.FlagsOf(address);
+			if ((flags & Xbox::Lazy::kFull) != 0) {
+				return (flags & Xbox::Lazy::kProt) == 0;
+			}
+		}
 		// Fast path without any lock: a fault on a page that is committed cannot be a commit fault. It is a page watcher or a bad access, and
 		// those are frequent; they must not queue up behind the lock below. (Unless another thread committed this window an instant ago.)
 		{
@@ -1031,6 +1041,13 @@ public:
 			uint64_t address, bytes;
 			int      kind; // 0 gap, 1 not committed, 2 committed
 		};
+		// Fast path: every window of the range is committed as a whole and has no no-access page (the window flags, no lock, no system call): a plain
+		// copy cannot fault, and the copy lock keeps unmapping away. Most host reads of guest memory (shader resource descriptors, buffer contents)
+		// are small and end here.
+		if (m_lazy.AllReadable(vaddr, size)) {
+			std::memcpy(data, reinterpret_cast<const void*>(vaddr), size);
+			return true;
+		}
 		std::vector<Segment> segments;
 		{
 			std::shared_lock lock(m_lazy_mutex);
@@ -1057,6 +1074,8 @@ public:
 		for (const auto& segment: segments) {
 			if (segment.kind != 2) {
 				std::memset(destination + (segment.address - vaddr), 0, segment.bytes);
+			} else if (m_lazy.AllReadable(segment.address, segment.bytes)) {
+				std::memcpy(destination + (segment.address - vaddr), reinterpret_cast<const void*>(segment.address), segment.bytes);
 			} else {
 				HostCopyFromGuest(segment.address, destination + (segment.address - vaddr), segment.bytes);
 			}
@@ -1099,7 +1118,12 @@ public:
 		}
 		for (const auto& [address, bytes]: pieces) {
 			const auto* source = static_cast<const uint8_t*>(data) + (address - vaddr);
-			HostCopyToGuest(address, source, bytes);
+			if (m_lazy.AllWritable(address, bytes)) {
+				// every window is committed as a whole and read-write: a plain copy cannot fault (see LazyCopyOut)
+				std::memcpy(reinterpret_cast<void*>(address), source, bytes);
+			} else {
+				HostCopyToGuest(address, source, bytes);
+			}
 		}
 		return true;
 #else
