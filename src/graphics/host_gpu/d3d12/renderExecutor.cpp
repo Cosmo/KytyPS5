@@ -81,10 +81,39 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 		views = heap.AllocateViews(buffer, view_count);
 	}
 	if (sampler_count != 0) {
-		samplers = heap.AllocateSamplers(buffer, sampler_count);
+		// The samplers of all stages in binding order. An array that is also used for depth comparison is declared twice (the second at the comparison
+		// space): the first range holds each sampler without comparison, the second with it, as D3D12 requires of the shader's declaration.
+		std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> handles;
+		handles.reserve(sampler_count);
+		for (auto* prepared: stages) {
+			EXIT_IF(prepared == nullptr || prepared->runtime == nullptr || !*prepared->runtime);
+			const auto& program = *prepared->runtime->program;
+			constexpr auto kind = IR::DescriptorBindingKind::Samplers;
+			if ((program.bindings.descriptor_mask & (uint64_t {1} << static_cast<uint32_t>(kind))) != 0) {
+				const bool     both   = HasComparisonSamplers(program, kind);
+				const uint32_t ranges = both ? 2 : 1;
+				for (uint32_t range = 0; range < ranges; range++) {
+					for (uint32_t resource = 0; resource < program.info.samplers.size(); resource++) {
+						auto handle = prepared->samplers.at(resource);
+						if (both) {
+							const auto& sampler = program.info.samplers.at(resource);
+							auto        guest   = DecodeNativeDescriptor<ShaderSamplerResource>(prepared->runtime->resources->samplers[sampler.snapshot_index]);
+							if (sampler.force_point_filtering) {
+								guest.SetPointFiltering();
+							}
+							handle = m_context.GetSamplerCache().GetSampler(guest, sampler.integer_border,
+							                                                range == 0 ? SamplerCache::Use::Plain : SamplerCache::Use::Comparison);
+						}
+						handles.push_back(handle);
+					}
+				}
+			}
+		}
+		EXIT_IF(handles.size() != sampler_count);
+		// The heap holds 2048 descriptors at most: draws that bind the same samplers share one table per command list.
+		samplers = heap.WriteSamplers(buffer, handles);
 	}
 	uint32_t     view_index    = 0;
-	uint32_t     sampler_index = 0;
 	IR::PushData push {};
 	bool         has_push = false;
 
@@ -118,26 +147,7 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 			const auto kind  = static_cast<IR::DescriptorBindingKind>(index);
 			const auto count = program.bindings.descriptor_counts[index];
 			if (kind == IR::DescriptorBindingKind::Samplers) {
-				// An array that is also used for depth comparison is declared twice (the second at the comparison space): the first range holds each sampler
-				// without comparison, the second with it, as D3D12 requires of the shader's declaration.
-				const bool     both   = HasComparisonSamplers(program, kind);
-				const uint32_t ranges = both ? 2 : 1;
-				for (uint32_t range = 0; range < ranges; range++) {
-					for (uint32_t resource = 0; resource < program.info.samplers.size(); resource++) {
-						auto handle = prepared->samplers.at(resource);
-						if (both) {
-							const auto& sampler = program.info.samplers.at(resource);
-							auto        guest   = DecodeNativeDescriptor<ShaderSamplerResource>(prepared->runtime->resources->samplers[sampler.snapshot_index]);
-							if (sampler.force_point_filtering) {
-								guest.SetPointFiltering();
-							}
-							handle = m_context.GetSamplerCache().GetSampler(guest, sampler.integer_border,
-							                                                range == 0 ? SamplerCache::Use::Plain : SamplerCache::Use::Comparison);
-						}
-						device->CopyDescriptorsSimple(1, samplers.Cpu(sampler_index++), handle, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-					}
-				}
-				continue;
+				continue; // collected above
 			}
 			if (IR::ImageBindingResourceClass(kind) != IR::ImageResourceClass::None) {
 				image_starts[IR::ImageBindingIndex(kind)] = view_index;
@@ -209,8 +219,7 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 		}
 		has_push = has_push || UsesPushConstants(program);
 	}
-	EXIT_IF(view_index != view_count || sampler_index != sampler_count ||
-	        has_push != layout.push_constants);
+	EXIT_IF(view_index != view_count || has_push != layout.push_constants);
 
 	UINT parameter = 0;
 	if (graphics) {
