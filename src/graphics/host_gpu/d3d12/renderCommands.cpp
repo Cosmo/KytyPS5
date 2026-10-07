@@ -5,6 +5,7 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/frameResolution.h"
 #include "graphics/host_gpu/d3d12/gpuTrace.h"
 #include "graphics/host_gpu/d3d12/renderContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
@@ -505,6 +506,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	runtime.base_instance   = emit.first_instance;
 	runtime.is_indexed_draw = draw.IsIndexed() ? 1u : 0u;
 	SetViewports(buffer, list, vs_input_info, targets.width, targets.height, runtime);
+	// The scene's size for the overlay: draws with color targets and a depth target, within the targets.
+	if (targets.color_count > 0 && targets.has_depth) {
+		FrameResolution::NoteRender(static_cast<uint32_t>(std::clamp(runtime.viewport_width, 0.0f, static_cast<float>(targets.width))),
+		                            static_cast<uint32_t>(std::clamp(runtime.viewport_height, 0.0f, static_cast<float>(targets.height))));
+	}
 	CommitBindings(buffer, true, pipeline, stages,
 	               {reinterpret_cast<const uint8_t*>(&runtime), sizeof(runtime)});
 	if (mesh) {
