@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderArgs.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/renderer/upscaler/upscaler.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -24,9 +25,12 @@ class Shader;
 } // namespace HW
 
 struct GraphicContext;
+struct RenderDepthInfo;
+struct RenderColorInfo;
 struct DrawCallInfo;
 struct DrawEmitInfo;
 struct DrawIndexBufferSource;
+struct DrawRenderState;
 class RenderContext;
 class CommandScheduler;
 struct RenderExecutorTestAccess;
@@ -173,6 +177,15 @@ private:
 		Dlss::Creation                     creation;
 		std::unique_ptr<Upscaler::Feature> feature;
 	};
+
+	void RecordDispatch(CommandBuffer& buffer, const PipelineCache::Pipeline& pipeline,
+	                    PreparedBindings& bindings, const ShaderComputeInputInfo& input_info,
+	                    uint32_t groups_x, uint32_t groups_y, uint32_t groups_z,
+	                    bool ordered_groups);
+	// Group counts come from `args` (a VkDispatchIndirectCommand at `args_offset`).
+	void RecordDispatchIndirect(CommandBuffer& buffer, const PipelineCache::Pipeline& pipeline,
+	                            PreparedBindings& bindings, const ShaderComputeInputInfo& input_info,
+	                            const Buffer& args, uint64_t args_offset);
 
 	// GET_LOD_STATS counters since their last reset. With --lod-stats a bound T# with counting
 	// enabled counts as sampled at its BASE_LEVEL, clamped when its MIN_LOD lies above that level.
