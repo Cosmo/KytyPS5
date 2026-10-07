@@ -549,6 +549,10 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	                                        DrawRenderState& state) {
 	state.ps_active = DrawHasActivePixelShader(buffer.GetRegisters(), buffer.GetShaders());
 	RefreshShaders(buffer, draw, state);
+	if (!state.programs.vertex[0]) {
+		// The host cannot run the draw's vertex stage (reported where it was refused).
+		return false;
+	}
 	uint32_t mrt_mask = 0;
 	if (state.ps_active) {
 		for (const auto& output: state.ps_input_info.stage.program->info.outputs) {

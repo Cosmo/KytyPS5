@@ -237,6 +237,10 @@ bool DxilCompiler::SupportsMeshShaders() const noexcept {
 	return m_shader_model >= SHADER_MODEL_6_5;
 }
 
+bool DxilCompiler::SupportsHeapIndexing() const noexcept {
+	return m_shader_model >= SHADER_MODEL_6_6;
+}
+
 std::vector<DxilShader> DxilCompiler::CompileLinked(std::span<const LinkedStage> stages,
                                                     uint64_t pipeline_hash,
                                                     bool*    from_cache) const {
