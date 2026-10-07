@@ -231,6 +231,22 @@ bool XboxGpuLimitsEnabled() {
 	return g_config != nullptr && g_config->xbox_gpu_limits_enabled;
 }
 
+uint32_t XboxLimitsDxilParts() {
+	return g_config != nullptr ? g_config->xbox_limits_dxil_parts : 3;
+}
+
+uint32_t DumpPipeline() {
+	return g_config != nullptr ? g_config->dump_pipeline : 0;
+}
+
+std::filesystem::path ShaderOverrideFolder() {
+	return g_config != nullptr ? g_config->shader_override_folder : std::filesystem::path();
+}
+
+uint32_t GpuHangExitSeconds() {
+	return g_config != nullptr ? g_config->gpu_hang_exit_seconds : 0;
+}
+
 bool MeshComputeForced() {
 	return g_config != nullptr && g_config->mesh_compute_forced;
 }
