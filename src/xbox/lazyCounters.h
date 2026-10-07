@@ -13,6 +13,7 @@ struct Counters {
 	std::atomic<uint64_t> committed {0};
 	std::atomic<uint64_t> peak {0};
 	std::atomic<uint64_t> commits {0}; // number of commit calls since the start
+	std::atomic<int64_t>  views {0};   // windows that are views of a section of their own (the pager's page ins), at the moment
 };
 
 inline Counters& GetCounters() {
