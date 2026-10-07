@@ -1,12 +1,15 @@
 // D3D12 command recording for draws prepared by the shared renderer code (renderer/renderDraw.cpp).
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/frameResolution.h"
+#include "graphics/host_gpu/d3d12/drawLog.h"
 #include "graphics/host_gpu/d3d12/gpuTrace.h"
+#include "graphics/host_gpu/frameDump.h"
 #include "graphics/host_gpu/d3d12/renderContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -259,6 +262,72 @@ void SetDynamicState(const CommandBuffer& buffer, ID3D12GraphicsCommandList* lis
 	}
 }
 
+// Debugging (frame_dump_snapshots): the draw log gets the statistics of the first color target after a draw that writes a large floating-point one.
+void LogSnapshot(RenderContext& context, const DrawRenderState& state) {
+	if (!Config::FrameDumpSnapshots() || !FrameDump::LogActive() || state.color_count == 0 || !state.color_info[0].image_id) {
+		return;
+	}
+	const auto& desc = state.color_info[0].desc;
+	if (desc.info.extent.width < 1920) {
+		return;
+	}
+	const auto stats = context.GetTextureCache().SnapshotStats(state.color_info[0].image_id);
+	if (!stats.empty()) {
+		FrameDump::LogEvent(fmt::format("    after that draw, the average of 0x{:x} (every 4th texel): {}", desc.info.data.address, stats));
+	}
+}
+
+// Debugging (the frame dump's draw log): what a draw is made of, as text. The pipeline's name starts with its number ("pipeline 57: ...").
+std::string DescribeDraw(const GraphicContext& graphics, const CommandBuffer& buffer, const DrawCallInfo& draw, const DrawRenderState& state, vk::PrimitiveTopology topology,
+                         bool primitive_restart_enable, bool mesh, bool emulated_mesh, const PipelineCache::Pipeline& pipeline, const PreparedBindings& vertex_bindings,
+                         const PreparedBindings* pixel_bindings) {
+	std::string pipeline_name(pipeline.trace.name.begin(), pipeline.trace.name.end());
+	pipeline_name.resize(pipeline_name.find(':') != std::string::npos ? pipeline_name.find(':') : pipeline_name.size());
+	const auto& vs_program = *state.vertex_info[0].stage.program;
+	std::string text = fmt::format("{} idx={} inst={} guest-prim={} topology={}{}{} pipeline=\"{}\" vs=0x{:016x}", draw.Name(), draw.index_count, draw.instance_count,
+	                               static_cast<uint32_t>(buffer.GetUserConfig().GetPrimType()), vk::to_string(topology), primitive_restart_enable ? " restart" : "",
+	                               mesh ? (emulated_mesh ? " mesh(emulated)" : " mesh(native)") : "", pipeline_name, vs_program.shader_hash);
+	if (state.ps_active) {
+		text += fmt::format(" ps=0x{:016x}", state.ps_input_info.stage.program->shader_hash);
+	} else {
+		text += " ps=none";
+	}
+	text += "\n";
+
+	const std::array<uint64_t, 3> vertex_ids {state.programs.vertex[0].id, state.programs.vertex[1].id, state.programs.vertex[2].id};
+	const auto key = MakeGraphicsPipelineKey(graphics, std::span {state.color_info, state.color_count}, state.depth_info, std::span {state.vertex_info.data(), 1}, buffer,
+	                                         state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable, vertex_ids,
+	                                         state.ps_active ? state.programs.pixel.id : 0);
+	const auto& params = key.static_params;
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		const auto& color = state.color_info[i];
+		const auto  slot  = color.target_slot;
+		text += fmt::format("    color target {}: {} | write mask 0x{:x} blend {}", slot, DrawLog::Target(color.desc, color.guest_mip_level, color.guest_array_layer), params.color_mask[slot],
+		                    params.blend_enable[slot] ? "on" : "off");
+		if (params.blend_enable[slot]) {
+			text += fmt::format(" (color src {} dst {} fn {}; alpha src {} dst {} fn {}{})", params.color_srcblend[slot], params.color_destblend[slot], params.color_comb_fcn[slot],
+			                    params.alpha_srcblend[slot], params.alpha_destblend[slot], params.alpha_comb_fcn[slot], params.separate_alpha_blend[slot] ? "" : ", alpha like color");
+		}
+		text += "\n";
+	}
+	if (state.depth_info.image_id) {
+		const auto& depth = state.depth_info;
+		text += fmt::format("    depth target: {} | test {} {} write {} stencil {}{}\n", DrawLog::Target(depth.desc, depth.desc.view_info.base_level, depth.desc.view_info.base_layer),
+		                    depth.depth_test_enable ? "on" : "off", vk::to_string(depth.depth_compare_op), depth.depth_write_enable ? "on" : "off", depth.stencil_test_enable ? "on" : "off",
+		                    depth.load_clear_aspects ? " | cleared by this draw" : "");
+	} else {
+		text += "    no depth target\n";
+	}
+	text += fmt::format("    cull front {} back {} | samples {}\n", params.cull_front ? "on" : "off", params.cull_back ? "on" : "off", params.samples);
+	text += DrawLog::Textures("vs", vertex_bindings);
+	text += DrawLog::WrittenBuffers("vs", vertex_bindings);
+	if (pixel_bindings != nullptr) {
+		text += DrawLog::Textures("ps", *pixel_bindings);
+		text += DrawLog::WrittenBuffers("ps", *pixel_bindings);
+	}
+	return text;
+}
+
 } // namespace
 
 RenderExecutor::RenderTargets RenderExecutor::AcquireRenderTargets(CommandBuffer&   buffer,
@@ -452,9 +521,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// Upstream's depth-to-color copy is in the Vulkan renderer only; here it stops as on a Vulkan device without it.
 	EXIT_NOT_IMPLEMENTED(buffer.GetRegisters().GetRenderControl().copy_depth_to_color);
 	const auto& vs_input_info = state.vertex_info[0];
+	// (The draw log notes a draw that is skipped, and why.)
+	const auto log_skip = [&draw](const char* reason) {
+		if (FrameDump::LogActive()) {
+			FrameDump::LogDraw(fmt::format("{} idx={} inst={} -> {}", draw.Name(), draw.index_count, draw.instance_count, reason), true);
+		}
+	};
 	if (state.programs.VertexStageCount() != 1) {
 		static std::atomic_bool warned = false;
 		WarnOnce(warned, "tessellation is not supported; its draws are skipped");
+		log_skip("tessellation is not supported");
 		return;
 	}
 	const bool mesh = vs_input_info.stage.program->stage == ShaderType::Mesh;
@@ -464,11 +540,13 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const auto& mode = buffer.GetRegisters().GetModeControl();
 	if (mode.cull_front && mode.cull_back && (mesh || IsTriangleTopology(topology))) {
 		// D3D12 cannot cull both faces, which draws nothing.
+		log_skip("both faces are culled (draws nothing)");
 		return;
 	}
 	const uint32_t mesh_groups =
 	    mesh ? MeshGroupCount(buffer, draw, vs_input_info, primitive_restart_enable) : 0;
 	if (mesh && mesh_groups == 0) {
+		log_skip("a mesh draw without groups");
 		return;
 	}
 	m_statistics.draws++;
@@ -487,6 +565,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		if (quads && (draw.index_count & 0x3u) != 0) {
 			static std::atomic_bool warned = false;
 			WarnOnce(warned, "a quad list draw with a partial quad is skipped");
+			log_skip("a quad list with a partial quad");
 			return;
 		}
 		const bool restart_16 = index_source.host_data != nullptr ||
@@ -505,6 +584,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		topology      = vk::PrimitiveTopology::eTriangleList;
 		primitive_restart_enable = false;
 		if (count == 0) {
+			log_skip("the fans have no triangles");
 			return;
 		}
 	}
@@ -571,6 +651,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	    std::span {state.vertex_info.data(), 1}, buffer,
 	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
 	    strip_cut, state.programs);
+	if (FrameDump::LogActive()) {
+		FrameDump::LogDraw(DescribeDraw(m_context.GetGraphics(), buffer, draw, state, topology, primitive_restart_enable, mesh, emulated_mesh, pipeline, bindings.vertex[0],
+		                                state.ps_active && bindings.pixel ? &*bindings.pixel : nullptr) +
+		                   (pipeline.pipeline == nullptr ? "    -> SKIPPED: the pipeline could not be made\n" : ""));
+	}
 	if (pipeline.pipeline == nullptr) {
 		// Could not be made (reported where it failed): this draw is skipped.
 		m_read_only_depth = {};
@@ -581,6 +666,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		mesh_compute = &m_context.GetPipelineCache().GetMeshComputePipeline(vs_input_info,
 		                                                                    state.programs.vertex[0]);
 		if (mesh_compute->pipeline == nullptr) {
+			log_skip("the compute pipeline of the mesh program could not be made");
 			m_read_only_depth = {};
 			return;
 		}
@@ -678,6 +764,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		m_read_only_depth = {};
 		LogDrawPhase(draw.Name(), "DrawComplete");
+		LogSnapshot(m_context, state);
 		return;
 	}
 	auto&      trace = D3D12::GetGpuTrace();
@@ -704,6 +791,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	m_read_only_depth = {};
 	LogDrawPhase(draw.Name(), "DrawComplete");
+	LogSnapshot(m_context, state);
 }
 
 } // namespace Libs::Graphics
