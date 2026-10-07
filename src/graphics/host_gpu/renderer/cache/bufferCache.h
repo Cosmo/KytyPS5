@@ -97,6 +97,8 @@ public:
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();
+	// Experiment: where the buffers' GPU memory is, as a log line.
+	void               LogMemoryBreakdown();
 
 private:
 	friend struct BufferCacheTestAccess;

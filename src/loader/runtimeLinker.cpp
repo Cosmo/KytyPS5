@@ -19,6 +19,7 @@
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
+#include "libs/crashTrail.h"
 #include "loader/elf.h"
 #include "loader/gamePatch.h"
 #include "loader/guestInstructionPatcher.h"
@@ -714,6 +715,8 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			}
 			std::printf("\n");
 		}
+		// What led here: the thread's last library calls, and the game's last text (its own assert message, for one).
+		Libs::CrashTrail::Dump();
 		std::fflush(stdout);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64

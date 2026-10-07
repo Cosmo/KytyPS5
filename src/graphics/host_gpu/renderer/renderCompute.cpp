@@ -11,6 +11,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/gpuBackend.h"
+#include "graphics/host_gpu/frameDump.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -24,6 +25,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <fmt/format.h>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -227,6 +229,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	                    sh_ctx.GetCs().cs_regs.data_addr);
 
 	if (thread_group_x == 0 || thread_group_y == 0 || thread_group_z == 0) {
+		if (FrameDump::LogActive()) {
+			FrameDump::LogEvent(fmt::format("dispatch groups {}x{}x{} -> not run: no groups", thread_group_x, thread_group_y, thread_group_z));
+		}
 		static std::atomic<uint32_t> log_count {0};
 		if (log_count.fetch_add(1, std::memory_order_relaxed) < 32) {
 			LOGF("GraphicsRenderDispatchDirect: skipping zero-sized dispatch groups=%ux%ux%u "
@@ -301,6 +306,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		UpdateComputeMetaClears(input_info, buffer);
 		if (TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
 		                               thread_group_z, mode)) {
+			if (FrameDump::LogActive()) {
+				FrameDump::LogEvent(fmt::format("dispatch cs=0x{:016x} groups {}x{}x{} -> not run: it is a clear of a surface (done as a clear)", program.shader_hash, thread_group_x, thread_group_y, thread_group_z));
+			}
 			ResetBindings();
 			return;
 		}
