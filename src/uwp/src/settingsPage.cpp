@@ -94,6 +94,16 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
                MinWidth="280" HorizontalAlignment="Left" />
       <ComboBox x:Name="Language" Header="Console language" MinWidth="280" />
 
+      <TextBlock Text="Controller" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,0" />
+      <ToggleSwitch x:Name="ImpulseTriggers" Header="Adaptive triggers as Impulse Triggers" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Where a game makes the DualSense's triggers resist or vibrate, the motors in the Xbox controller's triggers rumble softly: while you press against the resistance, while the trigger vibrates, and once when a trigger gives way. Pressed all the way, a trigger is still." />
+      <ToggleSwitch x:Name="HapticRumble" Header="Haptic feedback as gentle rumble" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Games play the DualSense's haptic feedback like sound for its two actuators. The Xbox controller's small rumble motor gives a short, soft bump where they strike (a knock, a step); haptics that go on stay still. The game's sound still plays as before." />
+
       <TextBlock Text="Game folders" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,0" />
       <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
@@ -105,6 +115,10 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
       <ToggleSwitch x:Name="DebugLayer" Header="Graphics debug layer (slower; reports graphics errors in the log)" />
       <ToggleSwitch x:Name="GameOutput"
                     Header="Detailed log: the game's output and the emulator's trace (slower; thousands of lines a second)" />
+      <ToggleSwitch x:Name="ShaderCacheAnyBuild" Header="Keep compiled shaders across app builds" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Games start without compiling their shaders again after an update of the app. Can lead to a crash or wrong pictures when the update changed how shaders are translated: then start the game once with this off, which compiles them afresh." />
 
       <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Margin="0,24,0,0"
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
@@ -247,6 +261,20 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		}
 	});
 
+	auto impulse_triggers = page.FindName(L"ImpulseTriggers").as<xaml::Controls::ToggleSwitch>();
+	impulse_triggers.IsOn(settings.impulse_triggers);
+	impulse_triggers.Toggled([state, impulse_triggers, save](auto const&, auto const&) {
+		state->settings.impulse_triggers = impulse_triggers.IsOn();
+		save();
+	});
+
+	auto haptic_rumble = page.FindName(L"HapticRumble").as<xaml::Controls::ToggleSwitch>();
+	haptic_rumble.IsOn(settings.haptic_rumble);
+	haptic_rumble.Toggled([state, haptic_rumble, save](auto const&, auto const&) {
+		state->settings.haptic_rumble = haptic_rumble.IsOn();
+		save();
+	});
+
 	auto user_name = page.FindName(L"UserName").as<xaml::Controls::TextBox>();
 	user_name.Text(winrt::to_hstring(settings.user_name));
 	user_name.TextChanged([state, user_name, save](auto const&, auto const&) {
@@ -282,6 +310,12 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	game_output.IsOn(settings.game_output);
 	game_output.Toggled([state, game_output, save](auto const&, auto const&) {
 		state->settings.game_output = game_output.IsOn();
+		save();
+	});
+	auto shader_cache_any_build = page.FindName(L"ShaderCacheAnyBuild").as<xaml::Controls::ToggleSwitch>();
+	shader_cache_any_build.IsOn(settings.shader_cache_any_build);
+	shader_cache_any_build.Toggled([state, shader_cache_any_build, save](auto const&, auto const&) {
+		state->settings.shader_cache_any_build = shader_cache_any_build.IsOn();
 		save();
 	});
 

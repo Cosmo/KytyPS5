@@ -8,7 +8,9 @@
 #include "fileAccess.h"
 #include "gameLibrary.h"
 #include "gameSource.h"
+#include "input.h"
 #include "graphics/host_gpu/d3d12/selfTest.h"
+#include "kernel/memory.h"
 #include "log.h"
 #include "settings.h"
 
@@ -41,10 +43,6 @@ bool IsAmdCpu() {
 }
 
 } // namespace
-
-std::optional<ShaderStatistics> CurrentShaderStatistics() {
-	return std::nullopt; // the renderer makes no shaders yet
-}
 
 EmulatorHost& EmulatorHost::Get() {
 	static EmulatorHost host;
@@ -84,6 +82,11 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 
 	// The settings page's choices (LocalState\kyty-uwp.json).
 	const auto settings = LoadSettings();
+	SetControllerOptions({settings.impulse_triggers, settings.haptic_rumble});
+
+	m_game_dir = game_dir;
+	Libs::LibKernel::Memory::SetAddressCollisionHandler(
+	    [](uint64_t start, uint64_t size) { EmulatorHost::Get().RestartForAddressCollision(start, size); });
 
 	m_thread = std::thread([this, game_dir = std::move(game_dir), game_patch, settings] {
 		// The emulator's main thread: the window logic runs here, not on the UI thread.
@@ -112,7 +115,11 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.font_folder = std::filesystem::path(std::wstring(winrt::Windows::ApplicationModel::Package::Current().InstalledLocation().Path())) / L"fonts";
 		// The guest uses instructions only AMD CPUs have: on another CPU the emulator patches them (its --amd-cpu option).
 		config.amd_cpu_enabled = !IsAmdCpu();
+		// Guest memory is committed on first touch, so a fault can come inside any guest function, and its exception frame must not land on the
+		// red zone below the guest's stack pointer (the emulator's --redzone option: the guest's code is patched to keep it clear).
+		config.red_zone_protection_enabled = true;
 		config.xbox_gpu_limits_enabled     = settings.xbox_gpu_limits;
+		config.pipeline_cache_any_build    = settings.shader_cache_any_build;
 		Emulator::Run(options);
 
 		Log("emulator stopped\n");
@@ -140,6 +147,23 @@ void EmulatorHost::RequestExit() {
 void EmulatorHost::QuitToLibrary() {
 	m_restart = true;
 	RequestExit();
+}
+
+void EmulatorHost::RestartForAddressCollision(uint64_t start, uint64_t size) {
+	constexpr uint32_t MaxAttempts = 8;
+	Log("the game asks for 0x%llx bytes at 0x%llx, but host memory sits in that range\n", static_cast<unsigned long long>(size),
+	    static_cast<unsigned long long>(start));
+	const uint32_t attempts = m_restart_attempts;
+	if (attempts >= MaxAttempts) {
+		Log("the app restarted %u times already: going on, the request fails\n", attempts);
+		return;
+	}
+	const auto arguments = winrt::hstring(L"kyty://run?game=") + winrt::Windows::Foundation::Uri::EscapeComponent(winrt::hstring(m_game_dir.wstring())) +
+	                       L"&retry=" + winrt::to_hstring(attempts + 1);
+	Log("restarting the app (restart %u): another start puts the host's memory elsewhere\n", attempts + 1);
+	// The process ends when the restart goes through; this only returns when it fails.
+	const auto reason = winrt::Windows::ApplicationModel::Core::CoreApplication::RequestRestartAsync(arguments).get();
+	Log("restart for an address collision failed: %d\n", static_cast<int>(reason));
 }
 
 void EmulatorHost::Finish() {
