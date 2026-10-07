@@ -7,6 +7,7 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "kernel/fileSystem.h"
+#include "kernel/memory.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "libs/saveDataMountSlots.h"
@@ -353,6 +354,7 @@ static int write_save_file(const std::filesystem::path& path, const void* data, 
 		return SAVE_DATA_ERROR_INTERNAL;
 	}
 	uint32_t written = 0;
+	::Libs::LibKernel::Memory::GuestBufferScope buffer_scope(reinterpret_cast<uint64_t>(data), size); // the system reads the buffer (the pager)
 	file.Write(data, size, &written);
 	const bool flushed = file.Flush();
 	file.Close();

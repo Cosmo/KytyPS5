@@ -41,8 +41,17 @@ struct AppSettings {
 	bool xbox_gpu_limits = false;
 	// Debugging, only in the file: merged geometry programs run as compute shaders even where the device has mesh shaders (Config::MeshComputeForced).
 	bool mesh_compute = false;
+	// Only in the file: guest memory above this many MB is kept in a file, the coldest first (Config::GuestRamBudgetMb). 0: off. Not set (0xFFFFFFFF):
+	// on where the app's memory limit is small (the Series X), with the limit as the cap; off on a PC.
+	uint32_t guest_ram_budget_mb = 0xFFFFFFFFu;
+	// Debugging the pager, only in the file: 0 normal, 1 sweep only (nothing leaves memory), 2 take a window out and page it straight back in (Config::GuestRamPagerMode).
+	uint32_t guest_ram_pager_mode = 0;
+	// Debugging the pager, only in the file: a commit of guest memory fails above this many MB of guest memory (Config::GuestCommitLimitMb). 0: none.
+	uint32_t guest_commit_limit_mb = 0;
 	// The settings page, Developer: the games' compiled shaders are kept across builds of the app (Config::PipelineCacheAnyBuild). Off.
 	bool shader_cache_any_build = false;
+	// Debugging the pager, only in the file: the limit of the app's memory in MB for the pager instead of the OS's (a PC has none to speak of). 0: the OS's.
+	uint32_t app_memory_limit_mb = 0;
 };
 [[nodiscard]] AppSettings LoadSettings();
 void                      SaveSettings(const AppSettings& settings);
