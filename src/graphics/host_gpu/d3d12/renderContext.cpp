@@ -165,9 +165,12 @@ void RenderContext::RunGarbageCollector() {
 	m_texture_cache.ProcessDownloadImages();
 	m_texture_cache.RunGarbageCollector();
 	m_buffer_cache.RunGarbageCollector();
-	// Experiment: where the GPU memory is, every 10 seconds.
+	// Debugging (gpu_memory_log): where the GPU memory is, every 10 seconds.
 	static uint64_t last_breakdown_ms = 0;
-	const auto      now_ms            = GetTickCount64();
+	if (!Config::GpuMemoryLog()) {
+		return;
+	}
+	const auto now_ms = GetTickCount64();
 	if (now_ms - last_breakdown_ms >= 10000) {
 		last_breakdown_ms = now_ms;
 		m_texture_cache.LogMemoryBreakdown();
