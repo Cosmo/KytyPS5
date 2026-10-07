@@ -9,14 +9,99 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Xbox::Lazy {
 
 enum class Mode : uint8_t { NoAccess = 0, Read = 1, ReadWrite = 2 };
+
+// What the fault handler and the host copies may know about a 64 KiB window without asking the system. VirtualQuery takes time in proportion to the
+// length of the run of equal pages around the address (hundreds of microseconds in guest memory), and the fault handler used to call it for every
+// page watcher fault. Only windows that are committed as a whole carry flags.
+//   kFull:     the whole window is committed (by one region).
+//   kProt:     some page of it may be read-only or no-access (cleared only by a protection call that covers the window with read-write).
+//   kNoAccess: some page of it may be no-access (cleared by a call that covers the window with read or read-write).
+// A flag that is set although it no longer holds is harmless (the slow path runs); a flag that is clear although it holds would not be.
+enum WindowFlag : uint8_t { kFull = 1, kProt = 2, kNoAccess = 4 };
+
+// The flags of every window of a 48 bit address space: readable from any thread without a lock, written by one thread at a time (the caller's lock).
+class WindowFlags {
+public:
+	WindowFlags(): m_top(std::make_unique<std::atomic<Leaf*>[]>(kTop)) {
+		for (size_t i = 0; i < kTop; ++i) {
+			m_top[i].store(nullptr, std::memory_order_relaxed);
+		}
+	}
+	~WindowFlags() {
+		for (size_t i = 0; i < kTop; ++i) {
+			delete m_top[i].load(std::memory_order_relaxed);
+		}
+	}
+	WindowFlags(const WindowFlags&)            = delete;
+	WindowFlags& operator=(const WindowFlags&) = delete;
+
+	[[nodiscard]] uint8_t Get(uint64_t window) const noexcept {
+		const auto* slot = SlotIfAny(window);
+		return slot == nullptr ? 0 : slot->load(std::memory_order_acquire);
+	}
+	void Store(uint64_t window, uint8_t value) {
+		if (auto* slot = value != 0 ? &Create(window) : SlotIfAny(window)) {
+			slot->store(value, std::memory_order_release);
+		}
+	}
+	void Or(uint64_t window, uint8_t bits) {
+		if (auto* slot = &Create(window); slot != nullptr) {
+			slot->fetch_or(bits, std::memory_order_acq_rel);
+		}
+	}
+	void And(uint64_t window, uint8_t mask) {
+		if (auto* slot = SlotIfAny(window)) {
+			slot->fetch_and(mask, std::memory_order_acq_rel);
+		}
+	}
+
+private:
+	static constexpr uint64_t kLeafBits = 16;
+	static constexpr uint64_t kLeaf     = uint64_t {1} << kLeafBits;
+	static constexpr size_t   kTop      = size_t {1} << 16;
+	struct Leaf {
+		std::array<std::atomic<uint8_t>, kLeaf> flags;
+		Leaf() {
+			for (auto& f: flags) {
+				f.store(0, std::memory_order_relaxed);
+			}
+		}
+	};
+
+	[[nodiscard]] std::atomic<uint8_t>* SlotIfAny(uint64_t window) const noexcept {
+		if ((window >> kLeafBits) >= kTop) {
+			return nullptr;
+		}
+		Leaf* leaf = m_top[window >> kLeafBits].load(std::memory_order_acquire);
+		return leaf == nullptr ? nullptr : &leaf->flags[window & (kLeaf - 1)];
+	}
+	// A slot for windows beyond the address space too (a shared dummy that nobody reads back), so callers need no special case.
+	std::atomic<uint8_t>& Create(uint64_t window) {
+		static std::atomic<uint8_t> dummy {0};
+		if ((window >> kLeafBits) >= kTop) {
+			return dummy;
+		}
+		Leaf* leaf = m_top[window >> kLeafBits].load(std::memory_order_acquire);
+		if (leaf == nullptr) {
+			leaf = new Leaf();
+			m_top[window >> kLeafBits].store(leaf, std::memory_order_release);
+		}
+		return leaf->flags[window & (kLeaf - 1)];
+	}
+
+	std::unique_ptr<std::atomic<Leaf*>[]> m_top;
+};
 
 class HostOps {
 public:
@@ -74,6 +159,10 @@ public:
 			Region old = std::move(it->second);
 			m_regions.erase(it);
 			const uint64_t a = std::max(old.start, cursor), b = std::min(old.end, end);
+			// the windows lose their flags before anything is decommitted (a window the range cuts through is no longer committed as a whole)
+			for (uint64_t w = a >> kWindowBits; w <= (b - 1) >> kWindowBits; ++w) {
+				m_flags.Store(w, 0);
+			}
 			// decommit the committed windows inside [a, b), one host call per run of neighbouring committed windows
 			uint64_t run_start = 0, run_end = 0;
 			for (uint64_t w = a >> kWindowBits; w <= (b - 1) >> kWindowBits; ++w) {
@@ -114,6 +203,7 @@ public:
 		}
 		const uint64_t end = address + size;
 		uint64_t cursor    = address;
+		std::vector<std::pair<uint64_t, uint8_t>> clears; // window, mask of the flags to keep: applied after the host calls
 		while (cursor < end) {
 			Region& r = *FindMut(cursor);
 			const uint64_t a = cursor, b = std::min(end, r.end);
@@ -128,6 +218,7 @@ public:
 			for (uint64_t w = a >> kWindowBits; w <= (b - 1) >> kWindowBits; ++w) {
 				const uint64_t lo = std::max(a, w << kWindowBits), hi = std::min(b, (w + 1) << kWindowBits);
 				if (r.committed[w - (r.start >> kWindowBits)] != 0) {
+					NoteProtect(w, lo, hi, mode, clears);
 					if (run_end == lo && run_end != run_start) {
 						run_end = hi;
 					} else {
@@ -162,6 +253,9 @@ public:
 			}
 			cursor = b;
 		}
+		for (const auto& [w, mask]: clears) {
+			m_flags.And(w, mask);
+		}
 		return true;
 	}
 
@@ -181,6 +275,24 @@ public:
 			return CommitResult::Failed;
 		}
 		flag = 1;
+		{
+			// the flags of the window are set before the remembered protections are applied: a fault they cause must find them
+			uint8_t bits = 0;
+			if (lo == (w << kWindowBits) && hi == ((w + 1) << kWindowBits)) {
+				bits = kFull;
+				if (const auto found = r->modes.find(w); found != r->modes.end()) {
+					for (const auto m: found->second) {
+						if (m != static_cast<uint8_t>(Mode::ReadWrite)) {
+							bits |= kProt;
+						}
+						if (m == static_cast<uint8_t>(Mode::NoAccess)) {
+							bits |= kNoAccess;
+						}
+					}
+				}
+			}
+			m_flags.Store(w, bits);
+		}
 		auto it = r->modes.find(w);
 		if (it != r->modes.end()) {
 			// apply the remembered protections page by page, merging runs
@@ -244,6 +356,33 @@ public:
 		return true;
 	}
 
+	// Lock-free answers from the window flags (see WindowFlag); false means: ask the slow way.
+	[[nodiscard]] uint8_t FlagsOf(uint64_t address) const { return m_flags.Get(address >> kWindowBits); }
+	// Every window of the range is committed as a whole and has no no-access page: a host read cannot fault.
+	[[nodiscard]] bool AllReadable(uint64_t address, uint64_t size) const {
+		if (size == 0) {
+			return false;
+		}
+		for (uint64_t w = address >> kWindowBits; w <= (address + size - 1) >> kWindowBits; ++w) {
+			if ((m_flags.Get(w) & (kFull | kNoAccess)) != kFull) {
+				return false;
+			}
+		}
+		return true;
+	}
+	// Every window of the range is committed as a whole and read-write: a host write cannot fault.
+	[[nodiscard]] bool AllWritable(uint64_t address, uint64_t size) const {
+		if (size == 0) {
+			return false;
+		}
+		for (uint64_t w = address >> kWindowBits; w <= (address + size - 1) >> kWindowBits; ++w) {
+			if ((m_flags.Get(w) & (kFull | kProt)) != kFull) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	[[nodiscard]] bool IsCommitted(uint64_t address) const {
 		const Region* r = Find(address);
 		return r != nullptr && r->committed[(address >> kWindowBits) - (r->start >> kWindowBits)] != 0;
@@ -272,6 +411,22 @@ public:
 	[[nodiscard]] size_t RegionCount() const { return m_regions.size(); }
 
 private:
+
+	// What a protection call does to the flags of a committed window: bits are set before the host call, cleared after the last one.
+	void NoteProtect(uint64_t w, uint64_t lo, uint64_t hi, Mode mode, std::vector<std::pair<uint64_t, uint8_t>>& clears) {
+		if ((m_flags.Get(w) & kFull) == 0) {
+			return;
+		}
+		const bool covers = lo == (w << kWindowBits) && hi == ((w + 1) << kWindowBits);
+		if (mode != Mode::ReadWrite) {
+			m_flags.Or(w, static_cast<uint8_t>(kProt | (mode == Mode::NoAccess ? kNoAccess : 0)));
+			if (mode == Mode::Read && covers) {
+				clears.push_back({w, static_cast<uint8_t>(~kNoAccess)});
+			}
+		} else if (covers) {
+			clears.push_back({w, static_cast<uint8_t>(~(kProt | kNoAccess))});
+		}
+	}
 
 	struct Region {
 		uint64_t                                                 start = 0, end = 0;
@@ -332,6 +487,7 @@ private:
 	}
 
 	std::map<uint64_t, Region> m_regions;
+	WindowFlags                m_flags;
 };
 
 } // namespace Xbox::Lazy
