@@ -6,8 +6,7 @@
 
 // The controller state the app's input code (input.cpp) hands to whoever consumes it: up to four local players, each with a PS5 pad state
 // already mapped from the Xbox controller, and what the game asks of the controller in return (rumble, adaptive trigger resistance).
-// This build has no emulator, so padHost.cpp only keeps the state; when the emulator is part of the build, these functions forward to its
-// controller library and the types here are the ones it declares.
+// padHost.cpp forwards player 1's state to the emulator's controller library (as host input) and reads the game's rumble requests from it.
 namespace Kyty::Uwp::Pad {
 
 constexpr int MAX_PLAYERS = 4;
