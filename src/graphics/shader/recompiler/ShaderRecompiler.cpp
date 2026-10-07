@@ -1,4 +1,6 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 
 #include "common/assert.h"
