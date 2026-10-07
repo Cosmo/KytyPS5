@@ -102,6 +102,10 @@ struct ConfigOptions {
 	// model 6.4, 16-bit ops as 32-bit, no barycentrics, no mesh shaders), to reproduce Xbox
 	// problems on a PC.
 	bool xbox_gpu_limits_enabled = false;
+	// Development: the pipeline cache of a game (its translated shaders) is kept across builds, also dirty ones; only the shader compiler's own
+	// signature still ties it. A build that translates shaders differently then uses the old translations, which can draw wrongly or crash, so it
+	// is off unless a setting turns it on.
+	bool pipeline_cache_any_build = false;
 #endif
 	Keymap keymap;
 	// Ordinary boots need a non-null argv[0]; --guest-exec supplies the caller's arguments.
@@ -170,6 +174,7 @@ std::filesystem::path FontFolder();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
 bool XboxGpuLimitsEnabled();
+bool PipelineCacheAnyBuild();
 #endif
 
 const Keymap& GetKeymap();
