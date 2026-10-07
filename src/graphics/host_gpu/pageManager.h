@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_PAGEMANAGER_H_
 
 #include "common/common.h"
+#include "common/virtualMemory.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 
 #include <memory>
@@ -24,6 +25,8 @@ public:
 	void UpdatePageWatchers(uint64_t vaddr, uint64_t size);
 	template <bool track, bool is_read = false>
 	void UpdatePageWatchersForRegion(uint64_t base_addr, RegionBits& mask);
+	// Xbox fork (T3): after a host copy opened protected pages for a moment, set every page to what it should be now.
+	void RestoreHostProtection(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode old_mode) noexcept;
 
 private:
 	struct Impl;
