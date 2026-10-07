@@ -61,6 +61,7 @@ struct ImageBacking {
 	vk::Extent3D         extent     = {1, 1, 1};
 	uint32_t             layers     = 1;
 	uint32_t             mip_levels = 1;
+	uint32_t             mip_skip   = 0; // low quality: the guest's finest levels the host image leaves out (levels and extent here are the host's)
 	uint32_t             samples    = 1;
 	vk::ImageCreateFlags flags      = {};
 	uint32_t             planes     = 1; // 2 for depth/stencil formats
