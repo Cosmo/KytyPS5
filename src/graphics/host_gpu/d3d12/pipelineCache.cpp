@@ -507,6 +507,8 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	// it, guest memory is read through a table of buffers. (Set before any shader is translated.)
 	auto features                = ShaderRecompiler::GetHostShaderFeatures();
 	features.guest_pointer_table = !m_compiler.SupportsHeapIndexing();
+	features.lane_shuffle_loop   = !m_compiler.SupportsDivergentLaneIndex(); // (below shader model 6.7 a lane shuffle needs the same lane number in every lane)
+	features.wave_ops_without_helper_lanes = !m_compiler.SupportsHelperLanesInWaveOps();
 	ShaderRecompiler::SetHostShaderFeatures(features);
 #if defined(KYTY_PLATFORM_UWP)
 	// Constant-alpha blend factors fail at pipeline creation on the Xbox (E_INVALIDARG, guard G4): the constant color factors stand in.
@@ -996,6 +998,22 @@ static bool OverrideShader(const D3D12::DxilCompiler& compiler, const std::files
 	return true;
 }
 
+// Does the SPIR-V use OpGroupNonUniformBallot or OpGroupNonUniformBallotFindLSB (the waterfall loops of the pixel shaders that hung the GPU)?
+static bool UsesBallot(std::span<const uint32_t> spirv) {
+	for (size_t i = 5; i < spirv.size();) {
+		const uint32_t opcode = spirv[i] & 0xffffu;
+		const uint32_t count  = spirv[i] >> 16u;
+		if (opcode == 339u || opcode == 343u) {
+			return true;
+		}
+		if (count == 0) {
+			break;
+		}
+		i += count;
+	}
+	return false;
+}
+
 const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms& programs,
                                                          bool rect_list, bool sample_rate_shading,
                                                          bool                         clip_halfz,
@@ -1046,6 +1064,7 @@ const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms&
 		const bool     replaced_vertex = OverrideShader(m_compiler, folder, size, "vs", linked.vertex, hash);
 		linked.overridden = replaced_pixel || replaced_vertex;
 	}
+	linked.watched = linked.overridden || (ps && Config::GpuHangExitSeconds() != 0 && UsesBallot(*pixel.spirv));
 	return linked;
 }
 
@@ -1072,9 +1091,11 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 	                               : fmt::format("{} {:x}", mesh ? "ms" : "vs", programs.vertex[0].id));
 	pipeline->trace.dxil  = {&linked.vertex};
 	pipeline->trace.spirv = {emulated ? programs.vertex[0].mesh_fetch : programs.vertex[0].spirv};
-	if (linked.overridden) {
-		D3D12::GetGpuTrace().Watch(&pipeline->trace); // the watchdog (gpu_hang_exit_seconds) logs how many of its draws finished
-		Log::WriteToConsoleAndLog(fmt::format("shader override: {} has overridden shaders\n", std::string(pipeline->trace.name.begin(), pipeline->trace.name.end())));
+	if (linked.watched) {
+		// the watchdog (gpu_hang_exit_seconds) logs how many draws of this pipeline finished
+		D3D12::GetGpuTrace().Watch(&pipeline->trace);
+		Log::WriteToConsoleAndLog(fmt::format("GPU watchdog: watching {}{}\n", std::string(pipeline->trace.name.begin(), pipeline->trace.name.end()),
+		                                      linked.overridden ? " (shader override)" : " (its pixel shader uses a ballot)"));
 	}
 	if (rect_list) {
 		pipeline->trace.dxil.push_back(&linked.geometry);

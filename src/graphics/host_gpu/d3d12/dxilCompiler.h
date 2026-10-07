@@ -105,6 +105,10 @@ public:
 	[[nodiscard]] bool SupportsMeshShaders() const noexcept;
 	// Shaders index the descriptor heap directly (ResourceDescriptorHeap) from shader model 6.6.
 	[[nodiscard]] bool SupportsHeapIndexing() const noexcept;
+	// WaveReadLaneAt with a lane number that differs from lane to lane (shader model 6.7 and later).
+	[[nodiscard]] bool SupportsDivergentLaneIndex() const noexcept;
+	// Wave operations that include a pixel shader's helper lanes (shader model 6.7 and later).
+	[[nodiscard]] bool SupportsHelperLanesInWaveOps() const noexcept;
 
 	// Identifies the translator: saved translations are only valid for the same one.
 	[[nodiscard]] std::string CacheSignature() const;
