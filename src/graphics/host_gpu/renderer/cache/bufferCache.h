@@ -113,6 +113,8 @@ public:
 	// Queue after the range's state change becomes visible, or a drain could consume it first.
 	void               QueueBdaSync(uint64_t vaddr, uint64_t size);
 	void               RunGarbageCollector();
+	// Experiment: where the buffers' GPU memory is, as a log line.
+	void               LogMemoryBreakdown();
 
 private:
 	friend struct BufferCacheTestAccess;
