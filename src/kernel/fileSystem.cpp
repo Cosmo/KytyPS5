@@ -659,6 +659,8 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	const auto pos        = file->f.Tell();
 	const auto file_size  = file->f.Size();
 	const auto remaining  = pos < file_size ? file_size - pos : 0;
+	// the system writes into the buffer for as long as the read takes: the pager keeps it in memory
+	Memory::GuestBufferScope buffer_scope(reinterpret_cast<uint64_t>(buf), std::min<uint64_t>(nbytes, remaining));
 	Memory::InvalidateMemory(reinterpret_cast<uint64_t>(buf),
 	                         std::min<uint64_t>(nbytes, remaining));
 	uint32_t bytes_read = 0;
@@ -682,6 +684,9 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {
 	if (buf == nullptr) {
 		return KERNEL_ERROR_EFAULT;
 	}
+
+	// the system reads the buffer: it must not be swept or in the pager's store (the system cannot fault it back in) until the call returns
+	Memory::GuestBufferScope buffer_scope(reinterpret_cast<uint64_t>(buf), nbytes);
 
 	if (d == 1 || d == 2) {
 		auto*      out      = (d == 1 ? stdout : stderr);
@@ -784,6 +789,7 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	const auto file_size  = file->f.Size();
 	const auto remaining =
 	    static_cast<uint64_t>(offset) < file_size ? file_size - static_cast<uint64_t>(offset) : 0;
+	Memory::GuestBufferScope buffer_scope(reinterpret_cast<uint64_t>(buf), std::min<uint64_t>(nbytes, remaining)); // see KernelRead
 	Memory::InvalidateMemory(reinterpret_cast<uint64_t>(buf),
 	                         std::min<uint64_t>(nbytes, remaining));
 	uint32_t bytes_read = 0;
@@ -887,6 +893,7 @@ int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, in
 			continue;
 		}
 		const auto count = static_cast<uint32_t>(std::min<uint64_t>(buffer.iov_len, remaining));
+		Memory::GuestBufferScope buffer_scope(reinterpret_cast<uint64_t>(buffer.iov_base), count); // see KernelRead
 		Memory::InvalidateMemory(reinterpret_cast<uint64_t>(buffer.iov_base), count);
 		uint32_t bytes = 0;
 		file->f.Read(buffer.iov_base, count, &bytes);
@@ -918,6 +925,8 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 	if (offset < 0) {
 		return KERNEL_ERROR_EINVAL;
 	}
+
+	Memory::GuestBufferScope buffer_scope(reinterpret_cast<uint64_t>(buf), nbytes); // the system reads the buffer (see KernelWrite)
 
 	auto* file = g_files->GetFile(d);
 
@@ -1009,6 +1018,7 @@ static int64_t Writev(int d, const KernelIovec* iov, int iovcnt, std::optional<i
 			continue;
 		}
 		uint32_t bytes = 0;
+		Memory::GuestBufferScope buffer_scope(reinterpret_cast<uint64_t>(buffer.iov_base), buffer.iov_len); // the system reads the buffer (see KernelWrite)
 		file->f.Write(buffer.iov_base, static_cast<uint32_t>(buffer.iov_len), &bytes);
 		bytes_written += bytes;
 		if (bytes < buffer.iov_len) {
