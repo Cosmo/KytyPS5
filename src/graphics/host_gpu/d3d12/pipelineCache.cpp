@@ -925,7 +925,13 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	auto pipeline = std::make_unique<Pipeline>();
 	NameNewPipeline(*pipeline, fmt::format("cs {:x}", shader.id));
 	pipeline->trace.dxil = {&shader.dxil};
-	pipeline->layout.Add(*input_info.stage.program, shader.dxil.requires_runtime_data);
+	// debugging (dump_pipeline in kyty-uwp.json): this pipeline's DXIL when its number is asked for, or every compute pipeline's for 99999 (named by the pipeline's number and the guest shader's hash)
+	if (const uint32_t dump_what = Config::DumpPipeline(); dump_what == 99999 || (dump_what != 0 && dump_what == m_pipeline_count)) {
+		const std::span<const uint8_t> dxil[] {shader.dxil.bytecode};
+		Log::WriteToConsoleAndLog(fmt::format("compute pipeline {} (guest shader 0x{:016x}) saved to {}\n", m_pipeline_count, input_info.stage.module->info.shader_hash,
+		                                      D3D12::SaveShaderDump(fmt::format("cs_{}_{:016x}", m_pipeline_count, input_info.stage.module->info.shader_hash), dxil, {})));
+	}
+	pipeline->layout.Add(input_info.stage.module->info, shader.dxil.requires_runtime_data);
 	pipeline->root_signature = GetRootSignature(pipeline->layout);
 	if (!shader.dxil.IsValid() || pipeline->root_signature == nullptr) {
 		found->second = std::move(pipeline);

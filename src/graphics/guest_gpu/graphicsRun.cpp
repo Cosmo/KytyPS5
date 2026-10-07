@@ -11,6 +11,7 @@
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
+#include "graphics/host_gpu/frameDump.h"
 #include "graphics/host_gpu/gpuBackend.h"
 #include "graphics/host_gpu/renderer/sync.h"
 #include "graphics/presentation/videoOut.h"
@@ -25,6 +26,7 @@
 #include <atomic>
 #include <cstdio>
 #include <deque>
+#include <fmt/format.h>
 #include <memory>
 #include <mutex>
 #include <semaphore>
@@ -529,6 +531,10 @@ bool GuestGpu::Process(Submission& submission) {
 			}
 			break;
 		case SubmissionType::FlipPreparation:
+			FrameDump::OnFrameEnd();
+#if defined(KYTY_GPU_BACKEND_D3D12)
+			m_renderer.DumpFrameIfRequested();
+#endif
 			cp.PrepareCpuFlip(submission.flip_request_id);
 			break;
 		case SubmissionType::SuspendPoint:
@@ -630,6 +636,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 				     opcode, KYTY_PM4_R(packet_header), packet_dw,
 				     reinterpret_cast<uint64_t>(packet), packet_header);
 			}
+			LogSkippedPackets(packet, packet_dw);
 			cursor.offset_dw += packet_dw;
 			execution.m_made_progress = true;
 			continue;
@@ -711,6 +718,55 @@ uint32_t CommandProcessor::NumInstances() {
 	return m_num_instances;
 }
 
+void CommandProcessor::LogGuestRead(const char* what, uint64_t address, uint64_t size, const std::string& result) {
+	if (!FrameDump::LogActive()) {
+		return;
+	}
+	const bool gpu_written = address != 0 && m_renderer.GetBufferCache().IsRegionGpuModified(address, size);
+	FrameDump::LogEvent(fmt::format("cp read ({}): 0x{:x} +{} bytes: {} | {}", what, address, size, result,
+	                                gpu_written ? "this memory was written by the GPU and not read back: the value may be stale" : "not written by the GPU"));
+}
+
+void CommandProcessor::LogSkippedPackets(const uint32_t* first, uint32_t dwords) {
+	if (!FrameDump::LogActive()) {
+		return;
+	}
+	uint32_t offset = 0, others = 0;
+	while (offset < dwords) {
+		const auto header = first[offset];
+		if (header == 0x80000000u) {
+			offset++;
+			continue;
+		}
+		const auto length = KYTY_PM4_LEN(header);
+		if (length == 0 || offset + length > dwords) {
+			break;
+		}
+		const char* name = nullptr;
+		switch ((header >> 8u) & 0xffu) {
+			case Pm4::IT_DRAW_INDEX_2: name = "draw (index)"; break;
+			case Pm4::IT_DRAW_INDEX_OFFSET_2: name = "draw (index offset)"; break;
+			case Pm4::IT_DRAW_INDEX_AUTO: name = "draw (auto)"; break;
+			case Pm4::IT_DRAW_INDIRECT: name = "draw (indirect)"; break;
+			case Pm4::IT_DRAW_INDEX_INDIRECT: name = "draw (index indirect)"; break;
+			case Pm4::IT_DRAW_INDIRECT_MULTI: name = "draw (indirect multi)"; break;
+			case Pm4::IT_DRAW_INDEX_INDIRECT_MULTI: name = "draw (index indirect multi)"; break;
+			case Pm4::IT_DISPATCH_DRAW_PREAMBLE: name = "draw (dispatch preamble)"; break;
+			case Pm4::IT_DISPATCH_DRAW: name = "dispatch draw"; break;
+			case Pm4::IT_DISPATCH_DIRECT: name = "dispatch"; break;
+			case Pm4::IT_DISPATCH_INDIRECT: name = "dispatch (indirect)"; break;
+			default: others++; break;
+		}
+		if (name != nullptr) {
+			FrameDump::LogEvent(fmt::format("cp skipped by predication: {} ({} dwords)", name, length));
+		}
+		offset += length;
+	}
+	if (others != 0) {
+		FrameDump::LogEvent(fmt::format("cp skipped by predication: {} other packets", others));
+	}
+}
+
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
                                       const volatile void* address, uint32_t count_in_dwords) {
 	(void)count_in_dwords;
@@ -719,6 +775,9 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 	switch (op) {
 		case 0x00:
 			m_predicate_skip = false;
+			if (FrameDump::LogActive()) {
+				FrameDump::LogEvent("cp set-predication: off (the packets that follow run)");
+			}
 			return;
 		case 0x01: {
 			EXIT_NOT_IMPLEMENTED(address == nullptr);
@@ -730,6 +789,8 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 				const auto begin = results[db * 2u];
 				const auto end   = results[db * 2u + 1u];
 				if ((begin & end & ready_bit) == 0) {
+					LogGuestRead("set-predication, occlusion counters", reinterpret_cast<uint64_t>(address), 16u * 2u * sizeof(uint64_t),
+					             fmt::format("the counter of DB {} is not ready (wait_op {}) -> {}", db, wait_op, wait_op == 0 ? "wait for it (the processing is suspended)" : "run the packets that follow"));
 					if (wait_op == 0) {
 						SuspendPm4();
 					} else {
@@ -752,6 +813,8 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 		case 0x01: m_predicate_skip = (value == 0); break;
 		default: EXIT("unknown predication condition: 0x%08" PRIx32 "\n", condition);
 	}
+	LogGuestRead(op == 0x01 ? "set-predication, occlusion counters" : "set-predication, value", reinterpret_cast<uint64_t>(address), op == 0x01 ? 16u * 2u * sizeof(uint64_t) : sizeof(uint64_t),
+	             fmt::format("value 0x{:x}, {} -> {}", value, condition == 0 ? "skip when not zero" : "skip when zero", m_predicate_skip ? "SKIP the packets that follow" : "run the packets that follow"));
 	if (op == 0x03) {
 		static std::atomic<uint32_t> log_count {0};
 		if (log_count.fetch_add(1) < 128) {
@@ -824,6 +887,14 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	const auto draw_count = count_addr == nullptr
 	                            ? max_count_or_count
 	                            : std::min(uint32_t {*count_addr}, max_count_or_count);
+	if (FrameDump::LogActive()) {
+		if (count_addr != nullptr) {
+			LogGuestRead("indirect draw count", reinterpret_cast<uint64_t>(count_addr), sizeof(uint32_t),
+			             fmt::format("count {} (at most {}) -> {}", *count_addr, max_count_or_count, draw_count == 0 ? "no draws" : "draws"));
+		}
+		const auto bytes = static_cast<uint64_t>(std::max(draw_count, 1u)) * stride_in_bytes;
+		LogGuestRead("indirect draw arguments", m_draw_indirect_args_base_addr + data_offset, bytes, fmt::format("{} {} indirect draws, stride {}", draw_count, indexed ? "indexed" : "auto", stride_in_bytes));
+	}
 	if (draw_count == 0) {
 		return;
 	}
@@ -853,6 +924,16 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	const uint32_t max_indices = m_index_buffer_size != 0 ? m_index_buffer_size : UINT32_MAX;
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto addr = args_addr + static_cast<uint64_t>(i) * stride_in_bytes;
+
+		if (FrameDump::LogActive()) {
+			// Both record layouts start with the count per instance and the instance count.
+			const auto* words = reinterpret_cast<const uint32_t*>(addr);
+			if (words[0] == 0 || words[1] == 0) {
+				FrameDump::LogEvent(fmt::format("cp indirect draw {} of {}: arguments {} {} {} {} {} -> empty draw", i, draw_count, words[0], words[1], words[2], words[3], indexed ? words[4] : 0u));
+			} else if (i < 4) {
+				FrameDump::LogEvent(fmt::format("cp indirect draw {} of {}: arguments {} {} {} {} {}", i, draw_count, words[0], words[1], words[2], words[3], indexed ? words[4] : 0u));
+			}
+		}
 		if (!indexed) {
 			const auto& args = *reinterpret_cast<const vk::DrawIndirectCommand*>(addr);
 			PatchIndirectDrawOffsets(*this, registers, args.firstVertex, args.firstInstance, 0, i);
@@ -912,6 +993,10 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 
 void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
+	if (FrameDump::LogActive()) {
+		const auto* words = reinterpret_cast<const DispatchIndirectArgs*>(args_addr);
+		LogGuestRead("indirect dispatch arguments", args_addr, sizeof(DispatchIndirectArgs), fmt::format("groups {}x{}x{} as the guest memory shows them (the GPU reads them itself)", words->x, words->y, words->z));
+	}
 	if ((mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
 		const auto* args = reinterpret_cast<const DispatchIndirectArgs*>(args_addr);
 		DispatchDirect(args->x, args->y, args->z, mode);
@@ -1079,6 +1164,7 @@ void CommandProcessor::Flip(int handle, int index, int flip_mode, int64_t flip_a
 	m_renderer.GetOcclusionQueries().Publish();
 
 	auto& command = CurrentBuffer();
+	FrameDump::OnFrameEnd();
 	auto  request = Sync::PrepareVideoOutFlip(command, handle, index, flip_mode, flip_arg);
 	(void)command.Handle();
 	GetScheduler().DeferPriorityOperation(

@@ -85,6 +85,12 @@ public:
 	void UnmapMemory(uint64_t address, uint64_t size);
 	void ProcessDownloadImages();
 	void RunGarbageCollector();
+	// Experiment: where the images' GPU memory is, as a log line.
+	void LogMemoryBreakdown();
+	// Frame dump (debugging): the render targets as PNG files in `folder`, and a line of text about it (an empty text: not supported by this backend).
+	[[nodiscard]] std::string DumpRenderTargets(const std::filesystem::path& folder);
+	// Debugging (the frame dump's draw log): the statistics of the color image (a readback), or nothing when it cannot be read; D3D12 only.
+	[[nodiscard]] std::string SnapshotStats(ImageId id);
 
 private:
 	struct MetaDataInfo {

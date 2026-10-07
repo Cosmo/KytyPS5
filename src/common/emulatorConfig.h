@@ -113,6 +113,10 @@ struct ConfigOptions {
 	// (and <size>.vs.dxil the vertex stage) of the pipelines whose pixel program's SPIR-V is <size> bytes. Signed or not; the emulator validates and signs
 	// them. Empty: off. For trying hand-edited or differently built DXIL of one shader without rebuilding the emulator.
 	std::filesystem::path shader_override_folder;
+	// Debugging: where the game menu's frame dump puts its files (a folder for each dump is made in it).
+	std::filesystem::path frame_dump_folder;
+	// Debugging: the frame dump's draw log also gets the average color of every large floating-point render target after each draw that writes it (a readback each, slow).
+	bool frame_dump_snapshots = false;
 	// Debugging (D3D12 build): a thread watches the GPU and ends the emulator, with the report of a GPU hang, as soon as the device is removed or the
 	// oldest GPU work has not finished for this many seconds (0: off). It also logs how many draws of the pipelines with overridden shaders finished.
 	uint32_t gpu_hang_exit_seconds = 0;
@@ -218,6 +222,8 @@ bool XboxGpuLimitsEnabled();
 uint32_t XboxLimitsDxilParts();
 uint32_t DumpPipeline();
 std::filesystem::path ShaderOverrideFolder();
+std::filesystem::path FrameDumpFolder();
+bool                  FrameDumpSnapshots();
 uint32_t              GpuHangExitSeconds();
 bool MeshComputeForced();
 uint32_t GuestRamBudgetMb();

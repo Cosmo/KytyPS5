@@ -2,7 +2,9 @@
 #include "common/logging/log.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/d3d12/drawLog.h"
 #include "graphics/host_gpu/d3d12/gpuTrace.h"
+#include "graphics/host_gpu/frameDump.h"
 #include "graphics/host_gpu/d3d12/renderContext.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
@@ -19,6 +21,22 @@ namespace Libs::Graphics {
 namespace IR = ShaderRecompiler::IR;
 
 namespace {
+
+// Debugging (the frame dump's draw log): a dispatch, as text. `groups` is empty for an indirect dispatch.
+std::string DescribeDispatch(const PipelineCache::Pipeline& pipeline, const PreparedBindings& bindings, const std::string& groups) {
+	std::string name(pipeline.trace.name.begin(), pipeline.trace.name.end());
+	name.resize(name.find(':') != std::string::npos ? name.find(':') : name.size());
+	const auto* program = bindings.runtime != nullptr && bindings.runtime->module != nullptr ? &bindings.runtime->module->info : nullptr;
+	std::string text = fmt::format("{} cs=0x{:016x} pipeline=\"{}\"\n", groups, program != nullptr ? program->shader_hash : 0, name);
+	for (const auto& image: bindings.images) {
+		if (image.desc.type == TextureCache::BindingType::Storage) {
+			FrameDump::NoteWrittenImage(image.desc.info.data.address);
+		}
+	}
+	text += DrawLog::Textures("cs", bindings);
+	text += DrawLog::WrittenBuffers("cs", bindings);
+	return text;
+}
 
 // A raw view of `binding`: a UAV, or an SRV used in `read_state` for buffers the shader only
 // reads.
@@ -368,6 +386,9 @@ void RenderExecutor::RecordDispatch(CommandBuffer& buffer, const PipelineCache::
 		return; // could not be made (reported where it failed)
 	}
 	m_statistics.dispatches++;
+	if (FrameDump::LogActive()) {
+		FrameDump::LogDispatch(DescribeDispatch(pipeline, bindings, fmt::format("groups {}x{}x{}", groups_x, groups_y, groups_z)));
+	}
 	// spirv_to_dxil's compute runtime data: group counts, padding, base group.
 	const uint32_t    runtime[7] = {groups_x, groups_y, groups_z, 0, 0, 0, 0};
 	PreparedBindings* stage      = &bindings;
@@ -443,6 +464,9 @@ void RenderExecutor::RecordDispatchIndirect(CommandBuffer&                 buffe
 		return;
 	}
 	m_statistics.dispatches++;
+	if (FrameDump::LogActive()) {
+		FrameDump::LogDispatch(DescribeDispatch(pipeline, bindings, "groups from an indirect buffer"));
+	}
 	// spirv_to_dxil reads the group counts from its runtime data. The command signature sets
 	// them from arguments that precede the dispatch's own: [x y z][x y z].
 	constexpr uint64_t CountsSize = 3 * sizeof(uint32_t);
