@@ -5,6 +5,7 @@
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "libs/crashTrail.h"
 #include "loader/timer.h" // IWYU pragma: keep
 
 #include <fmt/format.h>
@@ -48,8 +49,10 @@
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_FUNC(n, f) LIB_ADD(n, f, Loader::SymbolType::Func)
 
+// Every call also goes to the thread's crash trail (crashTrail.h), whatever the log is set to.
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME()                                                                               \
+	Libs::CrashTrail::Call(g_library, __func__);                                                   \
 	if (PRINT_NAME_ENABLED) {                                                                      \
 		Libs::PrintName(g_library, g_module, __func__);                                              \
 	}
