@@ -63,6 +63,10 @@ struct HostPadFeedback {
 	uint8_t haptic_right = 0;
 };
 
+// Testing without a person at the controller: presses the confirm button (Cross on the PS5 pad, A on an Xbox controller) for a moment every
+// interval_ms, once the game's controller library exists, so that a game gets through its menus by itself. Does nothing for 0 or when it runs already.
+void StartAutoPress(uint32_t interval_ms);
+
 void                          SetPlayerConnected(int player, bool connected);
 void                          SetPlayerState(int player, const HostPadState& state);
 // Called on every poll: moves the emulated motion one step toward the angle of the player's last state, so that the game's motion sensors
