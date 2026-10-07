@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
 
 #include "common/assert.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
@@ -90,6 +91,9 @@ void CollectPixelInputs(const ShaderPixelInputInfo* pixel, ShaderInfo& info,
 	}
 	// Mixed interpolation modes share raw vertices at their guest export slot.
 	// Rectangle expansion alone supplies separate flat and smooth outputs.
+	// Without barycentrics there are no raw vertices: the aliases share the
+	// first alias's interpolated input.
+	const bool barycentrics = GetHostShaderFeatures().barycentrics;
 	for (uint32_t input = 0; input < pixel->input_num; input++) {
 		for (uint32_t alias = 0; alias < pixel->input_num; alias++) {
 			const bool same_mode = ShaderPixelParameterIsFlat(*pixel, input) ==
@@ -97,7 +101,8 @@ void CollectPixelInputs(const ShaderPixelInputInfo* pixel, ShaderInfo& info,
 			if (ShaderPixelParameterMappedLocation(*pixel, input) ==
 			        ShaderPixelParameterMappedLocation(*pixel, alias) &&
 			    (pixel->parameter_mode != ShaderPixelParameterMode::Rectangle || same_mode)) {
-				per_vertex[input] = per_vertex[input] || per_vertex[alias] || !same_mode;
+				per_vertex[input] =
+				    per_vertex[input] || per_vertex[alias] || (!same_mode && barycentrics);
 			}
 		}
 	}
@@ -158,10 +163,14 @@ void AddBuiltinInput(ShaderInfo& info, StageInputKind kind) {
 			[[fallthrough]];
 		case StageInputKind::BaryCoordSmooth:
 		case StageInputKind::BaryCoordSmoothCentroid:
-			AddInput(info, StageInputKind::BaryCoordSmooth, 0, 3, "gl_BaryCoordKHR");
+			if (GetHostShaderFeatures().barycentrics) {
+				AddInput(info, StageInputKind::BaryCoordSmooth, 0, 3, "gl_BaryCoordKHR");
+			}
 			break;
 		case StageInputKind::BaryCoordNoPerspective:
-			AddInput(info, kind, 0, 3, "gl_BaryCoordNoPerspKHR");
+			if (GetHostShaderFeatures().barycentrics) {
+				AddInput(info, kind, 0, 3, "gl_BaryCoordNoPerspKHR");
+			}
 			break;
 		case StageInputKind::WorkgroupId:
 			AddInput(info, kind, 0, 3, "gl_WorkGroupID");
@@ -408,9 +417,12 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			    inst.Arg(1).U32() >= 4u || inst.Arg(2).U32() >= 3u) {
 				return Fail("interpolation parameter reference is out of range");
 			}
+			// Without barycentrics, vertex values come from the interpolated input
+			// (EmitInterpolationParameter).
 			const auto input = inst.Arg(0).U32();
-			inputs.per_vertex[input] |= inst.Arg(2).U32() < 2u ||
-			                            !ShaderPixelParameterIsFlat(*input_info.pixel, input);
+			inputs.per_vertex[input] |= GetHostShaderFeatures().barycentrics &&
+			                            (inst.Arg(2).U32() < 2u ||
+			                             !ShaderPixelParameterIsFlat(*input_info.pixel, input));
 			break;
 		}
 		case ValueOpcode::GetBuiltin: {
