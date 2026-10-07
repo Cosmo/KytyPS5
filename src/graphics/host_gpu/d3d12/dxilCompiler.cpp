@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <cstddef>
 #include <cstring>
@@ -201,12 +202,67 @@ dxil_spirv_runtime_conf RuntimeConf(uint32_t shader_model, bool lower_16bit, boo
 	return conf;
 }
 
+// Mesa declares the DXIL atomic operations (atomicBinOp, atomicCompareExchange) with the function attributes nounwind and readnone, which DXC does not: readnone says that a call
+// has no effect but its result, and a driver compiler may drop such a call when the result is unused. On the Series X the atomics of every kernel that ignores their results did
+// nothing (the de-tile kernels, probably the game's culling lists). The attribute group {nounwind, readnone} of the bitcode is a record of 6-bit VBR chunks (0xFFFFFFFF for the
+// function, 0, 18, 0, 20); it becomes {nounwind, nounwind}: the same size, so nothing moves, and the module is signed afterwards as usual. Returns the number of groups changed.
+uint32_t DropReadNoneFromFunctionAttributes(std::vector<uint8_t>& bytecode) {
+	constexpr uint32_t kChunks[]    = {0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x03, 0x00, 0x12, 0x00, 0x14};
+	constexpr size_t   kChunkCount  = sizeof(kChunks) / sizeof(kChunks[0]);
+	const size_t       bits         = bytecode.size() * 8u;
+	const auto         read_chunk   = [&](size_t bit) {
+        uint32_t value = 0;
+        for (size_t i = 0; i < 6; ++i) {
+            const size_t position = bit + i;
+            value |= static_cast<uint32_t>((bytecode[position >> 3u] >> (position & 7u)) & 1u) << i;
+        }
+        return value;
+	};
+	uint32_t changed = 0;
+	// six chunks of 0x3F are 36 set bits in a row: they cover at least three whole bytes of 0xFF
+	for (size_t index = 0; index + 3 <= bytecode.size(); ++index) {
+		if (bytecode[index] != 0xFF || bytecode[index + 1] != 0xFF || bytecode[index + 2] != 0xFF) {
+			continue;
+		}
+		for (size_t start = index * 8u >= 12u ? index * 8u - 12u : 0u; start <= index * 8u; ++start) {
+			if (start + kChunkCount * 6u > bits) {
+				break;
+			}
+			bool match = true;
+			for (size_t chunk = 0; chunk < kChunkCount && match; ++chunk) {
+				match = read_chunk(start + chunk * 6u) == kChunks[chunk];
+			}
+			if (!match) {
+				continue;
+			}
+			const size_t last = start + (kChunkCount - 1u) * 6u; // the 20 (readnone) becomes 18 (nounwind)
+			for (size_t i = 0; i < 6; ++i) {
+				const size_t  position = last + i;
+				const uint8_t mask     = static_cast<uint8_t>(1u << (position & 7u));
+				if (((0x12u >> i) & 1u) != 0) {
+					bytecode[position >> 3u] |= mask;
+				} else {
+					bytecode[position >> 3u] &= static_cast<uint8_t>(~mask);
+				}
+			}
+			++changed;
+		}
+	}
+	return changed;
+}
+
 DxilShader TakeObject(dxil_spirv_object& object) {
 	DxilShader result;
 	result.requires_runtime_data = object.metadata.requires_runtime_data;
 	result.needs_draw_sysvals    = object.metadata.needs_draw_sysvals;
 	const auto* bytes            = static_cast<const uint8_t*>(object.binary.buffer);
 	result.bytecode.assign(bytes, bytes + object.binary.size);
+	if (const auto changed = DropReadNoneFromFunctionAttributes(result.bytecode); changed != 0) {
+		static std::atomic_bool reported = false;
+		if (!reported.exchange(true)) {
+			Log::WriteToConsoleAndLog(fmt::format("D3D12: translated shaders get no readnone on their function attributes (the atomic operations stay: {} attribute group(s) in the first one)\n", changed));
+		}
+	}
 	spirv_to_dxil_free(&object);
 	return result;
 }
@@ -246,6 +302,14 @@ bool DxilCompiler::SupportsHeapIndexing() const noexcept {
 	return m_shader_model >= SHADER_MODEL_6_6;
 }
 
+bool DxilCompiler::SupportsDivergentLaneIndex() const noexcept {
+	return m_shader_model >= SHADER_MODEL_6_7;
+}
+
+bool DxilCompiler::SupportsHelperLanesInWaveOps() const noexcept {
+	return m_shader_model >= SHADER_MODEL_6_7;
+}
+
 std::vector<DxilShader> DxilCompiler::CompileLinked(std::span<const LinkedStage> stages,
                                                     uint64_t pipeline_hash,
                                                     bool*    from_cache) const {
@@ -270,7 +334,7 @@ std::vector<DxilShader> DxilCompiler::CompileLinked(std::span<const LinkedStage>
 }
 
 std::string DxilCompiler::CacheSignature() const {
-	return fmt::format("spirv_to_dxil={:016x} sm=6.{} validator=1.{} 16bit={}", m_translator_hash,
+	return fmt::format("spirv_to_dxil={:016x} sm=6.{} validator=1.{} 16bit={} attributes=impure", m_translator_hash,
 	                   m_shader_model - SHADER_MODEL_6_0, m_validator_version - DXIL_VALIDATOR_1_0,
 	                   m_lower_16bit ? "lowered" : "native");
 }
