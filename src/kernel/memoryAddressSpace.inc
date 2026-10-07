@@ -1565,6 +1565,7 @@ public:
 				    page_ins != 0 ? static_cast<double>(current[4] - previous[4]) / 1000.0 / static_cast<double>(page_ins) : 0.0, counters.read_hits.load(), counters.errors.load(), counters.torn.load(), counters.corrupt.load(), counters.emergency.load(), Config::AppMemoryUsage() >> 20u, app_limit >> 20u, Xbox::Lazy::GetCounters().views.load(), counters.privatized.load()));
 				std::copy(std::begin(current), std::end(current), std::begin(previous));
 				last_report = now;
+				Log::WriteToConsoleAndLog(GuestPrivateMemoryReport());
 			}
 		}
 	}
