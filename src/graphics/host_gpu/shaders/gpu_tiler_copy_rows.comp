@@ -1,0 +1,58 @@
+#version 450
+
+// Copies rows of bytes between two buffer layouts, e.g. from tightly packed guest texel rows to
+// the aligned rows that texture copies require. One invocation writes one destination dword.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Input { uint data[]; } input_buffer;
+layout(set = 0, binding = 1, std430) buffer Output { uint data[]; } output_buffer;
+
+layout(push_constant, std430) uniform Params {
+	uint src_base;
+	uint src_row_pitch;
+	uint src_slice_pitch;
+	uint src_size; // bytes readable from src_base's buffer start
+	uint dst_base;
+	uint dst_row_pitch;
+	uint dst_slice_pitch;
+	uint row_bytes;
+	uint rows;
+	uint slices;
+} params;
+
+uint load_dword(uint index) {
+	return index * 4u < params.src_size ? input_buffer.data[index] : 0u;
+}
+
+void main() {
+	uvec3 id     = gl_GlobalInvocationID;
+	uint  dwords = (params.row_bytes + 3u) / 4u;
+	if (id.x >= dwords || id.y >= params.rows || id.z >= params.slices) {
+		return;
+	}
+	uint src = params.src_base + id.z * params.src_slice_pitch + id.y * params.src_row_pitch +
+	           id.x * 4u;
+	uint dst = params.dst_base + id.z * params.dst_slice_pitch + id.y * params.dst_row_pitch +
+	           id.x * 4u;
+
+	uint shift = (src & 3u) * 8u;
+	uint value = load_dword(src >> 2u);
+	if (shift != 0u) {
+		value = (value >> shift) | (load_dword((src >> 2u) + 1u) << (32u - shift));
+	}
+
+	uint bytes = min(4u, params.row_bytes - id.x * 4u);
+	if ((dst & 3u) == 0u && bytes == 4u) {
+		output_buffer.data[dst >> 2u] = value;
+		return;
+	}
+	// The bytes around a partial or unaligned destination dword belong to other data.
+	for (uint i = 0u; i < bytes; i++) {
+		uint address = dst + i;
+		uint lane    = (address & 3u) * 8u;
+		uint byte    = (value >> (i * 8u)) & 0xffu;
+		atomicAnd(output_buffer.data[address >> 2u], ~(0xffu << lane));
+		atomicOr(output_buffer.data[address >> 2u], byte << lane);
+	}
+}
