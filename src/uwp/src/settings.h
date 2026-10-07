@@ -28,8 +28,14 @@ struct AppSettings {
 	uint32_t overlay_size = 1;
 	// How many of the log's last lines the overlay shows: 2 to 20 (OverlayLogLines in overlay.cpp).
 	uint32_t overlay_log_lines = 20;
+	// The settings page, Controller (ControllerOptions in input.h): the games' adaptive trigger effects rumble the triggers' motors. On.
+	bool impulse_triggers = true;
+	// The settings page, Controller: the DualSense's haptic feedback as gentle rumble. On.
+	bool haptic_rumble = true;
 	// Debugging, only in the file: the Xbox's shader limits on any GPU (Config::XboxGpuLimitsEnabled).
 	bool xbox_gpu_limits = false;
+	// The settings page, Developer: the games' compiled shaders are kept across builds of the app (Config::PipelineCacheAnyBuild). Off.
+	bool shader_cache_any_build = false;
 };
 [[nodiscard]] AppSettings LoadSettings();
 void                      SaveSettings(const AppSettings& settings);
