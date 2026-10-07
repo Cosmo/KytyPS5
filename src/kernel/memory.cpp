@@ -6,7 +6,7 @@
 #include "common/threads.h"
 #include "common/virtualMemory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
-#include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/gpuBackend.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 
@@ -29,6 +29,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h> // IWYU pragma: keep
+
+#include "common/platform/sysWindowsVirtual.h"
 #ifndef MEM_RESERVE_PLACEHOLDER
 #define MEM_RESERVE_PLACEHOLDER 0x00040000
 #endif
