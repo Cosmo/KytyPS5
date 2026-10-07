@@ -122,6 +122,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		// red zone below the guest's stack pointer (the emulator's --redzone option: the guest's code is patched to keep it clear).
 		config.red_zone_protection_enabled = true;
 		config.xbox_gpu_limits_enabled     = settings.xbox_gpu_limits;
+		config.mesh_compute_forced         = settings.mesh_compute;
 		config.pipeline_cache_any_build    = settings.shader_cache_any_build;
 		Emulator::Run(options);
 
