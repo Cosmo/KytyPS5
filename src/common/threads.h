@@ -33,6 +33,8 @@ public:
 
 	void Lock();
 	void Unlock();
+	// Whether the lock was free and is now held (the D3D12 pipeline cache's statistics, read by the app's UI).
+	bool TryLock();
 
 	KYTY_CLASS_NO_COPY(Mutex);
 
@@ -42,6 +44,7 @@ private:
 #else
 	void Lock() { m_mutex.lock(); }
 	void Unlock() { m_mutex.unlock(); }
+	bool TryLock() { return m_mutex.try_lock(); }
 
 private:
 	std::recursive_mutex m_mutex;
