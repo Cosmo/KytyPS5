@@ -873,8 +873,10 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 				const auto begin = results[db * 2u];
 				const auto end   = results[db * 2u + 1u];
 				if ((begin & end & ready_bit) == 0) {
-					LogGuestRead("set-predication, occlusion counters", reinterpret_cast<uint64_t>(address), 16u * 2u * sizeof(uint64_t),
-					             fmt::format("the counter of DB {} is not ready (wait_op {}) -> {}", db, wait_op, wait_op == 0 ? "wait for it (the processing is suspended)" : "run the packets that follow"));
+					if (FrameDump::LogActive()) {
+						LogGuestRead("set-predication, occlusion counters", reinterpret_cast<uint64_t>(address), 16u * 2u * sizeof(uint64_t),
+						             fmt::format("the counter of DB {} is not ready (wait_op {}) -> {}", db, wait_op, wait_op == 0 ? "wait for it (the processing is suspended)" : "run the packets that follow"));
+					}
 					if (wait_op == 0) {
 						SuspendPm4();
 					} else {
@@ -897,8 +899,10 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 		case 0x01: m_predicate_skip = (value == 0); break;
 		default: EXIT("unknown predication condition: 0x%08" PRIx32 "\n", condition);
 	}
-	LogGuestRead(op == 0x01 ? "set-predication, occlusion counters" : "set-predication, value", reinterpret_cast<uint64_t>(address), op == 0x01 ? 16u * 2u * sizeof(uint64_t) : sizeof(uint64_t),
-	             fmt::format("value 0x{:x}, {} -> {}", value, condition == 0 ? "skip when not zero" : "skip when zero", m_predicate_skip ? "SKIP the packets that follow" : "run the packets that follow"));
+	if (FrameDump::LogActive()) {
+		LogGuestRead(op == 0x01 ? "set-predication, occlusion counters" : "set-predication, value", reinterpret_cast<uint64_t>(address), op == 0x01 ? 16u * 2u * sizeof(uint64_t) : sizeof(uint64_t),
+		             fmt::format("value 0x{:x}, {} -> {}", value, condition == 0 ? "skip when not zero" : "skip when zero", m_predicate_skip ? "SKIP the packets that follow" : "run the packets that follow"));
+	}
 	if (op == 0x03) {
 		static std::atomic<uint32_t> log_count {0};
 		if (log_count.fetch_add(1) < 128) {
