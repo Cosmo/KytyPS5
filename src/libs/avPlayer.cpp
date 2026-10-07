@@ -587,10 +587,15 @@ public:
 			file.close(file.object_pointer);
 		}
 	}
+	// The reason a source cannot be read goes to the log whatever it is set to (games stop when a video does not open).
 	bool Init(const std::string& path) {
 		if (file.open != nullptr) {
-			if (file.close == nullptr || file.read_offset == nullptr || file.size == nullptr ||
-			    file.open(file.object_pointer, path.c_str()) < 0) {
+			if (file.close == nullptr || file.read_offset == nullptr || file.size == nullptr) {
+				std::printf("AvPlayer: %s: the game's file functions are incomplete\n", path.c_str());
+				return false;
+			}
+			if (const int result = file.open(file.object_pointer, path.c_str()); result < 0) {
+				std::printf("AvPlayer: %s: the game's open function failed (0x%08x)\n", path.c_str(), static_cast<uint32_t>(result));
 				return false;
 			}
 			opened = true;
@@ -598,11 +603,14 @@ public:
 		} else {
 			if (!local_file.Open(LibKernel::FileSystem::GetRealFilename(path),
 			                     Common::File::Mode::Read)) {
+				std::printf("AvPlayer: %s: cannot open %s\n", path.c_str(),
+				            Common::PathToString(LibKernel::FileSystem::GetRealFilename(path)).c_str());
 				return false;
 			}
 			size = local_file.Size();
 		}
 		if (size == 0 || size > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+			std::printf("AvPlayer: %s: its size is %llu\n", path.c_str(), static_cast<unsigned long long>(size));
 			return false;
 		}
 		constexpr int buffer_size = 64 * 1024;
@@ -714,12 +722,12 @@ public:
 		if (const auto rc = avformat_open_input(&raw, file.open == nullptr ? path.c_str() : nullptr,
 		                                        nullptr, nullptr);
 		    rc < 0) {
-			LOGF("\t avformat_open_input failed: %s path=%s\n", fferr(rc).c_str(), path.c_str());
+			std::printf("AvPlayer: %s: avformat_open_input failed: %s\n", path.c_str(), fferr(rc).c_str());
 			return AVPLAYER_ERROR_OPERATION_FAILED;
 		}
 		fmt = raw;
 		if (auto rc = avformat_find_stream_info(fmt, nullptr); rc < 0) {
-			LOGF("\t avformat_find_stream_info failed: %s\n", fferr(rc).c_str());
+			std::printf("AvPlayer: %s: avformat_find_stream_info failed: %s\n", path.c_str(), fferr(rc).c_str());
 			return AVPLAYER_ERROR_OPERATION_FAILED;
 		}
 		return 0;
@@ -1774,6 +1782,15 @@ static int add_source(AvPlayerInternal* h, const std::string& filename, AvPlayer
 	}
 	return 0;
 }
+// A player's life in the log, whatever the log is set to (games play few videos): created, its source added, started, stopped, closed, with the
+// result. Returns the result.
+static int LogLifecycle(const AvPlayerInternal* player, const char* what, const char* source, int result) {
+	std::printf("AvPlayer: player %p %s%s%s: %s0x%08x\n", static_cast<const void*>(player), what, source[0] != '\0' ? " " : "", source,
+	            result == 0 ? "ok " : "error ", static_cast<uint32_t>(result));
+	std::fflush(stdout);
+	return result;
+}
+
 static void log_init_common(const AvPlayerMemAllocator& mem, const AvPlayerFileReplacement& file,
                             const AvPlayerEventReplacement& event, AvPlayerDebuglevels debug_level,
                             int32_t buffers, uint32_t priority, Bool auto_start,
@@ -1815,8 +1832,10 @@ AvPlayerInternal* KYTY_SYSV_ABI AvPlayerInit(AvPlayerInitData* init) {
 	log_init_common(init->memory_replacement, init->file_replacement, init->event_replacement,
 	                init->debug_level, init->num_output_video_framebuffers, init->base_priority,
 	                init->auto_start, init->default_language);
-	return create_player(init->memory_replacement, init->file_replacement, init->event_replacement,
-	                     init->auto_start != 0, init->num_output_video_framebuffers);
+	auto* player = create_player(init->memory_replacement, init->file_replacement, init->event_replacement,
+	                             init->auto_start != 0, init->num_output_video_framebuffers);
+	LogLifecycle(player, "is created", "", player != nullptr ? 0 : AVPLAYER_ERROR_INVALID_PARAMS);
+	return player;
 }
 int KYTY_SYSV_ABI AvPlayerInitEx(const void* init_ex, AvPlayerInternal** handle) {
 	PRINT_NAME();
@@ -1831,7 +1850,7 @@ int KYTY_SYSV_ABI AvPlayerInitEx(const void* init_ex, AvPlayerInternal** handle)
 	*handle =
 	    create_player(init->memory_replacement, init->file_replacement, init->event_replacement,
 	                  init->auto_start != 0, init->num_output_video_framebuffers);
-	return *handle == nullptr ? AVPLAYER_ERROR_INVALID_PARAMS : 0;
+	return LogLifecycle(*handle, "is created", "", *handle == nullptr ? AVPLAYER_ERROR_INVALID_PARAMS : 0);
 }
 int KYTY_SYSV_ABI AvPlayerPostInit(AvPlayerInternal* h, const void* post_init) {
 	PRINT_NAME();
@@ -1850,7 +1869,7 @@ int KYTY_SYSV_ABI AvPlayerAddSource(AvPlayerInternal* h, const char* filename) {
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
 	LOGF("\t filename = %s\n", filename);
-	return add_source(h, filename, AvPlayerSourceUnknown);
+	return LogLifecycle(h, "adds", filename, add_source(h, filename, AvPlayerSourceUnknown));
 }
 int KYTY_SYSV_ABI AvPlayerAddSourceEx(AvPlayerInternal* h, uint32_t uri_type,
                                       const void* source_details) {
@@ -1869,7 +1888,7 @@ int KYTY_SYSV_ABI AvPlayerAddSourceEx(AvPlayerInternal* h, uint32_t uri_type,
 	std::string filename(d->uri.name, d->uri.length);
 	LOGF("\t uri_type    = %u\n\t source_type = %u\n\t filename    = %s\n", uri_type,
 	     static_cast<uint32_t>(d->source_type), filename.c_str());
-	return add_source(h, filename, d->source_type);
+	return LogLifecycle(h, "adds", filename.c_str(), add_source(h, filename, d->source_type));
 }
 int KYTY_SYSV_ABI AvPlayerStreamCount(AvPlayerInternal* h) {
 	PRINT_NAME();
@@ -1919,7 +1938,7 @@ int KYTY_SYSV_ABI AvPlayerStart(AvPlayerInternal* h) {
 	if (rc == 0) {
 		emit_event(h->event, AVPLAYER_EVENT_STATE_PLAY);
 	}
-	return rc;
+	return LogLifecycle(h, "starts", "", rc);
 }
 int KYTY_SYSV_ABI AvPlayerStartEx(AvPlayerInternal* h, const void* start_info_ex) {
 	PRINT_NAME();
@@ -1934,14 +1953,14 @@ int KYTY_SYSV_ABI AvPlayerStartEx(AvPlayerInternal* h, const void* start_info_ex
 	if (rc == 0) {
 		emit_event(h->event, AVPLAYER_EVENT_STATE_PLAY);
 	}
-	return rc;
+	return LogLifecycle(h, "starts", "", rc);
 }
 int KYTY_SYSV_ABI AvPlayerStop(AvPlayerInternal* h) {
 	PRINT_NAME();
 	if (h == nullptr || h->source == nullptr) {
-		return AVPLAYER_ERROR_INVALID_PARAMS;
+		return LogLifecycle(h, "stops", "", AVPLAYER_ERROR_INVALID_PARAMS);
 	}
-	return h->source->Stop();
+	return LogLifecycle(h, "stops", "", h->source->Stop());
 }
 int KYTY_SYSV_ABI AvPlayerPause(AvPlayerInternal* h) {
 	PRINT_NAME();
@@ -2072,8 +2091,9 @@ int KYTY_SYSV_ABI AvPlayerJumpToTime(AvPlayerInternal* h, uint64_t time_ms) {
 int KYTY_SYSV_ABI AvPlayerClose(AvPlayerInternal* h) {
 	PRINT_NAME();
 	if (h == nullptr) {
-		return AVPLAYER_ERROR_INVALID_PARAMS;
+		return LogLifecycle(h, "closes", "", AVPLAYER_ERROR_INVALID_PARAMS);
 	}
+	LogLifecycle(h, "closes", "", 0);
 	h->source.reset();
 	delete h;
 	return 0;

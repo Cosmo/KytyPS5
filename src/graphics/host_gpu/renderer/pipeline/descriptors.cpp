@@ -832,6 +832,8 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 		} else {
 			binding.image_view = texture_cache.FindTexture(binding.image_id, binding.desc);
 		}
+		texture_cache.GetImage(binding.image_id).usage.storage |=
+		    binding.desc.type == TextureCache::BindingType::Storage;
 	}
 }
 
