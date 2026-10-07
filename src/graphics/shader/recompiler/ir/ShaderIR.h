@@ -341,6 +341,14 @@ struct PushData {
 static_assert(sizeof(PushData) == 128);
 constexpr uint32_t NativePushConstantSize = sizeof(PushData);
 
+// The register space (D3D12) of the table of the buffers' persistent descriptors, which guest
+// memory is read through where shaders cannot index the descriptor heap
+// (HostShaderFeatures::guest_pointer_table). Outside the spaces of the guest resources.
+inline constexpr uint32_t GuestBufferTableSpace = 1004;
+// Its size: the persistent descriptors (D3D12: DescriptorHeap::BindlessViews). A fixed size, as the
+// translator declares the 64-UAV feature for an unbounded array and the validator does not count it.
+inline constexpr uint32_t GuestBufferTableSize = 1u << 16;
+
 [[nodiscard]] constexpr uint32_t NativeBinding(ShaderType stage, DescriptorBindingKind kind) {
 	const uint32_t group = stage == ShaderType::Pixel                    ? 1u
 	                       : stage == ShaderType::TessellationControl    ? 2u

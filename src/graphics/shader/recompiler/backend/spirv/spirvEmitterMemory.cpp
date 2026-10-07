@@ -187,32 +187,8 @@ uint32_t LoadBdaDword(ValueEmitContext& ctx, uint32_t address, bool coherent = f
 	const auto bda     = GetBdaPointer(state, address);
 	const auto present =
 	    Binary(state, spv::OpINotEqual, TypeBool(state), bda, ConstantU64(state, 0));
-	return EmitValueOrZeroIfCondition(state, present, [&]() {
-		auto pointer = state.builder.AllocateId();
-		if (coherent) {
-			const auto block = state.builder.DecoratedType(
-			    spv::OpTypeStruct, {{spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}},
-			                        {spv::OpMemberDecorate, {0, spv::DecorationCoherent}},
-			                        {spv::OpDecorate, {spv::DecorationBlock}}}, TypeU32(state));
-			state.builder.AddFunction(
-			    spv::OpConvertUToPtr, TypePointer(state, spv::StorageClassPhysicalStorageBuffer, block),
-			    pointer, bda);
-			const auto base = pointer;
-			pointer = state.builder.AllocateId();
-			state.builder.AddFunction(spv::OpAccessChain, TypePhysicalU32Pointer(state), pointer,
-			                          base, ConstantU32(state, 0));
-		} else {
-			state.builder.AddFunction(spv::OpConvertUToPtr, TypePhysicalU32Pointer(state), pointer,
-			                          bda);
-		}
-		const auto         value     = state.builder.AllocateId();
-		constexpr uint32_t alignment = sizeof(uint32_t);
-		state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, pointer,
-		                          spv::MemoryAccessAlignedMask |
-		                              (coherent ? spv::MemoryAccessVolatileMask : spv::MemoryAccessMaskNone),
-		                          alignment);
-		return value;
-	});
+	return EmitValueOrZeroIfCondition(
+	    state, present, [&]() { return LoadGuestPointerDword(state, bda, coherent); });
 }
 
 uint32_t LoadBda(ValueEmitContext& ctx, uint32_t address, uint32_t active, uint32_t bits,
@@ -1141,6 +1117,117 @@ void StoreWideShared(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compo
 }
 
 } // namespace
+
+uint32_t LoadGuestPointerDword(EmitterState& state, uint32_t bda, bool coherent) {
+	if (state.guest_buffer_table == 0) {
+		auto pointer = state.builder.AllocateId();
+		if (coherent) {
+			const auto block = state.builder.DecoratedType(
+			    spv::OpTypeStruct, {{spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}},
+			                        {spv::OpMemberDecorate, {0, spv::DecorationCoherent}},
+			                        {spv::OpDecorate, {spv::DecorationBlock}}}, TypeU32(state));
+			state.builder.AddFunction(
+			    spv::OpConvertUToPtr, TypePointer(state, spv::StorageClassPhysicalStorageBuffer, block),
+			    pointer, bda);
+			const auto base = pointer;
+			pointer = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpAccessChain, TypePhysicalU32Pointer(state), pointer,
+			                          base, ConstantU32(state, 0));
+		} else {
+			state.builder.AddFunction(spv::OpConvertUToPtr, TypePhysicalU32Pointer(state), pointer,
+			                          bda);
+		}
+		const auto         value     = state.builder.AllocateId();
+		constexpr uint32_t alignment = sizeof(uint32_t);
+		state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, pointer,
+		                          spv::MemoryAccessAlignedMask |
+		                              (coherent ? spv::MemoryAccessVolatileMask : spv::MemoryAccessMaskNone),
+		                          alignment);
+		return value;
+	}
+	// The page table's entry: the descriptor slot of the buffer in the high half, the byte offset
+	// in it in the low half. A slot's raw view reads zeros past the end of its buffer.
+	const auto slot = Unary(state, spv::OpUConvert, TypeU32(state),
+	                        Binary(state, spv::OpShiftRightLogical, TypeU64(state), bda,
+	                               ConstantU32(state, 32)));
+	const auto offset = Unary(state, spv::OpUConvert, TypeU32(state), bda);
+	const auto index  = Binary(state, spv::OpShiftRightLogical, TypeU32(state), offset,
+	                           ConstantU32(state, 2));
+	// The lanes of a wave read through different slots, and the translator does not mark the
+	// table's index non-uniform (the SPIR-V decoration never reaches the DXIL): a waterfall loop
+	// makes the index uniform instead. Each pass takes the slot of the first lane still waiting
+	// (a wave-uniform value) and the lanes with that slot read through it.
+	const auto type_bool  = TypeBool(state);
+	const auto type_u32   = TypeU32(state);
+	const auto subgroup   = ConstantU32(state, spv::ScopeSubgroup);
+	const auto before     = state.current_label;
+	const auto header     = state.builder.AllocateId();
+	const auto body       = state.builder.AllocateId();
+	const auto active     = state.builder.AllocateId();
+	const auto do_load    = state.builder.AllocateId();
+	const auto matched    = state.builder.AllocateId();
+	const auto body_merge = state.builder.AllocateId();
+	const auto next       = state.builder.AllocateId();
+	const auto merge      = state.builder.AllocateId();
+	const auto pending    = state.builder.AllocateId(); // phi: the lane still waits
+	const auto result     = state.builder.AllocateId(); // phi: what the lane read
+	const auto pending_next = state.builder.AllocateId();
+	const auto result_next  = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpBranch, header);
+
+	EmitLabel(state, header);
+	state.builder.AddFunction(spv::OpPhi, type_bool, pending, ConstantBool(state, true), before,
+	                          pending_next, next);
+	state.builder.AddFunction(spv::OpPhi, type_u32, result, ConstantU32(state, 0), before,
+	                          result_next, next);
+	const auto any = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpGroupNonUniformAny, type_bool, any, subgroup, pending);
+	state.builder.AddFunction(spv::OpLoopMerge, merge, next, spv::LoopControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, any, body, merge);
+
+	EmitLabel(state, body);
+	state.builder.AddFunction(spv::OpSelectionMerge, body_merge, spv::SelectionControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, pending, active, body_merge);
+
+	EmitLabel(state, active);
+	const auto first = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpGroupNonUniformBroadcastFirst, type_u32, first, subgroup, slot);
+	const auto same = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpIEqual, type_bool, same, slot, first);
+	state.builder.AddFunction(spv::OpSelectionMerge, matched, spv::SelectionControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, same, do_load, matched);
+
+	EmitLabel(state, do_load);
+	const auto pointer = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state, 32),
+	                          pointer, state.guest_buffer_table, first, ConstantU32(state, 0), index);
+	const auto value = state.builder.AllocateId();
+	if (coherent) {
+		state.builder.AddFunction(spv::OpLoad, type_u32, value, pointer, spv::MemoryAccessVolatileMask);
+	} else {
+		state.builder.AddFunction(spv::OpLoad, type_u32, value, pointer);
+	}
+	state.builder.AddFunction(spv::OpBranch, matched);
+
+	EmitLabel(state, matched);
+	const auto read = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpPhi, type_u32, read, value, do_load, result, active);
+	const auto waiting = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLogicalNot, type_bool, waiting, same);
+	state.builder.AddFunction(spv::OpBranch, body_merge);
+
+	EmitLabel(state, body_merge);
+	state.builder.AddFunction(spv::OpPhi, type_u32, result_next, read, matched, result, body);
+	state.builder.AddFunction(spv::OpPhi, type_bool, pending_next, waiting, matched,
+	                          ConstantBool(state, false), body);
+	state.builder.AddFunction(spv::OpBranch, next);
+
+	EmitLabel(state, next);
+	state.builder.AddFunction(spv::OpBranch, header);
+
+	EmitLabel(state, merge);
+	return result;
+}
 
 uint32_t GetBdaPointer(EmitterState& state, uint32_t address) {
 	const auto result = state.builder.AllocateId();
