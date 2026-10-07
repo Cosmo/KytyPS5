@@ -14,6 +14,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/drawState.h"
+#include "graphics/host_gpu/frameDump.h"
 #include "graphics/host_gpu/gpuBackend.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
@@ -32,6 +33,7 @@
 
 #include <algorithm>
 #include <array>
+#include <fmt/format.h>
 #include <atomic>
 #include <bit>
 #include <cmath>
@@ -638,6 +640,19 @@ static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo
 	                  index_addr);
 }
 
+// The draw log of a frame dump (frameDump.h) notes a draw that is not made, and why.
+static void LogDrawSkip(const char* name, uint32_t count, uint32_t instances, const char* reason) {
+	if (FrameDump::LogActive()) {
+		FrameDump::LogDraw(fmt::format("{} count={} inst={} -> {}", name, count, instances, reason), true);
+	}
+}
+
+static void LogDrawConsumed(const char* name, uint32_t count) {
+	if (FrameDump::LogActive()) {
+		FrameDump::LogEvent(fmt::format("{} count={} -> not drawn: it is a color metadata operation, a depth/stencil copy or a color resolve", name, count));
+	}
+}
+
 // Vulkan offsets for a prepared draw, or nullopt when its indirect records need the CPU:
 // quad-list draws for counts, tessellation draws for the index/SGPR prolog and mesh draws without
 // room for the task payload. Indirect records carry their own offsets.
@@ -691,11 +706,13 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer)) {
+		LogDrawConsumed("DrawIndex", args.index_count);
 		ResetBindings();
 		return true;
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		LogDrawSkip("DrawIndex", args.index_count, args.instance_count, "the draw has no valid vertex shader");
 		return true;
 	}
 
@@ -723,6 +740,7 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
 	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
+		LogDrawSkip("DrawIndex", args.index_count, args.instance_count, "the primitive type is not supported");
 		return true;
 	}
 
@@ -752,6 +770,7 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 
 	const DrawCallInfo draw {true, args.index_count, args.instance_count};
 	if (!PrepareDrawRenderState(buffer, draw, state)) {
+		LogDrawSkip("DrawIndex", args.index_count, args.instance_count, "the vertex program cannot run on the host, or there is no render target");
 		ResetBindings();
 		return true;
 	}
@@ -782,11 +801,13 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer)) {
+		LogDrawConsumed("DrawIndexAuto", args.vertex_count);
 		ResetBindings();
 		return true;
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
+		LogDrawSkip("DrawIndexAuto", args.vertex_count, args.instance_count, "the draw has no valid vertex shader");
 		return true;
 	}
 
@@ -812,10 +833,12 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
 	                       .indirect_draw    = args.indirect.address != 0};
 	if (!GetDrawTopology(ucfg, state.topology)) {
+		LogDrawSkip("DrawIndexAuto", args.vertex_count, args.instance_count, "the primitive type is not supported");
 		ResetBindings();
 		return true;
 	}
 	if (!PrepareDrawRenderState(buffer, draw, state)) {
+		LogDrawSkip("DrawIndexAuto", args.vertex_count, args.instance_count, "the vertex program cannot run on the host, or there is no render target");
 		ResetBindings();
 		return true;
 	}
@@ -830,6 +853,7 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 			     state.ps_input_info.input_num, sh_ctx.GetPs().ps_regs.data_addr,
 			     sh_ctx.GetVs().es_regs.data_addr, sh_ctx.GetVs().gs_regs.data_addr);
 		}
+		LogDrawSkip("DrawIndexAuto", args.vertex_count, args.instance_count, "a rect list without vertex outputs for the pixel inputs");
 		ResetBindings();
 		return true;
 	}
