@@ -45,3 +45,6 @@
 [submodule "3rdparty/openal-soft"]
 	path = 3rdparty/openal-soft
 	url = https://github.com/kcat/openal-soft.git
+[submodule "3rdparty/D3D12MemoryAllocator"]
+	path = 3rdparty/D3D12MemoryAllocator
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator
