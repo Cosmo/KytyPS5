@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCacheFile.h"
 
 #include "common/common.h"
+#include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "kytyGitVersion.h"
@@ -47,7 +48,7 @@ PipelineCacheFile::PipelineCacheFile(std::string label, std::string_view suffix,
 		Log("disabled (unknown git revision)");
 		return;
 	}
-	if (builds == Builds::Same && git_hash.ends_with("-dirty")) {
+	if (builds == Builds::Same && git_hash.ends_with("-dirty") && !Config::PipelineCacheAnyBuild()) {
 		Log("disabled (dirty build)");
 		return;
 	}

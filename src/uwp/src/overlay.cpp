@@ -90,25 +90,34 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
           <RowDefinition Height="8" />
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
+          <RowDefinition Height="8" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
-        <TextBlock Grid.Row="0" Text="System" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="3" Text="Shaders" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="6" Text="Pipelines" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="0" Grid.Column="1" Text="CPU" />
-        <TextBlock Grid.Row="1" Grid.Column="1" Text="RAM" />
-        <TextBlock Grid.Row="3" Grid.Column="1" Text="Drawing" />
-        <TextBlock Grid.Row="4" Grid.Column="1" Text="Compute" />
-        <TextBlock Grid.Row="6" Grid.Column="1" Text="Built" />
-        <TextBlock Grid.Row="7" Grid.Column="1" Text="From cache" />
-        <TextBlock Grid.Row="8" Grid.Column="1" Text="In cache" />
-        <TextBlock x:Name="Cpu" Grid.Row="0" Grid.Column="2" />
-        <TextBlock x:Name="Memory" Grid.Row="1" Grid.Column="2" />
-        <TextBlock x:Name="DrawingShaders" Grid.Row="3" Grid.Column="2" />
-        <TextBlock x:Name="ComputeShaders" Grid.Row="4" Grid.Column="2" />
-        <TextBlock x:Name="Pipelines" Grid.Row="6" Grid.Column="2" />
-        <TextBlock x:Name="CachedPipelines" Grid.Row="7" Grid.Column="2" />
-        <TextBlock x:Name="SavedPipelines" Grid.Row="8" Grid.Column="2" />
+        <!-- Output: the picture the game hands over each frame; Render: the largest viewport it draws its scene into. -->
+        <TextBlock Grid.Row="0" Text="Resolution" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="3" Text="System" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="6" Text="Shaders" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="9" Text="Pipelines" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="0" Grid.Column="1" Text="Output" />
+        <TextBlock Grid.Row="1" Grid.Column="1" Text="Render" />
+        <TextBlock Grid.Row="3" Grid.Column="1" Text="CPU" />
+        <TextBlock Grid.Row="4" Grid.Column="1" Text="RAM" />
+        <TextBlock Grid.Row="6" Grid.Column="1" Text="Drawing" />
+        <TextBlock Grid.Row="7" Grid.Column="1" Text="Compute" />
+        <TextBlock Grid.Row="9" Grid.Column="1" Text="Built" />
+        <TextBlock Grid.Row="10" Grid.Column="1" Text="From cache" />
+        <TextBlock Grid.Row="11" Grid.Column="1" Text="In cache" />
+        <TextBlock x:Name="OutputResolution" Grid.Row="0" Grid.Column="2" Typography.NumeralAlignment="Tabular" />
+        <TextBlock x:Name="RenderResolution" Grid.Row="1" Grid.Column="2" Typography.NumeralAlignment="Tabular" />
+        <TextBlock x:Name="Cpu" Grid.Row="3" Grid.Column="2" />
+        <TextBlock x:Name="Memory" Grid.Row="4" Grid.Column="2" />
+        <TextBlock x:Name="DrawingShaders" Grid.Row="6" Grid.Column="2" />
+        <TextBlock x:Name="ComputeShaders" Grid.Row="7" Grid.Column="2" />
+        <TextBlock x:Name="Pipelines" Grid.Row="9" Grid.Column="2" />
+        <TextBlock x:Name="CachedPipelines" Grid.Row="10" Grid.Column="2" />
+        <TextBlock x:Name="SavedPipelines" Grid.Row="11" Grid.Column="2" />
       </Grid>
     </StackPanel>
   </Border>
@@ -272,6 +281,8 @@ struct GameOverlay::State {
 	xaml::Controls::Grid       graph {nullptr};
 	xaml::Shapes::Line         budget {nullptr};
 	xaml::Shapes::Polyline     frames {nullptr};
+	xaml::Controls::TextBlock  output_resolution {nullptr};
+	xaml::Controls::TextBlock  render_resolution {nullptr};
 	xaml::Controls::TextBlock  memory {nullptr};
 	xaml::Controls::TextBlock  cpu {nullptr};
 	xaml::Controls::TextBlock  drawing_shaders {nullptr};
@@ -322,6 +333,14 @@ void GameOverlay::State::Update() {
 		points.Append({static_cast<float>(x), static_cast<float>(y)});
 	}
 	frames.Points(points);
+
+	// Resolutions of the last frame: "-" before the first flip, and for render when the frame drew no scene (a menu).
+	const auto resolutions = CurrentFrameResolutions();
+	const auto size        = [](uint32_t width, uint32_t height) {
+		return width == 0 || height == 0 ? std::wstring(L"\u2013") : std::to_wstring(width) + L" \u00d7 " + std::to_wstring(height);
+	};
+	output_resolution.Text(size(resolutions.output_width, resolutions.output_height));
+	render_resolution.Text(size(resolutions.render_width, resolutions.render_height));
 
 	// Memory: on Xbox the limit is the app's budget; on a PC it's no real limit.
 	const uint64_t used  = winrt::Windows::System::MemoryManager::AppMemoryUsage();
@@ -414,6 +433,8 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.graph            = find(L"Graph").as<xaml::Controls::Grid>();
 	state.budget           = find(L"Budget").as<xaml::Shapes::Line>();
 	state.frames           = find(L"Frames").as<xaml::Shapes::Polyline>();
+	state.output_resolution = find(L"OutputResolution").as<xaml::Controls::TextBlock>();
+	state.render_resolution = find(L"RenderResolution").as<xaml::Controls::TextBlock>();
 	state.memory           = find(L"Memory").as<xaml::Controls::TextBlock>();
 	state.cpu              = find(L"Cpu").as<xaml::Controls::TextBlock>();
 	state.drawing_shaders  = find(L"DrawingShaders").as<xaml::Controls::TextBlock>();
