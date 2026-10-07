@@ -2,19 +2,6 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
-#include "gpu_tiler_shaders/gpu_tiler_demote_d16_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_depth_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_promote_d16_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_prt_3d_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_prt_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_render_target_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_standard256_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_standard4_3d_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_standard4_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_standard64_3d_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_standard64_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_color_transform_spv.h"
-#include "gpu_tiler_shaders/gpu_tiler_color_clear_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
@@ -31,13 +18,9 @@ namespace Libs::Graphics {
 TileManager::TileManager(GraphicContext& graphics, CommandScheduler& scheduler,
                          StreamBuffer& stream_buffer)
     : m_graphics(graphics), m_scheduler(scheduler), m_stream_buffer(stream_buffer) {
-	static_assert(FamilyCount == 9);
-	static_assert(sizeof(Mip) == 48);
-	static_assert(offsetof(TilingParams, mips) == 16);
-	static_assert(sizeof(TilingParams) == 784);
-	static_assert(sizeof(TilingParams) <= UINT16_MAX && PipelineCount <= UINT16_MAX);
+	static_assert(TileShaders::FamilyCount == 9);
+	static_assert(sizeof(TileShaders::TilingParams) <= UINT16_MAX && PipelineCount <= UINT16_MAX);
 	static_assert(sizeof(Tiling) == 16);
-	static_assert(sizeof(Conversion) == 32);
 	std::array<vk::DescriptorSetLayoutBinding, 3> bindings {};
 	for (uint32_t index = 0; index < 2; index++) {
 		bindings[index] = {index, vk::DescriptorType::eStorageBuffer, 1,
@@ -90,121 +73,13 @@ TileManager::Tiling TileManager::Prepare(bool tile, uint64_t tiled_capacity,
                                          uint64_t linear_capacity, const ImageInfo& info,
                                          uint32_t levels, uint64_t source_base,
                                          uint64_t target_base) {
-	levels = levels != 0 ? levels : info.resources.levels;
-	EXIT_IF(levels == 0 || levels > MaxMipLevels || levels > info.resources.levels ||
-	        tiled_capacity == 0 || linear_capacity == 0);
-	EXIT_NOT_IMPLEMENTED(tiled_capacity > UINT32_MAX || linear_capacity > UINT32_MAX);
-
-	const auto& block     = info.tiling.block;
-	const auto  transform = info.GetColorTransform();
-	EXIT_NOT_IMPLEMENTED(
-	    !info.IsTiled() || info.samples != 1 || Prospero::IsFmaskTextureFormat(info.guest_format) ||
-	    block.family >= TileBlockFamily::Count || !std::has_single_bit(block.bytes_per_element) ||
-	    block.bytes_per_element > 16 || block.block_width == 0 || block.block_height == 0 ||
-	    block.block_depth == 0 || block.block_size == 0 || info.tiling.texel_width == 0 ||
-	    info.tiling.texel_height == 0 || info.tiled_slice_stride == 0);
-	EXIT_IF((transform == ColorTransform::SwapBgra16 && block.bytes_per_element != 8u) ||
-	        (transform == ColorTransform::Reverse10_11_11 && block.bytes_per_element != 4u));
-	const auto checked_multiply = [](uint64_t left, uint64_t right, uint64_t& result) {
-		return (left == 0 || right <= UINT64_MAX / left) && (result = left * right, true);
-	};
-	const auto checked_add = [](uint64_t left, uint64_t right, uint64_t& result) {
-		return right <= UINT64_MAX - left && (result = left + right, true);
-	};
-	const auto valid_range = [](uint64_t offset, uint64_t size, uint64_t capacity) {
-		return size != 0 && offset <= capacity && size <= capacity - offset;
-	};
-
-	// ImageInfo owns the layout. Upload only the header and active mip records.
-	TilingParams params;
-	params.color_transform = static_cast<uint32_t>(transform);
-	for (uint32_t level = 0; level < levels; ++level) {
-		const auto& mip    = info.mip_layout[level];
-		const auto  extent = info.MipExtent(level);
-		const auto  width  = static_cast<uint32_t>(
-		    (uint64_t {extent.width} + info.tiling.texel_width - 1u) / info.tiling.texel_width);
-		const auto height = static_cast<uint32_t>(
-		    (uint64_t {extent.height} + info.tiling.texel_height - 1u) / info.tiling.texel_height);
-		const auto depth = extent.depth;
-		const bool tail  = level >= info.first_tail_level;
-		EXIT_NOT_IMPLEMENTED(width == 0 || height == 0 || depth == 0 || mip.linear_pitch < width ||
-		                     mip.linear_size == 0 || mip.size == 0 ||
-		                     (!tail && (mip.pitch < width || mip.height < height)) ||
-		                     (!info.IsVolume() && mip.size % depth != 0));
-
-		uint64_t pitch_bytes = 0;
-		EXIT_NOT_IMPLEMENTED(
-		    !checked_multiply(mip.linear_pitch, block.bytes_per_element, pitch_bytes) ||
-		    pitch_bytes > UINT32_MAX);
-		const uint64_t slice_bytes =
-		    info.linear_slice_stride != 0 ? info.linear_slice_stride : mip.linear_size;
-		uint64_t minimum_slice = 0;
-		uint64_t linear_used = 0;
-		uint64_t bytes         = 0;
-		uint64_t linear_span   = 0;
-		EXIT_NOT_IMPLEMENTED(!checked_multiply(pitch_bytes, height, minimum_slice) ||
-		                     (depth > 1 && slice_bytes < minimum_slice) ||
-		                     !checked_multiply(height - 1u, pitch_bytes, linear_used) ||
-		                     !checked_multiply(width, block.bytes_per_element, bytes) ||
-		                     !checked_add(linear_used, bytes, linear_used) ||
-		                     linear_used > mip.linear_size || slice_bytes > UINT32_MAX ||
-		                     !checked_multiply(depth - 1u, slice_bytes, linear_span) ||
-		                     !checked_add(linear_span, mip.linear_size, linear_span) ||
-		                     !valid_range(mip.linear_offset, linear_span, linear_capacity));
-
-		const uint64_t columns =
-		    (uint64_t {mip.pitch} + block.block_width - 1u) / block.block_width;
-		if (tail) {
-			EXIT_NOT_IMPLEMENTED(
-			    block.family == TileBlockFamily::Standard256B || mip.tail_x >= block.block_width ||
-			    width > block.block_width - mip.tail_x || mip.tail_y >= block.block_height ||
-			    height > block.block_height - mip.tail_y);
-		}
-		const uint64_t tiled_plane = info.IsVolume() ? mip.size : mip.size / depth;
-		const uint64_t tiled_slice = info.tiled_slice_stride;
-		const uint64_t slices     = (uint64_t {depth} + block.block_depth - 1u) / block.block_depth;
-		uint64_t       tiled_span = 0;
-		EXIT_NOT_IMPLEMENTED(columns > UINT32_MAX || tiled_slice > UINT32_MAX ||
-		                     (slices > 1 && tiled_slice < tiled_plane) ||
-		                     !checked_multiply(slices - 1u, tiled_slice, tiled_span) ||
-		                     !checked_add(tiled_span, tiled_plane, tiled_span) ||
-		                     !valid_range(mip.offset, tiled_span, tiled_capacity));
-
-		const uint32_t alignment = std::min(block.bytes_per_element, 4u);
-		EXIT_NOT_IMPLEMENTED(
-		    ((mip.linear_offset | mip.offset | pitch_bytes | slice_bytes | tiled_slice) &
-		     (alignment - 1u)) != 0);
-		uint64_t src = 0, dst = 0, texels = 0;
-		EXIT_NOT_IMPLEMENTED(
-		    !checked_add(source_base, tile ? mip.linear_offset : mip.offset, src) ||
-		    !checked_add(target_base, tile ? mip.offset : mip.linear_offset, dst) ||
-		    src > UINT32_MAX || dst > UINT32_MAX || !checked_multiply(width, height, texels) ||
-		    !checked_multiply(texels, depth, texels) || texels > UINT32_MAX - params.num_texels);
-		params.mips[level] = {static_cast<uint32_t>(src),
-		                      static_cast<uint32_t>(dst),
-		                      width,
-		                      height,
-		                      static_cast<uint32_t>(pitch_bytes),
-		                      static_cast<uint32_t>(slice_bytes),
-		                      static_cast<uint32_t>(tiled_slice),
-		                      static_cast<uint32_t>(columns),
-		                      mip.surface_z,
-		                      tail ? mip.tail_x : 0u,
-		                      tail ? mip.tail_y : 0u,
-		                      static_cast<uint32_t>(texels)};
-		params.num_texels += static_cast<uint32_t>(texels);
-	}
-
+	const auto tiling = TileShaders::Prepare(tile, tiled_capacity, linear_capacity, info, levels,
+	                                         source_base, target_base);
 	const auto& limits = m_graphics.GetPhysicalDeviceProperties().limits;
-	const auto  params_size =
-	    static_cast<uint16_t>(offsetof(TilingParams, mips) + levels * sizeof(Mip));
-	const auto offset = m_stream_buffer.Copy(
-	    &params, params_size,
-	    std::max<uint64_t>(limits.minUniformBufferOffsetAlignment, alignof(TilingParams)));
-	const auto slot =
-	    ((tile ? FamilyCount : 0u) + static_cast<uint32_t>(block.family)) * BytesPerElementCount +
-	    std::countr_zero(block.bytes_per_element);
-	return {offset, params.num_texels, params_size, static_cast<uint16_t>(slot)};
+	const auto  offset = m_stream_buffer.Copy(
+	    &tiling.params, tiling.params_size,
+	    std::max<uint64_t>(limits.minUniformBufferOffsetAlignment, alignof(TileShaders::TilingParams)));
+	return {offset, tiling.params.num_texels, tiling.params_size, tiling.pipeline_slot};
 }
 
 vk::Pipeline TileManager::GetPipeline(uint32_t slot) {
@@ -212,17 +87,11 @@ vk::Pipeline TileManager::GetPipeline(uint32_t slot) {
 	if (m_pipelines[slot] != nullptr) {
 		return m_pipelines[slot];
 	}
-	static constexpr std::array<std::span<const uint32_t>, FamilyCount> shaders {
-	    GPU_TILER_STANDARD256_SPV, GPU_TILER_STANDARD4_SPV,     GPU_TILER_STANDARD4_3D_SPV,
-	    GPU_TILER_STANDARD64_SPV,  GPU_TILER_STANDARD64_3D_SPV, GPU_TILER_PRT_SPV,
-	    GPU_TILER_PRT_3D_SPV,      GPU_TILER_RENDER_TARGET_SPV, GPU_TILER_DEPTH_SPV};
-	const uint32_t                   element_index   = slot % BytesPerElementCount;
-	const uint32_t                   direction_index = slot / (FamilyCount * BytesPerElementCount);
-	const uint32_t                   family_index    = (slot / BytesPerElementCount) % FamilyCount;
-	const uint32_t                   values[] {1u << element_index, direction_index};
+	const auto                       shader = TileShaders::PipelineShader(slot);
+	const uint32_t                   values[] {shader.element_bytes, shader.tile};
 	const vk::SpecializationMapEntry entries[] {{0, 0, 4}, {1, 4, 4}};
 	const vk::SpecializationInfo     specialization {2, entries, sizeof(values), values};
-	m_pipelines[slot] = CreatePipeline(shaders[family_index], &specialization);
+	m_pipelines[slot] = CreatePipeline(shader.spirv, &specialization);
 	return m_pipelines[slot];
 }
 
@@ -425,10 +294,10 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 	std::span<const uint32_t> code;
 	if (direction == D16Direction::Promote) {
 		pipeline_pointer = d32 ? &m_d16_to_d32 : &m_d16_to_d24;
-		code             = GPU_TILER_PROMOTE_D16_SPV;
+		code             = TileShaders::PromoteD16();
 	} else {
 		pipeline_pointer = d32 ? &m_d32_to_d16 : &m_d24_to_d16;
-		code             = GPU_TILER_DEMOTE_D16_SPV;
+		code             = TileShaders::DemoteD16();
 	}
 	auto& pipeline = *pipeline_pointer;
 	if (pipeline == nullptr) {
@@ -568,7 +437,7 @@ void TileManager::TransformColor(Result input, Result output, ColorTransform tra
 	        output.size < input.size);
 	const auto pixels = static_cast<uint32_t>(input.size / element_bytes);
 	if (m_color_transform == nullptr) {
-		m_color_transform = CreatePipeline(GPU_TILER_COLOR_TRANSFORM_SPV, nullptr);
+		m_color_transform = CreatePipeline(TileShaders::ColorTransformShader(), nullptr);
 	}
 	const auto input_binding  = BindStorage(input, input.size);
 	const auto output_binding = BindStorage(output, input.size);
@@ -642,7 +511,7 @@ vk::Buffer TileManager::CheckColorClear(Result metadata, uint32_t slices, uint32
 	EXIT_IF(slices == 0 || slices > max_slices || metadata.size % (4ull * slices) != 0 ||
 	        metadata.size / 4 > UINT32_MAX);
 	if (m_color_clear == nullptr) {
-		m_color_clear      = CreatePipeline(GPU_TILER_COLOR_CLEAR_SPV, nullptr);
+		m_color_clear      = CreatePipeline(TileShaders::ColorClearShader(), nullptr);
 		m_clear_predicates = std::make_unique<Buffer>(
 		    m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0,
 		    vk::BufferUsageFlagBits::eStorageBuffer |
