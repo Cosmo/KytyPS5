@@ -1,6 +1,7 @@
 #include "controlsPage.h"
 
 #include "input.h"
+#include "settings.h"
 
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
@@ -201,6 +202,10 @@ xaml::Controls::StackPanel Section(const wchar_t* title, const std::vector<Mappi
 	return section;
 }
 
+std::wstring Setting(const wchar_t* what, bool on) {
+	return std::wstring(what) + (on ? L"  ·  on" : L"  ·  off (Settings)");
+}
+
 struct Page {
 	std::function<void()> back;
 	bool                  left = false;
@@ -221,9 +226,10 @@ xaml::UIElement CreateControlsPage(std::function<void()> back) {
 	auto page  = std::make_shared<Page>();
 	page->back = std::move(back);
 	page->root = xaml::Markup::XamlReader::Load(PageMarkup).as<xaml::Controls::Grid>();
-	const auto& root = page->root;
+	const auto& root     = page->root;
+	const auto  settings = LoadSettings();
 
-	// The mapping of input.cpp (BUTTONS, MapReading, the chords).
+	// The mapping of input.cpp (BUTTONS, MapReading, the chords) and the settings page's controller options.
 	const auto left_column  = root.FindName(L"LeftColumn").as<xaml::Controls::StackPanel>();
 	const auto right_column = root.FindName(L"RightColumn").as<xaml::Controls::StackPanel>();
 	using B = XboxButton;
@@ -246,6 +252,11 @@ xaml::UIElement CreateControlsPage(std::function<void()> back) {
 	                                           {{Button(B::View), Word(L"+"), Button(B::RightStick)},
 	                                            L"Tilts the controller for the motion sensors: up and down tip it, left and right lean it"},
 	                                           {{Button(B::View), Word(L"+"), Button(B::RightStick), Word(L"pressed in")}, L"Left and right turn the controller as it lies"},
+	                                       }));
+	right_column.Children().Append(Section(L"Back to the controller",
+	                                       {
+	                                           {{Name(L"Rumble motors")}, Setting(L"Rumble; haptic feedback as soft bumps on the small motor", settings.haptic_rumble)},
+	                                           {{Name(L"Impulse Triggers")}, Setting(L"Adaptive triggers", settings.impulse_triggers)},
 	                                       }));
 	right_column.Children().Append(Section(L"KytyPS5",
 	                                       {
