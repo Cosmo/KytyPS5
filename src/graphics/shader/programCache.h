@@ -83,15 +83,19 @@ public:
 		[[nodiscard]] uint32_t VertexStageCount() const { return vertex[1] ? 3u : 1u; }
 	};
 
-	GraphicsPrograms
-	GetGraphicsPrograms(const HW::VertexShaderInfo& vertex_regs,
-	                    const HW::PixelShaderInfo& pixel_regs, const HW::ShaderRegisters& sh,
-	                    const HW::Context& context, const HW::UserConfig& user_config,
-	                    std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
-	                    bool pixel_active, std::array<ShaderVertexInputInfo, 3>& vertex_info,
-	                    ShaderPixelInputInfo& pixel_info);
+	// Translates the bound shaders into the stages' input infos; also gives whether the pixel
+	// program runs and the color targets it writes (mrt_mask).
+	GraphicsPrograms GetGraphicsPrograms(const HW::Shader& shaders, const HW::Context& context,
+	                                     const HW::UserConfig&                 user_config,
+	                                     std::array<ShaderVertexInputInfo, 3>& vertex_info,
+	                                     ShaderPixelInputInfo& pixel_info, bool& pixel_active,
+	                                     uint32_t& mrt_mask);
+	// The programs compiled so far by ShaderType, as the log's "Shaders:" line counts them.
+	using ProgramCounts = std::array<size_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1>;
+	[[nodiscard]] ProgramCounts GetProgramCounts() const;
+
+	// An empty program skips the dispatch.
 	CompiledProgram GetComputeProgram(const HW::ComputeShaderInfo& regs,
-	                                  const HW::ShaderRegisters&   sh,
 	                                  ShaderComputeInputInfo&      input_info);
 
 private:
