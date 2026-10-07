@@ -18,7 +18,9 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace Kyty::Uwp {
 
@@ -119,6 +121,36 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
                  Text="KytyPS5 looks for games (folders with eboot.bin, and .zar archives) in its own Games folder and in these folders. Folders must give apps read access; the library shows how." />
       <StackPanel x:Name="Folders" Spacing="8" />
       <Button x:Name="AddFolder" Content="Add folder" />
+
+      <TextBlock Text="Memory and quality" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,0" />
+      <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Applies to the next game you start. Turning a memory option off can crash games that need the memory." />
+
+      <ComboBox x:Name="MemorySaver" Header="Game memory paging" MinWidth="280" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Moves game memory that isn't in use to a file and loads it back when needed. Automatic turns on when the device has limited memory." />
+
+      <ComboBox x:Name="TextureQuality" Header="Texture detail" MinWidth="280" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Big textures are loaded at lower resolution to save GPU memory; surfaces seen up close look blurrier." />
+
+      <ComboBox x:Name="TextureFrom" Header="Textures count as big from" MinWidth="280" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="The larger side of a texture, in pixels. Smaller textures stay at full resolution." />
+
+      <ToggleSwitch x:Name="GpuSavings" Header="Compact GPU memory allocation" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Allocates GPU memory in smaller pieces: about 300 MB less used, no visible difference." />
+
+      <ToggleSwitch x:Name="VideoThreads" Header="Multi-threaded video decoding" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Decodes videos on all CPU cores." />
 
       <TextBlock Text="Developer" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,0" />
       <ToggleSwitch x:Name="DebugLayer" Header="Graphics debug layer (slower; reports graphics errors in the log)" />
@@ -322,8 +354,73 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		}
 	});
 
+	// Game memory paging: Automatic is "not set" (on where the app's memory limit is small), the others are the cap in MB.
+	auto memory_saver = page.FindName(L"MemorySaver").as<xaml::Controls::ComboBox>();
+	{
+		std::vector<std::pair<uint32_t, std::wstring>> choices = {{0xFFFFFFFFu, L"Automatic"},         {0, L"Off (all game memory stays in RAM)"},
+		                                                          {1500, L"Up to 1500 MB in RAM"},  {2000, L"Up to 2000 MB in RAM"},
+		                                                          {3000, L"Up to 3000 MB in RAM"},  {4000, L"Up to 4000 MB in RAM"},
+		                                                          {5120, L"Up to 5120 MB in RAM"}};
+		if (std::none_of(choices.begin(), choices.end(), [&](const auto& choice) { return choice.first == settings.guest_ram_budget_mb; })) {
+			choices.emplace_back(settings.guest_ram_budget_mb, L"Up to " + std::to_wstring(settings.guest_ram_budget_mb) + L" MB in RAM (from the settings file)");
+		}
+		for (size_t index = 0; index < choices.size(); index++) {
+			memory_saver.Items().Append(winrt::box_value(winrt::hstring(choices[index].second)));
+			if (choices[index].first == settings.guest_ram_budget_mb) {
+				memory_saver.SelectedIndex(static_cast<int32_t>(index));
+			}
+		}
+		memory_saver.SelectionChanged([state, memory_saver, choices, save](auto const&, auto const&) {
+			if (const auto index = memory_saver.SelectedIndex(); index >= 0 && static_cast<size_t>(index) < choices.size()) {
+				state->settings.guest_ram_budget_mb = choices[static_cast<size_t>(index)].first;
+				save();
+			}
+		});
+	}
+	auto texture_quality = page.FindName(L"TextureQuality").as<xaml::Controls::ComboBox>();
+	for (const auto* name: {L"Full", L"Half resolution", L"Quarter resolution", L"Eighth resolution"}) {
+		texture_quality.Items().Append(winrt::box_value(name));
+	}
+	texture_quality.SelectedIndex(static_cast<int32_t>(std::min<uint32_t>(settings.texture_mip_skip, 3)));
+	texture_quality.SelectionChanged([state, texture_quality, save](auto const&, auto const&) {
+		if (const auto index = texture_quality.SelectedIndex(); index >= 0) {
+			state->settings.texture_mip_skip = static_cast<uint32_t>(index);
+			save();
+		}
+	});
+	auto texture_from = page.FindName(L"TextureFrom").as<xaml::Controls::ComboBox>();
+	constexpr std::array<uint32_t, 3> TEXTURE_SIZES = {1024, 2048, 4096};
+	for (size_t index = 0; index < TEXTURE_SIZES.size(); index++) {
+		texture_from.Items().Append(winrt::box_value(winrt::hstring(std::to_wstring(TEXTURE_SIZES[index]) + L" px")));
+		if (TEXTURE_SIZES[index] == settings.texture_mip_skip_min_size) {
+			texture_from.SelectedIndex(static_cast<int32_t>(index));
+		}
+	}
+	if (texture_from.SelectedIndex() < 0) {
+		texture_from.SelectedIndex(1);
+	}
+	texture_from.SelectionChanged([state, texture_from, TEXTURE_SIZES, save](auto const&, auto const&) {
+		if (const auto index = texture_from.SelectedIndex(); index >= 0 && static_cast<size_t>(index) < TEXTURE_SIZES.size()) {
+			state->settings.texture_mip_skip_min_size = TEXTURE_SIZES[static_cast<size_t>(index)];
+			save();
+		}
+	});
+	auto gpu_savings = page.FindName(L"GpuSavings").as<xaml::Controls::ToggleSwitch>();
+	gpu_savings.IsOn(settings.gpu_memory_savings);
+	gpu_savings.Toggled([state, gpu_savings, save](auto const&, auto const&) {
+		state->settings.gpu_memory_savings = gpu_savings.IsOn();
+		save();
+	});
+	auto video_threads = page.FindName(L"VideoThreads").as<xaml::Controls::ToggleSwitch>();
+	video_threads.IsOn(settings.video_decode_threads);
+	video_threads.Toggled([state, video_threads, save](auto const&, auto const&) {
+		state->settings.video_decode_threads = video_threads.IsOn();
+		save();
+	});
+
 	ListFolders(state);
-	page.FindName(L"AddFolder").as<xaml::Controls::Button>().Click(
+	page.FindName(L"AddFolder")
+.as<xaml::Controls::Button>().Click(
 	    [state](auto const&, auto const&) { AddFolder(state); });
 
 	auto debug_layer = page.FindName(L"DebugLayer").as<xaml::Controls::ToggleSwitch>();

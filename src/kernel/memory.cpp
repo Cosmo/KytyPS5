@@ -184,6 +184,8 @@ static callback_func_t g_test_before_backing_map                   = nullptr;
 static callback_func_t g_test_backing_read                         = nullptr;
 #endif
 
+static std::string GuestPrivateMemoryReport(); // (defined below, once the virtual ranges are)
+
 #include "memoryAddressSpace.inc"
 
 enum class VirtualRangeType {
@@ -657,6 +659,33 @@ private:
 		return nullptr;
 	}
 
+public:
+	// Experiment: how much private committed memory (stacks, program code, runtime) the guest holds, and its biggest ranges. This memory is committed whole,
+	// whether it is touched or not, and the pager does not see it.
+	std::string DescribePrivate() {
+		Common::LockGuard lock(m_mutex);
+		uint64_t          total[3] = {}, count[3] = {};
+		std::vector<const Range*> biggest;
+		for (const auto& r: m_ranges) {
+			const int k = r.type == VirtualRangeType::Stack ? 0 : r.type == VirtualRangeType::Code ? 1 : r.type == VirtualRangeType::Runtime ? 2 : -1;
+			if (k < 0) {
+				continue;
+			}
+			total[k] += r.size;
+			count[k]++;
+			biggest.push_back(&r);
+		}
+		std::sort(biggest.begin(), biggest.end(), [](const Range* a, const Range* b) { return a->size > b->size; });
+		std::string top;
+		for (size_t i = 0; i < std::min<size_t>(8, biggest.size()); i++) {
+			top += fmt::format(" [{} MB {} '{}']", biggest[i]->size >> 20u, biggest[i]->type == VirtualRangeType::Stack ? "stack" : biggest[i]->type == VirtualRangeType::Code ? "code" : "runtime",
+			                   biggest[i]->name);
+		}
+		return fmt::format("guest private memory: stacks {} MB in {} ranges, code {} MB in {}, runtime {} MB in {}. Biggest:{}\n", total[0] >> 20u, count[0], total[1] >> 20u, count[1],
+		                   total[2] >> 20u, count[2], top);
+	}
+
+private:
 	std::vector<Range> m_ranges;
 	Common::Mutex      m_mutex;
 };
@@ -3885,6 +3914,10 @@ static uint64_t AllocateGuestRuntimeMemory(uint64_t search_addr, uint64_t size,
 	}
 	MapGpuRange(vaddr, mapped_size);
 	return vaddr;
+}
+
+static std::string GuestPrivateMemoryReport() {
+	return g_virtual_ranges != nullptr ? g_virtual_ranges->DescribePrivate() : std::string {};
 }
 
 uint64_t AllocateProgramMemory(uint64_t search_addr, uint64_t size, VirtualMemory::Mode mode,
