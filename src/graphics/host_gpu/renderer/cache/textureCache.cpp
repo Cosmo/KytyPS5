@@ -18,9 +18,12 @@
 #include <cinttypes>
 #include <cstring>
 #include <limits>
+#include <fstream>
 #include <mutex>
 #include <span>
 #include <tuple>
+#include <unordered_set>
+#include "graphics/host_gpu/frameDump.h"
 #include <vulkan/vulkan_format_traits.hpp>
 
 namespace Libs::Graphics {
@@ -2008,5 +2011,194 @@ void TextureCache::ProcessDownloadImages() {
 	}
 	m_download_images.clear();
 }
+
+#if defined(KYTY_GPU_BACKEND_D3D12)
+void TextureCache::LogMemoryBreakdown() {
+	std::scoped_lock lock {m_lock};
+	struct Total {
+		uint64_t count = 0, bytes = 0;
+		void     Add(uint64_t b) {
+			count++;
+			bytes += b;
+		}
+		[[nodiscard]] std::string Text() const { return fmt::format("{} MB in {}", bytes >> 20u, count); }
+	};
+	// Images that no draw used for more GC runs than these (the garbage collector looks at 16, 80 and 160).
+	std::unordered_set<ImageId> idle[3];
+	constexpr uint64_t          ages[3] = {16, 80, 160};
+	for (int i = 0; i < 3; i++) {
+		if (m_gc_tick > ages[i]) {
+			m_lru_cache.ForEachItemBelow(m_gc_tick - ages[i], [&](ImageId id) { idle[i].insert(id); });
+		}
+	}
+	Total                 all, by_use[5], gpu_modified, tiled, idle_total[3], idle_clean[3];
+	// sampled textures by size and mip chain (what dropping the top mips would save), and by block compression
+	Total tex_size[2][4], tex_block, tex_plain;
+	constexpr const char* use_names[5] = {"texture", "color target", "depth", "storage", "video out"};
+	struct Item {
+		uint64_t    bytes;
+		std::string text;
+	};
+	std::vector<Item> biggest;
+	m_slot_images.ForEach([&](ImageId id, Image& image) {
+		const uint64_t bytes = image.GpuBytes();
+		if (bytes == 0) {
+			return;
+		}
+		const int use = image.usage.depth_target ? 2 : image.usage.render_target ? 1 : image.usage.video_out ? 4 : image.usage.storage ? 3 : 0;
+		all.Add(bytes);
+		by_use[use].Add(bytes);
+		if (use == 0) {
+			const uint32_t dim = std::max(image.info.extent.width, image.info.extent.height);
+			tex_size[image.info.resources.levels >= 5 ? 1 : 0][dim >= 4096 ? 3 : dim >= 2048 ? 2 : dim >= 1024 ? 1 : 0].Add(bytes);
+			(image.info.IsBlock() ? tex_block : tex_plain).Add(bytes);
+		}
+		if (image.IsGpuModified()) {
+			gpu_modified.Add(bytes);
+		}
+		if (image.info.IsTiled()) {
+			tiled.Add(bytes);
+		}
+		int age = 0;
+		for (int i = 0; i < 3; i++) {
+			if (idle[i].contains(id)) {
+				idle_total[i].Add(bytes);
+				if (!image.IsGpuModified()) {
+					idle_clean[i].Add(bytes);
+				}
+				age = i + 1;
+			}
+		}
+		biggest.push_back({bytes, fmt::format("{}x{}x{} {} L{} M{} S{} {}{}{}{}{}", image.info.extent.width, image.info.extent.height, image.info.extent.depth,
+		                                      vk::to_string(image.info.pixel_format), image.info.resources.layers, image.info.resources.levels,
+		                                      image.info.samples, use_names[use], image.IsGpuModified() ? " gpu-modified" : "",
+		                                      image.info.IsTiled() ? " tiled" : "", age == 0 ? "" : age == 1 ? " idle>16" : age == 2 ? " idle>80" : " idle>160",
+		                                      image.binding.is_bound ? " bound" : "")});
+	});
+	std::sort(biggest.begin(), biggest.end(), [](const Item& a, const Item& b) { return a.bytes > b.bytes; });
+	std::string top;
+	for (size_t i = 0; i < std::min<size_t>(10, biggest.size()); i++) {
+		top += fmt::format(" [{} MB {}]", biggest[i].bytes >> 20u, biggest[i].text);
+	}
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "GPU images: {} images ({} total). By use: texture {}, color target {}, depth {}, storage {}, video out {}. GPU-modified {}, tiled {}. "
+	    "Idle for more than 16 GC runs {} (not GPU-modified {}), 80 runs {} ({}), 160 runs {} ({}). Biggest:{}\n",
+	    all.count, all.Text(), by_use[0].Text(), by_use[1].Text(), by_use[2].Text(), by_use[3].Text(), by_use[4].Text(), gpu_modified.Text(), tiled.Text(),
+	    idle_total[0].Text(), idle_clean[0].Text(), idle_total[1].Text(), idle_clean[1].Text(), idle_total[2].Text(), idle_clean[2].Text(), top));
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "GPU textures: block-compressed {}, other {}. Single level (or fewer than 5): <1024 {}, 1024 {}, 2048 {}, >=4096 {}. With 5 or more levels: <1024 {}, 1024 {}, 2048 {}, >=4096 {}\n",
+	    tex_block.Text(), tex_plain.Text(), tex_size[0][0].Text(), tex_size[0][1].Text(), tex_size[0][2].Text(), tex_size[0][3].Text(), tex_size[1][0].Text(), tex_size[1][1].Text(),
+	    tex_size[1][2].Text(), tex_size[1][3].Text()));
+}
+std::string TextureCache::DumpRenderTargets(const std::filesystem::path& folder) {
+	using FrameDump::PixelKind;
+	std::vector<ImageId> ids;
+	{
+		std::scoped_lock lock {m_lock};
+		m_slot_images.ForEach([&](ImageId id, Image& image) {
+			if ((image.usage.render_target || image.usage.video_out || FrameDump::IsWrittenImage(image.info.data.address)) && !image.usage.depth_target && image.GpuBytes() != 0) {
+				ids.push_back(id);
+			}
+		});
+	}
+	std::error_code error;
+	std::filesystem::create_directories(folder, error);
+	std::ofstream index(folder / "index.txt", std::ios::trunc);
+	if (error || !index) {
+		return "Frame dump failed: the folder could not be made";
+	}
+	const auto kind_of = [](vk::Format format, bool& srgb) {
+		srgb = false;
+		switch (format) {
+			case vk::Format::eR8G8B8A8Unorm: return PixelKind::Rgba8;
+			case vk::Format::eR8G8B8A8Srgb: srgb = true; return PixelKind::Rgba8;
+			case vk::Format::eB8G8R8A8Unorm: return PixelKind::Bgra8;
+			case vk::Format::eB8G8R8A8Srgb: srgb = true; return PixelKind::Bgra8;
+			case vk::Format::eR8Unorm: return PixelKind::R8;
+			case vk::Format::eR8G8Unorm: return PixelKind::Rg8;
+			case vk::Format::eR16G16B16A16Unorm: return PixelKind::Rgba16Unorm;
+			case vk::Format::eR16G16B16A16Sfloat: return PixelKind::Rgba16Float;
+			case vk::Format::eR16G16Sfloat: return PixelKind::Rg16Float;
+			case vk::Format::eR16Sfloat: return PixelKind::R16Float;
+			case vk::Format::eR32Sfloat: return PixelKind::R32Float;
+			case vk::Format::eR32G32Sfloat: return PixelKind::Rg32Float;
+			case vk::Format::eR32G32B32A32Sfloat: return PixelKind::Rgba32Float;
+			case vk::Format::eB10G11R11UfloatPack32: return PixelKind::R11G11B10Float;
+			case vk::Format::eA2B10G10R10UnormPack32: return PixelKind::A2B10G10R10;
+			default: return PixelKind::Unsupported;
+		}
+	};
+	uint32_t saved = 0, skipped = 0;
+	for (const auto id: ids) {
+		auto owner = m_slot_images.try_get(id);
+		if (owner == nullptr) {
+			continue;
+		}
+		auto&      image = *owner;
+		bool       srgb  = false;
+		const auto kind  = kind_of(image.backing.format, srgb);
+		const auto text  = fmt::format("{:02} guest 0x{:x} {}x{} {} layers {} {}{}", saved + skipped, image.info.data.address, image.info.extent.width, image.info.extent.height,
+		                              vk::to_string(image.backing.format), image.info.resources.layers, image.IsGpuModified() ? "gpu-modified" : "not gpu-modified",
+		                              image.usage.video_out ? " video-out" : "");
+		std::vector<uint8_t> data;
+		uint32_t             width = 0, height = 0, row_bytes = 0;
+		if (kind == PixelKind::Unsupported || !image.ReadbackColor(data, width, height, row_bytes)) {
+			index << text << ": not saved (" << (kind == PixelKind::Unsupported ? "format" : "read back") << ")\n";
+			++skipped;
+			continue;
+		}
+		FrameDump::Decoded decoded;
+		if (!FrameDump::Decode(kind, data.data(), width, height, row_bytes, srgb, decoded)) {
+			index << text << ": not saved (decode)\n";
+			++skipped;
+			continue;
+		}
+		const auto name = fmt::format("{:02}_{}x{}_{}.png", saved + skipped, width, height, vk::to_string(image.backing.format));
+		if (!FrameDump::WritePng(folder / name, decoded.width, decoded.height, decoded.rgba.data())) {
+			index << text << ": not saved (file)\n";
+			++skipped;
+			continue;
+		}
+		index << name << "  " << text << "  " << decoded.stats << "\n";
+		++saved;
+	}
+	return fmt::format("Frame dump saved: {} images (not saved: {}) in {}", saved, skipped, folder.string());
+}
+std::string TextureCache::SnapshotStats(ImageId id) {
+	using FrameDump::PixelKind;
+	auto owner = m_slot_images.try_get(id);
+	if (owner == nullptr) {
+		return {};
+	}
+	auto&                image = *owner;
+	PixelKind            kind  = PixelKind::Unsupported;
+	switch (image.backing.format) {
+		case vk::Format::eR16G16B16A16Sfloat: kind = PixelKind::Rgba16Float; break;
+		case vk::Format::eB10G11R11UfloatPack32: kind = PixelKind::R11G11B10Float; break;
+		case vk::Format::eR16G16Sfloat: kind = PixelKind::Rg16Float; break;
+		case vk::Format::eR32G32B32A32Sfloat: kind = PixelKind::Rgba32Float; break;
+		default: return {};
+	}
+	std::vector<uint8_t> data;
+	uint32_t             width = 0, height = 0, row_bytes = 0;
+	if (!image.ReadbackColor(data, width, height, row_bytes)) {
+		return {};
+	}
+	FrameDump::Decoded decoded;
+	if (!FrameDump::Decode(kind, data.data(), width, height, row_bytes, false, decoded, 4)) {
+		return {};
+	}
+	return decoded.stats;
+}
+#else
+void TextureCache::LogMemoryBreakdown() {}
+std::string TextureCache::DumpRenderTargets(const std::filesystem::path&) {
+	return {};
+}
+std::string TextureCache::SnapshotStats(ImageId) {
+	return {};
+}
+#endif
+
 
 } // namespace Libs::Graphics

@@ -10,8 +10,10 @@
 #include "gameSource.h"
 #include "input.h"
 #include "graphics/host_gpu/d3d12/selfTest.h"
+#include "graphics/host_gpu/frameDump.h"
 #include "kernel/memory.h"
 #include "log.h"
+#include "padHost.h"
 #include "settings.h"
 
 #include <windows.h>
@@ -29,7 +31,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <chrono>
 #include <future>
+#include <thread>
 
 #include <io.h>
 
@@ -130,6 +134,8 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 			config.shader_override_folder = LocalStateFolder() / std::filesystem::path(winrt::to_hstring(settings.shader_override).c_str());
 		}
 		config.gpu_hang_exit_seconds       = settings.gpu_hang_exit_seconds;
+		config.frame_dump_folder           = LocalStateFolder() / L"_FrameDump";
+		config.frame_dump_snapshots        = settings.frame_dump_snapshots != 0;
 		config.mesh_compute_forced         = settings.mesh_compute;
 		config.guest_ram_budget_mb         = settings.guest_ram_budget_mb;
 		config.guest_ram_pager_mode        = settings.guest_ram_pager_mode;
@@ -142,6 +148,13 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.app_memory_usage            = [] { return static_cast<uint64_t>(winrt::Windows::System::MemoryManager::AppMemoryUsage()); };
 		config.app_memory_limit_bytes      = settings.app_memory_limit_mb != 0 ? static_cast<uint64_t>(settings.app_memory_limit_mb) << 20u
 		                                                                       : static_cast<uint64_t>(winrt::Windows::System::MemoryManager::AppMemoryUsageLimit());
+		Pad::StartAutoPress(settings.auto_press_ms);
+		if (settings.frame_dump_after_s != 0) {
+			std::thread([seconds = settings.frame_dump_after_s] {
+				std::this_thread::sleep_for(std::chrono::seconds(seconds));
+				Libs::Graphics::FrameDump::Request();
+			}).detach();
+		}
 		Emulator::Run(options);
 
 		Log("emulator stopped\n");
