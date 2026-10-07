@@ -1,6 +1,8 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include "graphics/host_gpu/gpuBackend.h"
+#include "graphics/host_gpu/renderer/cache/bdaLayout.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 
 #include <algorithm>
@@ -1375,12 +1377,62 @@ void DefineGetBdaPointer(EmitterState& state) {
 	const auto page64        = Binary(state, spv::OpShiftRightLogical, type, packed,
 	                                  ConstantU32(state, BufferCache::CACHING_PAGEBITS));
 	const auto page          = Unary(state, spv::OpUConvert, TypeU32(state), page64);
+	auto       index         = page;
+	if (GetHostShaderFeatures().bda_two_level) {
+		// Two levels (BdaLayout): the directory names the slot of the page's block. Pages past the
+		// guest address space read the zero slot, as they read zeros past the end of a flat table.
+		const auto block     = Binary(state, spv::OpShiftRightLogical, TypeU32(state), page,
+		                              ConstantU32(state, BdaLayout::BLOCK_BITS));
+		const auto in_range  = Binary(state, spv::OpULessThan, TypeBool(state), block,
+		                              ConstantU32(state, static_cast<uint32_t>(BdaLayout::BLOCK_COUNT)));
+		const auto directory = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state, 64),
+		                          directory, state.bda_pagetable_variable, ConstantU32(state, 0),
+		                          Select(state, TypeU32(state), in_range, block, ConstantU32(state, 0)));
+		const auto slot_value = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLoad, type, slot_value, directory);
+		const auto slot  = Binary(state, spv::OpIAdd, TypeU32(state),
+		                          Unary(state, spv::OpUConvert, TypeU32(state), slot_value),
+		                          ConstantU32(state, static_cast<uint32_t>(BdaLayout::DIRECTORY_SLOTS)));
+		index = Binary(
+		    state, spv::OpBitwiseOr, TypeU32(state),
+		    Binary(state, spv::OpShiftLeftLogical, TypeU32(state),
+		           Select(state, TypeU32(state), in_range, slot, ConstantU32(state, static_cast<uint32_t>(BdaLayout::DIRECTORY_SLOTS))),
+		           ConstantU32(state, BdaLayout::BLOCK_BITS)),
+		    Binary(state, spv::OpBitwiseAnd, TypeU32(state), page,
+		           ConstantU32(state, static_cast<uint32_t>(BdaLayout::BLOCK_ENTRIES - 1))));
+	}
 	const auto entry_pointer = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state, 64),
 	                          entry_pointer, state.bda_pagetable_variable, ConstantU32(state, 0),
-	                          page);
+	                          index);
 	const auto entry = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpLoad, type, entry, entry_pointer);
+	if (GetHostShaderFeatures().bda_two_level) {
+		const auto offset = Binary(state, spv::OpBitwiseAnd, type, address,
+		                           ConstantU64(state, BufferCache::CACHING_PAGESIZE - 1));
+		// D3D12's table (d3d12/bdaPageTable.h): a zero entry is a miss, which the
+		// fault buffer records, and reads a null pointer.
+		const auto missing = Binary(state, spv::OpIEqual, TypeBool(state), entry, ConstantU64(state, 0));
+		const auto fault_label     = state.builder.AllocateId();
+		const auto available_label = state.builder.AllocateId();
+		const auto merge_label     = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpSelectionMerge, merge_label, spv::SelectionControlMaskNone);
+		state.builder.AddFunction(spv::OpBranchConditional, missing, fault_label, available_label);
+		EmitLabel(state, fault_label);
+		RecordBdaFault(state, page);
+		state.builder.AddFunction(spv::OpBranch, merge_label);
+		EmitLabel(state, available_label);
+		const auto available = Binary(state, spv::OpIAdd, type, entry, offset);
+		state.builder.AddFunction(spv::OpBranch, merge_label);
+		EmitLabel(state, merge_label);
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpPhi, type, result, ConstantU64(state, 0), fault_label, available,
+		                          available_label);
+		state.builder.AddFunction(spv::OpReturnValue, result);
+		state.builder.AddFunction(spv::OpFunctionEnd);
+		return;
+	}
 	const auto unbacked =
 	    Binary(state, spv::OpIEqual, TypeBool(state), entry, ConstantU64(state, 0));
 	const auto fault_label = state.builder.AllocateId();
