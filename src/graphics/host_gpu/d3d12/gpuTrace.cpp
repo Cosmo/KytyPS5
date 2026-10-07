@@ -48,6 +48,9 @@ void GpuTrace::Destroy() {
 }
 
 uint32_t GpuTrace::Begin(ID3D12GraphicsCommandList* list, const TracedPipeline* pipeline) {
+	if (m_buffer == nullptr) {
+		return 0;
+	}
 	const uint32_t slot = m_next.fetch_add(1, std::memory_order_relaxed) % SLOTS;
 	m_pipelines[slot].store(pipeline, std::memory_order_relaxed);
 	Write(list, slot, STARTED, D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_IN);
