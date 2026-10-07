@@ -215,6 +215,14 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	}
 }
 
+uint64_t Image::GpuBytes() const {
+	uint64_t bytes = 0;
+	for (const auto& resource: backing.resources) {
+		bytes += resource.allocation->GetSize();
+	}
+	return bytes;
+}
+
 Image::~Image() {
 	KYTY_PROFILER_FUNCTION();
 	if (!backing.views.empty()) {
@@ -755,6 +763,67 @@ void Image::Download(std::span<const vk::BufferImageCopy> copies, BufferHandle b
 	auto& command = m_scheduler.Current();
 	Use(command, D3D12_RESOURCE_STATE_COPY_SOURCE);
 	CopyRegions(command, copies, buffer, false);
+}
+
+bool Image::ReadbackColor(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height, uint32_t& row_bytes) {
+	if (backing.resources.empty() || backing.samples != 1 || backing.planes != 1 || backing.image_type != vk::ImageType::e2D) {
+		return false;
+	}
+	auto* resource = backing.resources[backing.current].resource;
+	if (resource == nullptr) {
+		return false;
+	}
+	const auto                         desc = resource->GetDesc();
+	D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+	UINT                               rows       = 0;
+	UINT64                             row_size   = 0;
+	UINT64                             total_size = 0;
+	m_graphics.device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, &rows, &row_size, &total_size);
+	if (total_size == 0 || rows == 0) {
+		return false;
+	}
+	D3D12_HEAP_PROPERTIES heap {};
+	heap.Type = D3D12_HEAP_TYPE_READBACK;
+	D3D12_RESOURCE_DESC buffer_desc {};
+	buffer_desc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+	buffer_desc.Width            = total_size;
+	buffer_desc.Height           = 1;
+	buffer_desc.DepthOrArraySize = 1;
+	buffer_desc.MipLevels        = 1;
+	buffer_desc.SampleDesc.Count = 1;
+	buffer_desc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	Microsoft::WRL::ComPtr<ID3D12Resource> readback;
+	if (FAILED(m_graphics.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)))) {
+		return false;
+	}
+	auto& command = m_scheduler.Current();
+	Use(command, D3D12_RESOURCE_STATE_COPY_SOURCE, ImageSubresourceRange {0, 1, 0, 1});
+	D3D12_TEXTURE_COPY_LOCATION destination {};
+	destination.pResource       = readback.Get();
+	destination.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+	destination.PlacedFootprint = footprint;
+	D3D12_TEXTURE_COPY_LOCATION source {};
+	source.pResource        = resource;
+	source.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+	source.SubresourceIndex = 0;
+	command.Handle()->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+	m_scheduler.FlushAndWait();
+	void*         mapped = nullptr;
+	D3D12_RANGE   range {0, static_cast<SIZE_T>(total_size)};
+	if (FAILED(readback->Map(0, &range, &mapped)) || mapped == nullptr) {
+		return false;
+	}
+	width     = static_cast<uint32_t>(desc.Width);
+	height    = desc.Height;
+	row_bytes = static_cast<uint32_t>(row_size);
+	data.resize(static_cast<size_t>(row_bytes) * rows);
+	for (UINT row = 0; row < rows; ++row) {
+		std::memcpy(data.data() + static_cast<size_t>(row) * row_bytes, static_cast<const uint8_t*>(mapped) + footprint.Offset + static_cast<size_t>(row) * footprint.Footprint.RowPitch,
+		            row_bytes);
+	}
+	D3D12_RANGE none {0, 0};
+	readback->Unmap(0, &none);
+	return true;
 }
 
 void Image::CopyContents(CommandBuffer& command, Image& source, uint32_t source_resource,

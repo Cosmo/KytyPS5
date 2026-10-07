@@ -247,6 +247,8 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 		}
 		if (log_missing) {
 			LOGF("\tAPR resolve missing path: %s -> %s\n", guest_path, Common::PathToString(info.host_path).c_str());
+			// Games look for many files that are not there; a crash report shows the last ones (a game stops when a file it needs is missing).
+			CrashTrail::Missing(Common::PathToString(info.host_path));
 		}
 	}
 
