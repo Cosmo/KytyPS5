@@ -281,6 +281,10 @@ const std::string& GetLaunchActivity() {
 	return g_config->launch_activity;
 }
 
+std::filesystem::path FontFolder() {
+	return g_config != nullptr ? g_config->font_folder : std::filesystem::path();
+}
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled() {
 	return g_config->red_zone_protection_enabled;

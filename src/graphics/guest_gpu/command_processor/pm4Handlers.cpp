@@ -3,8 +3,7 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
-#include "graphics/host_gpu/renderer/render.h"
-#include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/gpuBackend.h"
 #include "libs/agc.h"
 
 #include <algorithm>
