@@ -660,6 +660,7 @@ static int CreateGuestStack(PthreadAttr attr) {
 		attr->stack_map_addr = 0;
 		attr->stack_map_size = 0;
 		// Xbox fork (T3): a thread runs on this memory; a first-touch fault on its own stack cannot be delivered, so commit it now
+		Memory::PinGuestStack(reinterpret_cast<uint64_t>(attr->stack_addr), attr->stack_size); // the pager leaves stacks in memory
 		Memory::EnsureGuestCommitted(reinterpret_cast<uint64_t>(attr->stack_addr), attr->stack_size);
 		return OK;
 	}
@@ -717,6 +718,7 @@ static int CreateGuestStack(PthreadAttr attr) {
 	attr->stack_map_addr = stack_addr;
 	attr->stack_map_size = map_size;
 
+	Memory::PinGuestStack(stack_addr + guard_size, stack_size); // the pager leaves stacks in memory
 	std::memset(attr->stack_addr, 0, stack_size);
 
 	return OK;

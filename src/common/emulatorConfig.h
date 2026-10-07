@@ -41,6 +41,8 @@ constexpr bool IsConfiguredUserIdValid(int32_t user_id) {
 	return user_id >= 0 && user_id != USER_ID_EVERYONE && user_id != USER_ID_SYSTEM;
 }
 
+constexpr uint32_t kGuestRamBudgetAuto = 0xFFFFFFFFu;
+
 struct ConfigOptions {
 	uint32_t               screen_width                = 1280;
 	uint32_t               screen_height               = 720;
@@ -92,10 +94,20 @@ struct ConfigOptions {
 	// Debugging (D3D12 build): run merged geometry programs as compute shaders (the emulation of
 	// mesh shaders) even where the device has mesh shaders, to compare the two.
 	bool mesh_compute_forced = false;
+	// The pager (xbox/lazyRegions.h): when the lazily committed guest memory is above this many MB, the coldest of it is kept in a file instead of in memory.
+	// 0: off. kGuestRamBudgetAuto (not set): on where the app's memory limit is small (the Series X: 5 GiB), with that limit as the cap; off elsewhere.
+	uint32_t guest_ram_budget_mb = 0;
+	// Debugging the pager: 0 normal; 1 sweep cold windows and give them back when they are touched, but never take one out of memory; 2 take a window out and page it straight back in.
+	uint32_t guest_ram_pager_mode = 0;
+	// Debugging the pager: a commit of guest memory fails above this many MB of guest memory (a wall like the console's, which the PC does not have). 0: none.
+	uint32_t guest_commit_limit_mb = 0;
 	// Development: the pipeline cache of a game (its translated shaders) is kept across builds, also dirty ones; only the shader compiler's own
 	// signature still ties it. A build that translates shaders differently then uses the old translations, which can draw wrongly or crash, so it
 	// is off unless a setting turns it on.
 	bool pipeline_cache_any_build = false;
+	// The app's memory use as the OS counts it (the Series X ends the app at its limit), and the limit: set by the UWP host. Null or 0 elsewhere.
+	uint64_t (*app_memory_usage)() = nullptr;
+	uint64_t app_memory_limit_bytes = 0;
 #endif
 	Keymap keymap;
 	// Ordinary boots need a non-null argv[0]; --guest-exec supplies the caller's arguments.
@@ -155,7 +167,12 @@ std::filesystem::path FontFolder();
 bool RedZoneProtectionEnabled();
 bool XboxGpuLimitsEnabled();
 bool MeshComputeForced();
+uint32_t GuestRamBudgetMb();
+uint32_t GuestRamPagerMode();
+uint32_t GuestCommitLimitMb();
 bool PipelineCacheAnyBuild();
+uint64_t AppMemoryUsage();
+uint64_t AppMemoryLimit();
 #endif
 
 const Keymap& GetKeymap();
