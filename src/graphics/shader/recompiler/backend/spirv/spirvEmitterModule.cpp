@@ -206,6 +206,26 @@ uint32_t F32ArrayType(EmitterState& state, uint32_t count) {
 	return state.builder.Type(spv::OpTypeArray, TypeF32(state), ConstantU32(state, count));
 }
 
+// The buffers' persistent descriptors as an array of storage buffers (in D3D12, a descriptor table
+// over the first descriptors of the view heap), indexed by the descriptor slot the page table
+// gives. The lanes of a wave read different buffers, so the reads are made uniform one slot at a
+// time (the translator drops the non-uniform index decoration).
+void DefineGuestBufferTable(EmitterState& state) {
+	const auto array = state.builder.Type(spv::OpTypeArray, StorageBufferType(state, state.storage_buffers[2], 32),
+	                                      ConstantU32(state, IR::GuestBufferTableSize));
+	state.guest_buffer_table = state.builder.DefineGlobalVariable(
+	    TypePointer(state, spv::StorageClassStorageBuffer, array), spv::StorageClassStorageBuffer);
+	state.builder.AddName(state.guest_buffer_table, "guest_buffers");
+	state.builder.AddAnnotation(spv::OpDecorate, state.guest_buffer_table,
+	                            spv::DecorationDescriptorSet, IR::GuestBufferTableSpace);
+	state.builder.AddAnnotation(spv::OpDecorate, state.guest_buffer_table, spv::DecorationBinding,
+	                            0u);
+	// The waterfall loop that makes the index uniform (LoadGuestPointerDword) uses subgroup ops.
+	state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
+	state.builder.RequireCapability(spv::CapabilityGroupNonUniformVote);
+	state.builder.RequireCapability(spv::CapabilityGroupNonUniformBallot);
+}
+
 void DefineImageArray(EmitterState& state, ImageDefinition& definition, const IR::ImageResource& image,
                       uint32_t count, uint32_t set, uint32_t binding) {
 	definition.type     = ImageType(state, image);
@@ -324,6 +344,9 @@ void DefineDescriptors(EmitterState& state) {
 			case IR::DescriptorBindingKind::BdaPagetable:
 				state.bda_pagetable_variable =
 				    Define(StorageBufferType(state, state.storage_buffers[3], 64), "bda_pagetable");
+				if (GetHostShaderFeatures().guest_pointer_table) {
+					DefineGuestBufferTable(state);
+				}
 				break;
 			case IR::DescriptorBindingKind::FaultBuffer:
 				state.fault_buffer_variable =
@@ -363,8 +386,15 @@ void DefineDescriptors(EmitterState& state) {
 				EXIT_IF(IR::ImageBindingResourceClass(kind) ==
 				        IR::ImageResourceClass::None);
 				auto& definition = state.images[IR::ImageBindingIndex(kind)];
-				DefineImageArray(state, definition, *image_types[IR::ImageBindingIndex(kind)],
-				                 counts[index], 0u, IR::NativeBinding(state.program.stage, kind));
+				const auto& image = *image_types[IR::ImageBindingIndex(kind)];
+#if defined(KYTY_GPU_BACKEND_D3D12)
+				// Each binding in its own set, as Define does.
+				DefineImageArray(state, definition, image, counts[index],
+				                 IR::NativeBinding(state.program.stage, kind), 0u);
+#else
+				DefineImageArray(state, definition, image, counts[index], 0u,
+				                 IR::NativeBinding(state.program.stage, kind));
+#endif
 				state.builder.AddName(definition.variable,
 				                      ("image_" + std::to_string(static_cast<uint32_t>(kind))).c_str());
 				break;
@@ -635,7 +665,8 @@ void DefineOutputs(EmitterState& state) {
 	const bool position = std::ranges::any_of(state.outputs, [](const OutputBinding& output) {
 		return output.kind == IR::StageOutputKind::Position;
 	});
-	if (position && state.input_info.vertex->user_clip_planes != 0) {
+	// A mesh program run as a compute shader leaves them to its vertex stage (EmitMeshFetchProgram).
+	if (position && state.input_info.vertex->user_clip_planes != 0 && !state.mesh_compute) {
 		// PipelineCache rejects UCP_ENA with shader clip or cull distances.
 		EXIT_IF(clip_distance_count + cull_distance_count != 0);
 		state.user_clip_planes = state.input_info.vertex->user_clip_planes;
@@ -762,14 +793,16 @@ void DefineModule(EmitterState& state) {
 	state.main_func = state.builder.AllocateId();
 	if (state.program.stage == ShaderType::Mesh) {
 		state.mesh_guest_func = state.builder.AllocateId();
-		state.builder.RequireCapability(spv::CapabilityMeshShadingEXT); // MeshShadingEXT
-		state.builder.RequireExtension("SPV_EXT_mesh_shader");
-		state.builder.AddExecutionMode(state.main_func,
-		                               spv::ExecutionModeOutputTrianglesEXT); // OutputTrianglesEXT
-		state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeOutputVertices,
-		                               state.input_info.vertex->mesh.max_vertices);
-		state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeOutputPrimitivesEXT,
-		                               state.input_info.vertex->mesh.max_primitives);
+		if (!state.mesh_compute) {
+			state.builder.RequireCapability(spv::CapabilityMeshShadingEXT); // MeshShadingEXT
+			state.builder.RequireExtension("SPV_EXT_mesh_shader");
+			state.builder.AddExecutionMode(state.main_func,
+			                               spv::ExecutionModeOutputTrianglesEXT); // OutputTrianglesEXT
+			state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeOutputVertices,
+			                               state.input_info.vertex->mesh.max_vertices);
+			state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeOutputPrimitivesEXT,
+			                               state.input_info.vertex->mesh.max_primitives);
+		}
 	}
 	if (state.program.stage == ShaderType::TessellationControl ||
 	    state.program.stage == ShaderType::TessellationEvaluation) {
@@ -786,8 +819,14 @@ void DefineModule(EmitterState& state) {
 	if (state.program.info.buffer_u16) {
 		state.builder.RequireCapability(spv::CapabilityStorageBuffer16BitAccess);
 	}
+	// Guest memory is read through physical storage buffer pointers, or (where the host cannot use
+	// them) through the guest buffer table. Resident image heaps read their slots through pointers.
+	const bool physical_pointers = (state.program.info.uses_dma && state.guest_buffer_table == 0) ||
+	                               state.program.info.uses_image_heap;
 	if (state.program.info.uses_dma || state.program.info.uses_image_heap) {
 		state.builder.RequireCapability(spv::CapabilityInt64);
+	}
+	if (physical_pointers) {
 		state.builder.RequireCapability(spv::CapabilityPhysicalStorageBufferAddresses);
 		state.builder.RequireExtension("SPV_KHR_physical_storage_buffer");
 	}
@@ -858,9 +897,8 @@ void DefineModule(EmitterState& state) {
 		state.builder.RequireExtension("SPV_KHR_fragment_shader_barycentric");
 	}
 	state.builder.RequireExtension("SPV_KHR_float_controls");
-	state.builder.AddMemoryModel(state.program.info.uses_dma || state.program.info.uses_image_heap
-	                                 ? spv::AddressingModelPhysicalStorageBuffer64
-	                                 : spv::AddressingModelLogical,
+	state.builder.AddMemoryModel(physical_pointers ? spv::AddressingModelPhysicalStorageBuffer64
+	                                               : spv::AddressingModelLogical,
 	                             spv::MemoryModelGLSL450);
 	// GCN/RDNA arithmetic preserves 32-bit signed zero, infinity, and NaN. Declaring that
 	// contract prevents host compilers from treating synthesized IEEE values as finite.
