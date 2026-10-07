@@ -4,6 +4,7 @@
 #include "common/common.h"
 #include "common/platform/sysTimer.h"
 
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -47,5 +48,11 @@ void SysFileGetLastAccessAndWriteTimeUtc(sys_file_t& f, SysFileTimeStruct& a, Sy
 // NOLINTNEXTLINE(google-runtime-references)
 void SysFileGetDents(const std::filesystem::path& path, std::vector<sys_dir_entry_t>& out);
 bool SysFileRenameFile(const std::filesystem::path& src, const std::filesystem::path& dst);
+
+#if defined(KYTY_PLATFORM_UWP)
+// A C stream for reading the file in binary mode, opened with the *FromApp functions (on the broker thread); the caller closes it with fclose. Null when
+// the file cannot be opened.
+std::FILE* SysFileOpenCStreamR(const std::filesystem::path& file_name);
+#endif
 
 #endif /* KYTY_COMMON_PLATFORM_SYSFILEIO_H_ */
