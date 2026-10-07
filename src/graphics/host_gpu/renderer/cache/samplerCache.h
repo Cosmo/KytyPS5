@@ -16,6 +16,8 @@ namespace Libs::Graphics {
 
 struct GraphicContext;
 
+using SamplerHandle = vk::Sampler;
+
 class SamplerCache {
 public:
 	explicit SamplerCache(GraphicContext& graphics): m_graphics(graphics) {
