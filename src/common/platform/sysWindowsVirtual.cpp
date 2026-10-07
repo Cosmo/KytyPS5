@@ -14,10 +14,13 @@
 #include "common/virtualMemory.h"
 
 #if defined(KYTY_PLATFORM_UWP)
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 #endif
 
 // IWYU pragma: no_include <basetsd.h>
@@ -99,6 +102,21 @@ public:
 	[[nodiscard]] bool Contains(uint64_t address) const {
 		auto it = m_ranges.upper_bound(address);
 		return it != m_ranges.begin() && address < std::prev(it)->second;
+	}
+
+	// The ranges that overlap [begin, end), as copies (the caller changes protections, not the ranges).
+	[[nodiscard]] std::vector<std::pair<uint64_t, uint64_t>> Overlapping(uint64_t begin, uint64_t end) const {
+		std::vector<std::pair<uint64_t, uint64_t>> result;
+		auto                                       it = m_ranges.upper_bound(begin);
+		if (it != m_ranges.begin()) {
+			--it;
+		}
+		for (; it != m_ranges.end() && it->first < end; ++it) {
+			if (it->second > begin) {
+				result.emplace_back(it->first, it->second);
+			}
+		}
+		return result;
 	}
 
 	std::mutex mutex;
@@ -599,6 +617,30 @@ bool HandleWriteExecuteFault(uint64_t address, bool execute) {
 	(void)address;
 	(void)execute;
 	return false;
+#endif
+}
+
+bool MakeWriteExecuteExecutable(uint64_t address, uint64_t size) {
+#if defined(KYTY_PLATFORM_UWP)
+	constexpr uint64_t PageSize = 0x1000;
+	const auto         begin    = address & ~(PageSize - 1u);
+	const auto         end      = (address + size + PageSize - 1u) & ~(PageSize - 1u);
+	auto&              ranges   = WriteExecute();
+	std::lock_guard    lock(ranges.mutex);
+	bool               ok = true;
+	for (const auto& [start, range_end]: ranges.Overlapping(begin, end)) {
+		const auto from = std::max(start, begin);
+		const auto to   = std::min(range_end, end);
+		if (from < to) {
+			ok = HostVirtualProtect(reinterpret_cast<void*>(from), to - from, PAGE_EXECUTE_READ) && ok;
+			::FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(from), to - from);
+		}
+	}
+	return ok;
+#else
+	(void)address;
+	(void)size;
+	return true;
 #endif
 }
 
