@@ -4,8 +4,10 @@
 #include "common/common.h"
 #include "common/platform/sysTimer.h"
 
+#include <cstdio>
 #include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 // The native file representation is private to the platform implementation.
@@ -35,6 +37,7 @@ bool        SysFileUnlink(sys_file_t&                  f,
                           const std::filesystem::path& name); // NOLINT(google-runtime-references)
 bool        SysFileGetInfo(const std::filesystem::path& name, bool* is_file, uint64_t* size);
 bool        SysFileCreateDirectory(const std::filesystem::path& path);
+bool        SysFileDeleteDirectory(const std::filesystem::path& path, std::error_code* error);
 bool        SysFileDeleteFile(const std::filesystem::path& name);
 bool        SysFileFlush(sys_file_t& f); // NOLINT(google-runtime-references)
 SysFileTimeStruct SysFileGetLastWriteTimeUtc(const std::filesystem::path& name);
@@ -46,5 +49,11 @@ void SysFileGetLastAccessAndWriteTimeUtc(sys_file_t& f, SysFileTimeStruct& a, Sy
 // NOLINTNEXTLINE(google-runtime-references)
 void SysFileGetDents(const std::filesystem::path& path, std::vector<sys_dir_entry_t>& out);
 bool SysFileRenameFile(const std::filesystem::path& src, const std::filesystem::path& dst);
+
+#if defined(KYTY_PLATFORM_UWP)
+// A C stream for reading the file in binary mode, opened with the *FromApp functions (on the broker thread); the caller closes it with fclose. Null when
+// the file cannot be opened.
+std::FILE* SysFileOpenCStreamR(const std::filesystem::path& file_name);
+#endif
 
 #endif /* KYTY_COMMON_PLATFORM_SYSFILEIO_H_ */
