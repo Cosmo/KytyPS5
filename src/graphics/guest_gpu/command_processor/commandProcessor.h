@@ -5,8 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pssr.h"
-#include "graphics/host_gpu/renderer/render.h"
-#include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/gpuBackend.h"
 
 #include <cstdint>
 #include <optional>
