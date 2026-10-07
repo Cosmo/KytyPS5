@@ -72,6 +72,10 @@ AppSettings LoadSettings() {
 	read("guest_ram_budget_mb", settings.guest_ram_budget_mb);
 	read("guest_ram_pager_mode", settings.guest_ram_pager_mode);
 	read("guest_commit_limit_mb", settings.guest_commit_limit_mb);
+	read("texture_mip_skip", settings.texture_mip_skip);
+	read("texture_mip_skip_min_size", settings.texture_mip_skip_min_size);
+	read("gpu_memory_savings", settings.gpu_memory_savings);
+	read("video_decode_threads", settings.video_decode_threads);
 	read("shader_cache_any_build", settings.shader_cache_any_build);
 	read("app_memory_limit_mb", settings.app_memory_limit_mb);
 	read("impulse_triggers", settings.impulse_triggers);
@@ -103,6 +107,11 @@ void SaveSettings(const AppSettings& settings) {
 	json["d3d12_selftest"]   = settings.d3d12_selftest;
 	json["overlay_size"]     = settings.overlay_size;
 	json["overlay_log_lines"] = settings.overlay_log_lines;
+	json["guest_ram_budget_mb"]        = settings.guest_ram_budget_mb;
+	json["texture_mip_skip"]           = settings.texture_mip_skip;
+	json["texture_mip_skip_min_size"]  = settings.texture_mip_skip_min_size;
+	json["gpu_memory_savings"]         = settings.gpu_memory_savings;
+	json["video_decode_threads"]       = settings.video_decode_threads;
 	json["shader_cache_any_build"]     = settings.shader_cache_any_build;
 	json["impulse_triggers"]           = settings.impulse_triggers;
 	json["haptic_rumble"]              = settings.haptic_rumble;
