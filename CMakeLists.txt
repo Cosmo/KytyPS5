@@ -285,6 +285,7 @@ if(KYTY_GPU_BACKEND STREQUAL "D3D12")
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/streamBuffer.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/samplerInfo.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/textureCache.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/frameDump.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/imageCommon.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/imageView.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/tileDispatch.cpp"
