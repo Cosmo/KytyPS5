@@ -557,6 +557,28 @@ void* MapPlaceholderView(HANDLE section, uint64_t address, uint64_t offset, uint
 #endif
 }
 
+bool ReserveLazy(uint64_t address, uint64_t size) {
+	auto* ptr = HostVirtualAlloc2(reinterpret_cast<void*>(address), size, MEM_RESERVE | MEM_REPLACE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
+	if (ptr != nullptr && reinterpret_cast<uint64_t>(ptr) != address) {
+		VirtualFree(ptr, 0, MEM_RELEASE);
+		return false;
+	}
+	return ptr != nullptr;
+}
+
+bool CommitLazy(uint64_t address, uint64_t size) {
+	return HostVirtualAlloc(reinterpret_cast<void*>(address), size, MEM_COMMIT, PAGE_READWRITE) != nullptr;
+}
+
+bool DecommitLazy(uint64_t address, uint64_t size) {
+	return VirtualFree(reinterpret_cast<void*>(address), size, MEM_DECOMMIT) != 0;
+}
+
+bool ProtectLazy(uint64_t address, uint64_t size, Mode mode) {
+	// Not Protect(): lazy memory is never write-execute, and this runs on every page watcher change.
+	return HostVirtualProtect(reinterpret_cast<void*>(address), size, GetProtectionFlag(mode));
+}
+
 bool HandleWriteExecuteFault(uint64_t address, bool execute) {
 #if defined(KYTY_PLATFORM_UWP)
 	constexpr uint64_t PageSize = 0x1000;
