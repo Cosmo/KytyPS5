@@ -361,10 +361,7 @@ struct ShaderProgramCache::Impl {
 		input_info.stage = {.program = &permutation.program, .resources = &entry->second.resources};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
 
-		std::array<size_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> counts {};
-		for (const auto& [key, source]: programs) {
-			counts[static_cast<size_t>(key.stage)] += source.permutations.size();
-		}
+		const auto counts = Counts();
 		// Guest geometry shaders are compiled through the host mesh stage.
 		std::printf("Shaders: VS %zu | PS %zu | CS %zu | GS %zu | LS %zu | HS %zu | TES %zu\n",
 		            counts[static_cast<size_t>(ShaderType::Vertex)],
@@ -375,6 +372,14 @@ struct ShaderProgramCache::Impl {
 		            counts[static_cast<size_t>(ShaderType::TessellationControl)],
 		            counts[static_cast<size_t>(ShaderType::TessellationEvaluation)]);
 		return permutation.handle;
+	}
+
+	[[nodiscard]] ProgramCounts Counts() const {
+		ProgramCounts counts {};
+		for (const auto& [key, source]: programs) {
+			counts[static_cast<size_t>(key.stage)] += source.permutations.size();
+		}
+		return counts;
 	}
 
 	explicit Impl(const HostShaderLimits& limits)
@@ -392,6 +397,10 @@ ShaderProgramCache::ShaderProgramCache(const HostShaderLimits& limits)
     : m_limits(limits), m_impl(std::make_unique<Impl>(limits)) {}
 
 ShaderProgramCache::~ShaderProgramCache() = default;
+
+ShaderProgramCache::ProgramCounts ShaderProgramCache::GetProgramCounts() const {
+	return m_impl->Counts();
+}
 
 ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
     const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
