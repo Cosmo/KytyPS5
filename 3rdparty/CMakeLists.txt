@@ -66,6 +66,12 @@ FetchContent_Declare(
 	GIT_SHALLOW FALSE
 	SOURCE_SUBDIR build/cmake
 )
+# The UWP app opens the archive file itself (the Xbox lets it read a USB drive only through the *FromApp functions).
+set(kyty_zarchive_extra_patch)
+if(KYTY_BUILD_UWP)
+	set(kyty_zarchive_extra_patch COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace
+		"${CMAKE_CURRENT_SOURCE_DIR}/../src/uwp/zarchive-open-from-stream.patch")
+endif()
 FetchContent_Declare(
 	zarchive_source
 	GIT_REPOSITORY https://github.com/Exzap/ZArchive.git
@@ -73,6 +79,7 @@ FetchContent_Declare(
 	GIT_SHALLOW FALSE
 	PATCH_COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace
 		"${CMAKE_CURRENT_SOURCE_DIR}/patches/zarchive-reader.patch"
+		${kyty_zarchive_extra_patch}
 	SOURCE_SUBDIR kyty-library-only
 )
 FetchContent_MakeAvailable(zstd zarchive_source)
@@ -94,11 +101,24 @@ else()
 endif()
 
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+if(KYTY_BUILD_UWP)
+	# SDL has no UWP port. The app has its own window, input and audio output; the emulator keeps SDL's string, conversion, time and thread
+	# functions. Without these subsystems SDL links only APIs UWP apps have (its video, input and audio code would pull in desktop DLLs the Xbox
+	# does not have).
+	foreach(sdl_option VIDEO RENDER AUDIO JOYSTICK HAPTIC HIDAPI SENSOR POWER MISC FILESYSTEM LOCALE DIRECTX XINPUT WASAPI VULKAN OPENGL OPENGLES CAMERA DIALOG GPU TRAY)
+		set(SDL_${sdl_option} OFF CACHE BOOL "" FORCE)
+	endforeach()
+endif()
 if(APPLE)
 	# SDL's built-in iconv fallback does not support CP932.
 	set(SDL_SYSTEM_ICONV ON CACHE BOOL "Use system iconv for CP932 conversion" FORCE)
 endif()
 add_subdirectory(SDL3)
+if(KYTY_BUILD_UWP)
+	# SDL's own build stops at the UWP partition of the Windows headers, so it is compiled as desktop code; the app's import check covers what is linked.
+	# Without its dynamic API table (SDL has no switch; it turns the table off for static analysers) only the SDL code in use is linked.
+	target_compile_definitions(SDL3-static PRIVATE __INTELLISENSE__)
+endif()
 
 add_library(Vulkan-Headers INTERFACE)
 add_library(Vulkan::Headers ALIAS Vulkan-Headers)
@@ -118,6 +138,11 @@ target_include_directories(imgui PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends"
 )
 target_compile_definitions(imgui PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES)
+if(KYTY_BUILD_UWP)
+	# imgui's Windows clipboard, IME and shell functions call desktop DLLs.
+	target_compile_definitions(imgui PRIVATE IMGUI_DISABLE_WIN32_DEFAULT_CLIPBOARD_FUNCTIONS IMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS
+		IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+endif()
 target_link_libraries(imgui PUBLIC Vulkan::Headers)
 if(MSVC)
 	target_compile_options(imgui PRIVATE /W0)
@@ -193,8 +218,17 @@ set(TRACY_NO_CRASH_HANDLER ON CACHE BOOL "" FORCE)
 set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
 set(TRACY_DELAYED_INIT ON CACHE BOOL "" FORCE)
 set(TRACY_MANUAL_LIFETIME ON CACHE BOOL "" FORCE)
+if(KYTY_BUILD_UWP)
+	# Callstacks (dbghelp) and system tracing (ETW) are desktop-only.
+	set(TRACY_NO_CALLSTACK ON CACHE BOOL "" FORCE)
+	set(TRACY_NO_SYSTEM_TRACING ON CACHE BOOL "" FORCE)
+endif()
 add_subdirectory(tracy EXCLUDE_FROM_ALL)
 if (TARGET TracyClient)
+	if (KYTY_BUILD_UWP)
+		# Tracy's UWP mode for the rest (user name, process and driver lists).
+		target_compile_definitions(TracyClient PRIVATE WINAPI_FAMILY=2)
+	endif()
 	if (MSVC)
 		target_compile_options(TracyClient PRIVATE /WX-)
 	endif()
