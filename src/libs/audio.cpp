@@ -17,6 +17,8 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cmath>
 #include <cstring>
 #include <magic_enum.hpp>
 #include <vector>
@@ -57,6 +59,35 @@ struct OutputClock {
 		return deadline;
 	}
 };
+
+#if defined(KYTY_PLATFORM_UWP)
+// A vibration port's block has no DualSense to play on: its loudness per actuator (the first two channels) goes to the controller library, and
+// the Xbox controller rumbles with it.
+void ReportHapticLevels(const void* data, uint32_t frames, int channels, bool is_float, const int* volume, float gain) {
+	if (data == nullptr || frames == 0 || channels <= 0) {
+		return;
+	}
+	const int             used = std::min(channels, 2);
+	std::array<double, 2> sums {};
+	for (uint32_t frame = 0; frame < frames; frame++) {
+		for (int channel = 0; channel < used; channel++) {
+			const size_t index  = static_cast<size_t>(frame) * channels + channel;
+			const double sample = is_float ? static_cast<const float*>(data)[index] : static_cast<const int16_t*>(data)[index] / 32768.0;
+			sums[channel] += sample * sample;
+		}
+	}
+	std::array<float, 2> levels {};
+	for (int side = 0; side < 2; side++) {
+		const int channel = std::min(side, used - 1);
+		levels[side]      = static_cast<float>(std::sqrt(sums[channel] / frames) * volume[channel] / 32768.0 * gain);
+	}
+	Controller::SetHapticLevels(levels[0], levels[1]);
+	static std::atomic_bool reported = false;
+	if (!reported.exchange(true)) {
+		LOGF("AudioOut: haptics from a vibration port (%d ch) drive the controller's rumble\n", channels);
+	}
+}
+#endif
 
 static bool audio_out_port_type_is_valid(int type) {
 	return (type >= AUDIO_OUT_PORT_TYPE_MAIN && type <= AUDIO_OUT_PORT_TYPE_PADSPK) ||
@@ -598,6 +629,11 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 
 		uint64_t controller_queued_us = 0;
 		bool controller_uses_bluetooth = false;
+#if defined(KYTY_PLATFORM_UWP)
+		if (port.type == AUDIO_OUT_PORT_TYPE_VIBRATION) {
+			ReportHapticLevels(params[i].data, port.samples_num, port.channels_num, FormatIsFloat(port.format), port.volume, gain);
+		}
+#endif
 		if (port.haptics != nullptr) {
 			// Keep the stream alive against close and volume changes.
 			Common::LockGuard lock(m_mutex);
