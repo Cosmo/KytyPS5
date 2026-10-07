@@ -1,5 +1,7 @@
 #include "common/hostException.h"
 
+#include "common/logging/log.h"
+
 #include <atomic>
 #include <cstdio>
 
@@ -120,6 +122,24 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
 	} else if (exception_record->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION) {
 		info.type = ExceptionType::IllegalInstruction;
 	} else {
+		// Debugging: exceptions other than the usual faults (C++ exceptions, heap corruption, invalid
+		// parameters, stack overflows, ...), wherever they come from: a system DLL ending the process
+		// may raise one first. The first 200 are logged with their module.
+		static std::atomic<uint32_t> unusual {0};
+		if (unusual.fetch_add(1) < 200) {
+			HMODULE module                = nullptr;
+			char    module_name[MAX_PATH] = "?";
+			if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			                       static_cast<LPCSTR>(exception_record->ExceptionAddress), &module)) {
+				GetModuleFileNameA(module, module_name, sizeof(module_name));
+			}
+			char text[MAX_PATH + 160];
+			std::snprintf(text, sizeof(text), "exception 0x%08lx at 0x%016llx (%s + 0x%llx), thread %lu\n", exception_record->ExceptionCode,
+			              static_cast<unsigned long long>(info.exception_address), module_name,
+			              static_cast<unsigned long long>(info.exception_address - reinterpret_cast<uint64_t>(module)),
+			              GetCurrentThreadId());
+			Log::WriteToConsoleAndLog(text);
+		}
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
 
