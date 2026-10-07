@@ -198,6 +198,10 @@ bool XboxGpuLimitsEnabled() {
 	return g_config != nullptr && g_config->xbox_gpu_limits_enabled;
 }
 
+bool MeshComputeForced() {
+	return g_config != nullptr && g_config->mesh_compute_forced;
+}
+
 bool PipelineCacheAnyBuild() {
 	return g_config != nullptr && g_config->pipeline_cache_any_build;
 }

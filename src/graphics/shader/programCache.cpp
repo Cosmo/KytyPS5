@@ -9,6 +9,8 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
 
@@ -211,13 +213,28 @@ struct ShaderProgramCache::Impl {
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
 			     static_cast<uint64_t>(result.spirv.size()), options.wave_size);
 		}
+		// A mesh program that runs as a compute shader gets the vertex stage that draws its output.
+		std::shared_ptr<const std::vector<uint32_t>> mesh_fetch;
+		if (options.stage == ShaderType::Mesh && options.input_info.vertex != nullptr &&
+		    options.input_info.vertex->mesh.compute_emulation) {
+			auto fetch = ShaderRecompiler::Spirv::EmitMeshFetchProgram(result.program.info.outputs);
+			const bool valid = ValidateShaderSpirv("ShaderRecompiler MS fetch", options.shader_hash, fetch,
+			                                       options.maintenance8_enabled);
+			DumpShaderSpirv("msfetch", options.shader_hash, fetch);
+			if (!valid) {
+				EXIT("ShaderRecompiler MS fetch failed hash=0x%016" PRIx64 ": SPIR-V validation failed\n",
+				     options.shader_hash);
+			}
+			mesh_fetch = std::make_shared<const std::vector<uint32_t>>(std::move(fetch));
+		}
 		return {
 		    .function_code  = {function_code.begin(), function_code.end()},
 		    .specialization = std::move(specialization),
 		    .program        = std::move(result.program).TakeCompiledInfo(),
-		    .handle         = {.id    = ++next_shader_id,
-		                       .spirv = std::make_shared<const std::vector<uint32_t>>(
-		                           std::move(result.spirv))},
+		    .handle         = {.id         = ++next_shader_id,
+		                       .spirv      = std::make_shared<const std::vector<uint32_t>>(
+		                           std::move(result.spirv)),
+		                       .mesh_fetch = std::move(mesh_fetch)},
 		};
 	}
 
@@ -412,20 +429,40 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 		                         .buffer_format != Prospero::BufferFormat::k32UInt);
 	}
 	if (mesh_active) {
-		EXIT_NOT_IMPLEMENTED(!m_limits.mesh_shader_enabled);
 		auto& mesh              = vertex_info[0].mesh;
+		mesh.compute_emulation  = !m_limits.mesh_shader_enabled;
 		mesh.host_subgroup_size = m_limits.subgroup_size;
-		const auto  logical_threads =
-		    mesh.threads_num[0] * mesh.threads_num[1] * mesh.threads_num[2];
-		const auto host_threads = ((logical_threads + mesh.wave_size - 1u) / mesh.wave_size) *
-		                          std::min(mesh.host_subgroup_size, mesh.wave_size);
-		if (host_threads > m_limits.max_mesh_invocations ||
-		    host_threads > m_limits.max_mesh_group_size_x ||
-		    mesh.max_vertices > m_limits.max_mesh_vertices ||
-		    mesh.max_primitives > m_limits.max_mesh_primitives ||
-		    mesh.lds_size_dwords * sizeof(uint32_t) > m_limits.max_mesh_shared_memory) {
-			EXIT("mesh shader exceeds host limits: threads=%u vertices=%u primitives=%u LDS=%u\n",
-			     host_threads, mesh.max_vertices, mesh.max_primitives, mesh.lds_size_dwords);
+		static std::atomic_bool reported = false;
+		const auto              report_once = [&](const char* message) {
+			if (!reported.exchange(true, std::memory_order_relaxed)) {
+				std::printf("Shaders: %s\n", message);
+			}
+		};
+		if (mesh.compute_emulation) {
+			// A guest merged geometry stage needs host mesh shaders or the compute emulation (D3D12); a Vulkan device
+			// without mesh shaders stops here, as upstream.
+			EXIT_NOT_IMPLEMENTED(!m_limits.mesh_compute_emulation);
+			// The emulation keeps the mesh program's group shared memory, the counts of its group
+			// and one layer value per vertex in the compute shader's group shared memory.
+			const auto shared_bytes = mesh.lds_size_dwords * sizeof(uint32_t) + 2 * sizeof(uint32_t) +
+			                          mesh.max_vertices * sizeof(uint32_t);
+			if (shared_bytes > m_limits.max_compute_shared_memory) {
+				report_once("a merged geometry stage needs more group shared memory than the host compute shaders have; its draws are skipped");
+				return {};
+			}
+		} else {
+			const auto logical_threads =
+			    mesh.threads_num[0] * mesh.threads_num[1] * mesh.threads_num[2];
+			const auto host_threads = ((logical_threads + mesh.wave_size - 1u) / mesh.wave_size) *
+			                          std::min(mesh.host_subgroup_size, mesh.wave_size);
+			if (host_threads > m_limits.max_mesh_invocations ||
+			    host_threads > m_limits.max_mesh_group_size_x ||
+			    mesh.max_vertices > m_limits.max_mesh_vertices ||
+			    mesh.max_primitives > m_limits.max_mesh_primitives ||
+			    mesh.lds_size_dwords * sizeof(uint32_t) > m_limits.max_mesh_shared_memory) {
+				EXIT("mesh shader exceeds host limits: threads=%u vertices=%u primitives=%u LDS=%u\n",
+				     host_threads, mesh.max_vertices, mesh.max_primitives, mesh.lds_size_dwords);
+			}
 		}
 	}
 	ShaderParams pixel_params;
@@ -509,8 +546,11 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 		    static_cast<float>(std::min(m_limits.max_viewport_height, 16384u)) * 0.5f;
 		clip.enabled = true;
 	}
-	uint32_t push_data_cursor = ShaderRecompiler::IR::PushData::GraphicsDrawDwords(
-	    mesh_active, object_primitive_id);
+	// A mesh program's own draw parameters (or the object ID) come first in the push data.
+	uint32_t          push_data_cursor =
+	    !mesh_active ? ShaderRecompiler::IR::PushData::GraphicsDrawDwords(false, object_primitive_id)
+	    : vertex_info[0].mesh.compute_emulation ? ShaderRecompiler::IR::MeshEmulation::DrawDwordCount
+	                                            : ShaderRecompiler::IR::PushData::MeshDrawDwordCount;
 	GraphicsPrograms  result;
 	if (pixel_active) {
 		result.pixel = m_impl->Get(pixel_params, pixel_info, push_data_cursor);
