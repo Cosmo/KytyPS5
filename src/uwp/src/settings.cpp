@@ -78,6 +78,7 @@ AppSettings LoadSettings() {
 	read("frame_dump_snapshots", settings.frame_dump_snapshots);
 	read("gpu_memory_savings", settings.gpu_memory_savings);
 	read("video_decode_threads", settings.video_decode_threads);
+	read("gpu_memory_log", settings.gpu_memory_log);
 	read("shader_cache_any_build", settings.shader_cache_any_build);
 	read("app_memory_limit_mb", settings.app_memory_limit_mb);
 	read("auto_press_ms", settings.auto_press_ms);
@@ -115,6 +116,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["texture_mip_skip_min_size"]  = settings.texture_mip_skip_min_size;
 	json["gpu_memory_savings"]         = settings.gpu_memory_savings;
 	json["video_decode_threads"]       = settings.video_decode_threads;
+	json["gpu_memory_log"]             = settings.gpu_memory_log;
 	json["shader_cache_any_build"]     = settings.shader_cache_any_build;
 	json["impulse_triggers"]           = settings.impulse_triggers;
 	json["haptic_rumble"]              = settings.haptic_rumble;
