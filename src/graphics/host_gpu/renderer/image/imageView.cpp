@@ -1,7 +1,6 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 
 #include "common/assert.h"
-#include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 
 namespace Libs::Graphics {
@@ -30,7 +29,7 @@ namespace {
 	}
 }
 
-[[nodiscard]] bool IsValidViewType(const VulkanImage& image, const ImageViewInfo& info) {
+[[nodiscard]] bool IsValidViewType(const ImageBacking& image, const ImageViewInfo& info) {
 	switch (image.image_type) {
 		case vk::ImageType::e1D:
 			if (info.type != vk::ImageViewType::e1D && info.type != vk::ImageViewType::e1DArray) {
@@ -68,7 +67,7 @@ namespace {
 	}
 }
 
-[[nodiscard]] bool IsValidAspect(const VulkanImage& image, vk::ImageAspectFlags aspect) {
+[[nodiscard]] bool IsValidAspect(const ImageBacking& image, vk::ImageAspectFlags aspect) {
 	const auto depth_format = DepthAspectTransferFormat(image.format);
 	if (depth_format == vk::Format::eUndefined) {
 		return aspect == vk::ImageAspectFlagBits::eColor;
@@ -306,7 +305,7 @@ bool FormatsCompatible(vk::Format base, vk::Format view) noexcept {
 
 } // namespace ImageViewOps
 
-vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
+ImageViewHandle Image::FindView(const ImageViewInfo& view_info) {
 	const auto& image      = backing;
 	auto        normalized = view_info;
 	const bool  is_storage = static_cast<bool>(normalized.usage & vk::ImageUsageFlagBits::eStorage);
@@ -357,44 +356,7 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 		     image.layers);
 	}
 
-	vk::ImageViewUsageCreateInfo usage {};
-	usage.usage = is_storage ? vk::ImageUsageFlagBits::eStorage
-	                         : image.usage & ~vk::ImageUsageFlagBits::eStorage;
-	vk::ImageViewMinLodCreateInfoEXT min_lod {};
-	if (normalized.min_lod != 0) {
-		min_lod.minLod = static_cast<float>(normalized.base_level) +
-		                 static_cast<float>(normalized.min_lod) / 256.0f;
-		usage.pNext    = &min_lod;
-	}
-	vk::ImageViewCreateInfo create {};
-	create.pNext                           = &usage;
-	create.image                           = image.image;
-	create.viewType                        = normalized.type;
-	create.format                          = normalized.format;
-	create.components                      = normalized.mapping;
-	create.subresourceRange.aspectMask     = normalized.aspect;
-	create.subresourceRange.baseMipLevel   = normalized.base_level;
-	create.subresourceRange.levelCount     = normalized.level_count;
-	create.subresourceRange.baseArrayLayer = normalized.base_layer;
-	create.subresourceRange.layerCount     = normalized.layer_count;
-
-	vk::ImageView view   = nullptr;
-	const auto    result = m_graphics.device.createImageView(&create, nullptr, &view);
-	if (result != vk::Result::eSuccess || view == nullptr) {
-		EXIT("failed to create image view: result=%d image_format=%d view_format=%d type=%d "
-		     "aspect=0x%x mip=%u+%u layer=%u+%u usage=0x%x\n",
-		     static_cast<int>(result), static_cast<int>(image.format),
-		     static_cast<int>(view_info.format), static_cast<int>(view_info.type),
-		     static_cast<vk::ImageAspectFlags::MaskType>(view_info.aspect), view_info.base_level,
-		     view_info.level_count, view_info.base_layer, view_info.layer_count,
-		     static_cast<vk::ImageUsageFlags::MaskType>(view_info.usage));
-	}
-	SetVulkanObjectNameF(
-	    m_graphics.device, view,
-	    "Kyty.ImageView[guest=0x{:016x} format={} aspect=0x{:x} mip={}+{} layer={}+{}]",
-	    info.data.address, static_cast<uint32_t>(normalized.format),
-	    static_cast<vk::ImageAspectFlags::MaskType>(normalized.aspect), normalized.base_level,
-	    normalized.level_count, normalized.base_layer, normalized.layer_count);
+	const auto view = CreateView(normalized);
 	views.push_back({normalized, view});
 	return view;
 }
