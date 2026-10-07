@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
+#include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
@@ -150,9 +151,11 @@ uint32_t MeshGroupCount(CommandBuffer& buffer, const DrawCallInfo& draw,
 		return 0;
 	}
 	const auto groups = (primitives - 1u) / mesh.primitives_per_group + 1u;
-	if (groups > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION ||
-	    draw.instance_count > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION ||
-	    uint64_t {groups} * draw.instance_count > MaxGroupsPerGrid) {
+	// (The compute emulation draws in chunks, so the limits of one dispatch do not apply to it.)
+	if (!mesh.compute_emulation &&
+	    (groups > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION ||
+	     draw.instance_count > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION ||
+	     uint64_t {groups} * draw.instance_count > MaxGroupsPerGrid)) {
 		static std::atomic_bool warned = false;
 		WarnOnce(warned, "mesh draws beyond the host dispatch limits are skipped");
 		return 0;
@@ -349,6 +352,98 @@ RenderExecutor::RenderTargets RenderExecutor::AcquireRenderTargets(CommandBuffer
 	return targets;
 }
 
+void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffer,
+                                            const ShaderVertexInputInfo&   vs_input_info,
+                                            const PipelineCache::Pipeline& compute,
+                                            const PipelineCache::Pipeline& graphics,
+                                            std::span<const uint32_t> draw_data, uint32_t groups,
+                                            uint32_t instances) {
+	// What one draw may use of the device's memory; a bigger draw takes more chunks.
+	constexpr uint64_t RecordBytes = uint64_t {32} << 20u;
+	constexpr uint64_t IndexBytes  = uint64_t {8} << 20u;
+	constexpr uint32_t MaxDispatch = D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
+
+	const auto& mesh            = vs_input_info.mesh;
+	const auto  layout          = IR::MeshEmulation::LayoutFor(vs_input_info.stage.module->info.info.outputs);
+	const auto  primitive_slots = mesh.EmulatedPrimitiveSlots();
+	const uint64_t group_records =
+	    uint64_t {mesh.EmulatedVertexSlots()} * layout.StrideDwords() * sizeof(uint32_t);
+	const uint64_t group_indices = uint64_t {primitive_slots} * 3 * sizeof(uint32_t);
+	if (group_records == 0 || group_indices == 0 || group_records > RecordBytes ||
+	    group_indices > IndexBytes) {
+		static std::atomic_bool warned = false;
+		WarnOnce(warned, "a mesh group is too big for the compute emulation; its draws are skipped");
+		return;
+	}
+	EXIT_IF(draw_data.size() != IR::PushData::MeshDrawDwordCount);
+	if (m_mesh_records == nullptr) {
+		m_mesh_records = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(),
+		                                          MemoryUsage::DeviceLocal, 0, RecordBytes);
+		m_mesh_indices = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(),
+		                                          MemoryUsage::DeviceLocal, 0, IndexBytes);
+	}
+	auto*      list    = buffer.Handle();
+	auto&      trace   = D3D12::GetGpuTrace();
+	const auto records = m_mesh_records->GpuAddress();
+	const auto indices = m_mesh_indices->GpuAddress();
+
+	// The chunk: `chunk_groups` groups of each of `chunk_instances` instances, as many as fit.
+	const uint64_t budget = std::min(RecordBytes / group_records, IndexBytes / group_indices);
+	const uint32_t chunk_instances_max =
+	    static_cast<uint32_t>(std::min<uint64_t>({instances, budget, MaxDispatch}));
+	const uint32_t chunk_groups_max = static_cast<uint32_t>(
+	    std::min<uint64_t>({groups, std::max<uint64_t>(1, budget / chunk_instances_max), MaxDispatch}));
+
+	const auto& compute_layout = compute.layout;
+	list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+	uint32_t parameters[IR::MeshEmulation::DrawDwordCount] {};
+	std::ranges::copy(draw_data, parameters);
+	for (uint32_t instance_base = 0; instance_base < instances; instance_base += chunk_instances_max) {
+		const uint32_t chunk_instances = std::min(chunk_instances_max, instances - instance_base);
+		for (uint32_t group_base = 0; group_base < groups; group_base += chunk_groups_max) {
+			const uint32_t chunk_groups = std::min(chunk_groups_max, groups - group_base);
+			parameters[IR::MeshEmulation::GroupBaseParameter]    = group_base;
+			parameters[IR::MeshEmulation::InstanceBaseParameter] = instance_base;
+			parameters[IR::MeshEmulation::ChunkWidthParameter]   = chunk_groups;
+
+			// The compute shader writes the chunk's vertices and triangles.
+			m_mesh_records->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+			m_mesh_indices->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+			// (Root descriptors are set after the transitions: the debug layer takes a buffer's state
+			// at its first use from the first descriptor set for it.)
+			list->SetComputeRootUnorderedAccessView(compute_layout.MeshScratchParameter(), records);
+			list->SetComputeRootUnorderedAccessView(compute_layout.MeshScratchParameter() + 1, indices);
+			list->SetComputeRoot32BitConstants(0, IR::MeshEmulation::DrawDwordCount, parameters, 0);
+			if (compute_layout.runtime_data) {
+				// spirv_to_dxil's compute runtime data: the group counts.
+				const uint32_t runtime[7] = {chunk_groups, chunk_instances, 1, 0, 0, 0, 0};
+				list->SetComputeRoot32BitConstants(compute_layout.RuntimeDataParameter(),
+				                                   static_cast<UINT>(std::size(runtime)), runtime, 0);
+			}
+			auto slot = trace.Begin(list, &compute.trace);
+			list->SetPipelineState(compute.pipeline);
+			list->Dispatch(chunk_groups, chunk_instances, 1);
+			trace.End(list, slot);
+			m_statistics.dispatches++;
+			buffer.GlobalMemoryBarrier();
+
+			// One indexed draw of every slot of the chunk.
+			m_mesh_records->Use(buffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+			m_mesh_indices->Use(buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+			list->SetGraphicsRootShaderResourceView(graphics.layout.MeshScratchParameter(), records);
+			const auto                     index_count = chunk_groups * chunk_instances * primitive_slots * 3u;
+			const D3D12_INDEX_BUFFER_VIEW  view {indices, static_cast<UINT>(index_count * sizeof(uint32_t)),
+			                                     DXGI_FORMAT_R32_UINT};
+			list->IASetIndexBuffer(&view);
+			slot = trace.Begin(list, &graphics.trace);
+			list->SetPipelineState(graphics.pipeline);
+			list->DrawIndexedInstanced(index_count, 1, 0, 0, 0);
+			trace.End(list, slot);
+		}
+	}
+}
+
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
@@ -363,6 +458,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		return;
 	}
 	const bool mesh = vs_input_info.stage.program->stage == ShaderType::Mesh;
+	// A mesh program the device cannot run as a mesh shader runs as a compute shader whose output a
+	// vertex stage draws (ShaderRecompiler::IR::MeshEmulation).
+	const bool emulated_mesh = mesh && vs_input_info.mesh.compute_emulation;
 	const auto& mode = buffer.GetRegisters().GetModeControl();
 	if (mode.cull_front && mode.cull_back && (mesh || IsTriangleTopology(topology))) {
 		// D3D12 cannot cull both faces, which draws nothing.
@@ -428,7 +526,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		descriptor_stages[stage_count++] = &*bindings.pixel;
 	}
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
-	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
+	PrepareGraphicsBindings(stages, std::span {m_targets.colors, m_targets.color_count});
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
 	if (!mesh) {
@@ -440,9 +538,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// read-only, so it can be a depth-read target and a shader resource at once.
 	// (The reused pixel bindings are the last pixel shader's when this draw has none.)
 	const bool read_only_depth =
-	    state.ps_active && SamplesDepthTarget(state.depth_info, bindings.pixel);
+	    state.ps_active && SamplesDepthTarget(m_targets.depth, bindings.pixel);
 	if (read_only_depth) {
-		auto& depth = state.depth_info;
+		auto& depth = m_targets.depth;
 		if (depth.depth_write_enable || depth.stencil_front.writeMask != 0 ||
 		    depth.stencil_back.writeMask != 0) {
 			static std::atomic_bool warned = false;
@@ -453,14 +551,19 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		depth.stencil_front.writeMask = 0;
 		depth.stencil_back.writeMask  = 0;
 	}
-	m_read_only_depth = read_only_depth ? state.depth_info.image_id : ImageId {};
+	m_read_only_depth = read_only_depth ? m_targets.depth.image_id : ImageId {};
 
-	const bool index16   = indices.type == vk::IndexType::eUint16;
+	if (emulated_mesh) {
+		// What is drawn is the list of triangles the compute shader wrote.
+		topology                 = vk::PrimitiveTopology::eTriangleList;
+		primitive_restart_enable = false;
+	}
+	const bool index16   = indices.guest_element_size != 4;
 	const auto strip_cut = !primitive_restart_enable ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED
 	                       : index16 ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF
 	                                 : D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
-	    std::span {state.color_info, state.color_count}, state.depth_info,
+	    std::span {m_targets.colors, m_targets.color_count}, m_targets.depth,
 	    std::span {state.vertex_info.data(), 1}, buffer,
 	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
 	    strip_cut, state.programs);
@@ -469,8 +572,17 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		m_read_only_depth = {};
 		return;
 	}
-	const auto targets = AcquireRenderTargets(buffer, state.color_info, state.color_count,
-	                                          state.depth_info, read_only_depth);
+	const PipelineCache::Pipeline* mesh_compute = nullptr;
+	if (emulated_mesh) {
+		mesh_compute = &m_context.GetPipelineCache().GetMeshComputePipeline(vs_input_info,
+		                                                                    state.programs.vertex[0]);
+		if (mesh_compute->pipeline == nullptr) {
+			m_read_only_depth = {};
+			return;
+		}
+	}
+	const auto targets = AcquireRenderTargets(buffer, m_targets.colors, m_targets.color_count,
+	                                          m_targets.depth, read_only_depth);
 
 	// Resource preparation above may finish and restart the command list. From here on, every
 	// operation records into the current list and cannot touch guest memory.
@@ -498,30 +610,38 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 
 	// spirv_to_dxil's vertex index is SV_VertexID plus first_vertex.
 	D3D12::VertexRuntimeData runtime {};
-	runtime.first_vertex =
-	    indexed ? static_cast<uint32_t>(vertex_offset) : emit.first_vertex;
-	runtime.base_instance   = emit.first_instance;
-	runtime.is_indexed_draw = draw.IsIndexed() ? 1u : 0u;
+	// (The vertex stage of a mesh draw run as a compute shader reads its vertices from the records:
+	// its draw has no vertex offset or first instance.)
+	runtime.first_vertex = emulated_mesh ? 0u : static_cast<uint32_t>(vertex_offset);
+	runtime.base_instance   = emulated_mesh ? 0u : emit.first_instance;
+	runtime.is_indexed_draw = (draw.indexed || emulated_mesh) ? 1u : 0u;
+	if (emulated_mesh) {
+		// The compute shader is the mesh program's own stage: its bindings go to the compute root
+		// signature; the pixel stage's go to the graphics one below.
+		const uint32_t    compute_runtime[7] {};
+		PreparedBindings* vertex_stage = &bindings.vertex[0];
+		CommitBindings(buffer, false, *mesh_compute, {&vertex_stage, 1},
+		               {reinterpret_cast<const uint8_t*>(compute_runtime), sizeof(compute_runtime)});
+	}
 	SetViewports(buffer, list, vs_input_info, targets.width, targets.height, runtime);
 	// The scene's size for the overlay: draws with color targets and a depth target, within the targets.
 	if (targets.color_count > 0 && targets.has_depth) {
 		FrameResolution::NoteRender(static_cast<uint32_t>(std::clamp(runtime.viewport_width, 0.0f, static_cast<float>(targets.width))),
 		                            static_cast<uint32_t>(std::clamp(runtime.viewport_height, 0.0f, static_cast<float>(targets.height))));
 	}
-	CommitBindings(buffer, true, pipeline, stages,
+	CommitBindings(buffer, true, pipeline, emulated_mesh ? stages.subspan(1) : stages,
 	               {reinterpret_cast<const uint8_t*>(&runtime), sizeof(runtime)});
-	if (mesh) {
-		// The mesh draw parameters start the push constants, the first root parameter.
-		const uint32_t draw_data[] {
-		    draw.index_count,
-		    draw.IsIndexed() ? static_cast<uint32_t>(emit.vertex_offset) : emit.first_vertex,
-		    emit.first_instance, index_source.guest_element_size,
-		    static_cast<uint32_t>(index_source.address),
-		    static_cast<uint32_t>(index_source.address >> 32u)};
-		static_assert(std::size(draw_data) == IR::PushData::MeshDrawDwordCount);
+	// The draw parameters of a mesh program start its push constants, the first root parameter.
+	const uint32_t draw_data[] {
+	    draw.index_count,
+	    static_cast<uint32_t>(emit.vertex_offset), index_source.guest_element_size,
+	    static_cast<uint32_t>(index_source.address),
+	    static_cast<uint32_t>(index_source.address >> 32u)};
+	static_assert(std::size(draw_data) == IR::PushData::MeshDrawDwordCount);
+	if (mesh && !emulated_mesh) {
 		list->SetGraphicsRoot32BitConstants(0, static_cast<UINT>(std::size(draw_data)), draw_data,
 		                                    0);
-	} else if (state.ps_input_info.object_primitive_id) {
+	} else if (!mesh && state.ps_input_info.object_primitive_id) {
 		// The object ID (CxObjectIdMode) starts the push constants; the pixel program adds the primitive ID.
 		const uint32_t object_id = buffer.GetUserConfig().GetObjectId();
 		list->SetGraphicsRoot32BitConstants(0, 1, &object_id, 0);
@@ -532,8 +652,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                                    buffer.GetRegisters().GetUserClipPlanes().data(),
 		                                    IR::PushData::UserClipPlaneDword);
 	}
-	SetDynamicState(buffer, list, state.depth_info,
-	                state.depth_info.depth_bounds_test_enable && targets.has_depth);
+	SetDynamicState(buffer, list, m_targets.depth,
+	                m_targets.depth.depth_bounds_test_enable && targets.has_depth);
 
 	LogDrawPhase(draw.Name(), "Draw");
 	list->OMSetRenderTargets(targets.color_count, targets.colors.data(), FALSE,
@@ -548,6 +668,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	    WritesMemory(vs_input_info.stage) || (state.ps_active && WritesMemory(state.ps_input_info.stage));
 	if (writes_memory) {
 		buffer.GlobalMemoryBarrier();
+	}
+	if (emulated_mesh) {
+		RecordEmulatedMeshDraw(buffer, vs_input_info, *mesh_compute, pipeline, draw_data,
+		                       mesh_groups, draw.instance_count);
+		if (writes_memory) {
+			buffer.GlobalMemoryBarrier();
+		}
+		m_read_only_depth = {};
+		LogDrawPhase(draw.Name(), "DrawComplete");
+		return;
 	}
 	auto&      trace = D3D12::GetGpuTrace();
 	const auto slot  = trace.Begin(list, &pipeline.trace);

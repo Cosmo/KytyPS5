@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "graphics/shader/recompiler/frontend/translate/Translator.h"
+#include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/shader.h"
 
 #include <algorithm>
@@ -1219,7 +1220,16 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 				return entry_ir.ISub(lhs, minimum(lhs, rhs));
 			};
 			const auto local = builtin(IR::StageInputKind::LocalInvocationIndex);
-			const auto group = builtin(IR::StageInputKind::WorkgroupId, 0);
+			// The compute emulation dispatches a chunk of the draw: its workgroups start at the
+			// chunk's first group and instance.
+			const auto group = mesh.compute_emulation
+			                       ? entry_ir.IAdd(builtin(IR::StageInputKind::WorkgroupId, 0),
+			                                       draw(IR::MeshEmulation::GroupBaseParameter))
+			                       : builtin(IR::StageInputKind::WorkgroupId, 0);
+			const auto instance = mesh.compute_emulation
+			                          ? entry_ir.IAdd(builtin(IR::StageInputKind::WorkgroupId, 1),
+			                                          draw(IR::MeshEmulation::InstanceBaseParameter))
+			                          : builtin(IR::StageInputKind::WorkgroupId, 1);
 			const auto primitive_chunk = mesh.fast_launch ? group :
 			    entry_ir.IMul(group, u32(mesh.primitives_per_group));
 			const auto step  = u32(mesh.InputPrimitiveStep());
@@ -1268,8 +1278,7 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			if (mesh.fast_launch) {
 				// Fast launch broadcasts the subgroup's base vertex and instance to every lane.
 				entry_ir.SetVectorReg(static_cast<IR::VectorReg>(5), vertex_index(group));
-				entry_ir.SetVectorReg(static_cast<IR::VectorReg>(6),
-				                      builtin(IR::StageInputKind::WorkgroupId, 1));
+				entry_ir.SetVectorReg(static_cast<IR::VectorReg>(6), instance);
 			} else {
 				// GS adjacency addresses local ES records in LDS. Fans retain the draw's
 				// center in every subgroup; strip winding follows the global primitive.
@@ -1302,20 +1311,29 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 				const auto index_low    = draw(3);
 				const auto byte_offset  = entry_ir.IAdd(entry_ir.BitwiseAnd(index_low, u32(3)),
 				                                           entry_ir.IMul(input_vertex, index_bytes));
-				// Indexed draws pass the device address of their indices.
-				const auto packed_index = entry_ir.Emit(
-				    IR::ValueOpcode::LoadDeviceAddressU32,
-				    {entry_ir.BitwiseAnd(index_low, u32(~3u)), draw(4),
-				     entry_ir.BitwiseAnd(byte_offset, u32(~3u)),
-				     entry_ir.LogicalAnd(indexed, entry_ir.ULessThan(local, vertices))});
+				const auto active = entry_ir.LogicalAnd(indexed, entry_ir.ULessThan(local, vertices));
+				const auto aligned = entry_ir.BitwiseAnd(index_low, u32(~3u));
+				const auto offset = entry_ir.BitwiseAnd(byte_offset, u32(~3u));
+				const auto packed_index = [&] {
+					if (GetHostShaderFeatures().mesh_index_device_address) {
+						return entry_ir.Emit(IR::ValueOpcode::LoadDeviceAddressU32,
+						                     {aligned, draw(4), offset, active});
+					}
+					const auto resource = entry_ir.Emit(IR::ValueOpcode::GetAddressResource,
+					                                    {aligned, draw(4)});
+					const auto memory_index = static_cast<uint32_t>(result.memory_info.size());
+					result.memory_info.push_back({.kind = IR::ResourceKind::Global});
+					return entry_ir.Emit(IR::ValueOpcode::LoadAddressU32,
+					                     {resource, offset, u32(0), active},
+					                     IR::MemoryFlags {.index = memory_index});
+				}();
 				const auto index = IR::U32(entry_ir.Emit(
 				    IR::ValueOpcode::BitFieldUExtract,
 				    {packed_index, entry_ir.IMul(entry_ir.BitwiseAnd(byte_offset, u32(3)), u32(8)),
 				     entry_ir.IMul(index_bytes, u32(8))}));
 				entry_ir.SetVectorReg(static_cast<IR::VectorReg>(5),
 				                      vertex_index(entry_ir.Select(indexed, index, input_vertex)));
-				entry_ir.SetVectorReg(static_cast<IR::VectorReg>(8),
-				                      builtin(IR::StageInputKind::WorkgroupId, 1));
+				entry_ir.SetVectorReg(static_cast<IR::VectorReg>(8), instance);
 			}
 		} else if (options.stage == ShaderType::Local) {
 			entry_ir.SetScalarReg(static_cast<IR::ScalarReg>(3), active_lane_count());

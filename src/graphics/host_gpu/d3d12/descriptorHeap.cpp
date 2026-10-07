@@ -134,6 +134,11 @@ D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::BindlessView(uint32_t index) const n
 	return m_views.Base().Cpu(index);
 }
 
+D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap::BindlessTable(CommandBuffer& command) {
+	Bind(command);
+	return m_views.Base().gpu;
+}
+
 DescriptorHeap::~DescriptorHeap() {
 	if (m_scratch != nullptr) {
 		m_scratch->Release();
