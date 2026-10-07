@@ -1,4 +1,5 @@
 #include "common/common.h"
+#include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "kernel/fileSystem.h"
@@ -1129,8 +1130,17 @@ private:
 		if (c == nullptr) {
 			return false;
 		}
-		if (avcodec_parameters_to_context(c, s->codecpar) < 0 ||
-		    avcodec_open2(c, dec, nullptr) < 0) {
+		if (avcodec_parameters_to_context(c, s->codecpar) < 0) {
+			avcodec_free_context(&c);
+			return false;
+		}
+		if (c->codec_type == AVMEDIA_TYPE_VIDEO && Config::VideoDecodeThreads()) {
+			// The default is one thread: a 4K video is decoded by a single core, and on the Series X that is what the intro of a game waits for. The decoder
+			// runs on a thread of its own and takes frames with send/receive, so the frames that frame threading holds back cost nothing.
+			c->thread_count = 0; // as many as there are cores
+			c->thread_type  = FF_THREAD_FRAME | FF_THREAD_SLICE;
+		}
+		if (avcodec_open2(c, dec, nullptr) < 0) {
 			avcodec_free_context(&c);
 			return false;
 		}

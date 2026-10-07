@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/d3d12/buffer.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
 #include "graphics/host_gpu/d3d12/renderContext.h"
@@ -40,7 +41,11 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(size == 0);
 
-	const auto allocation = AllocationDesc(graphics, usage);
+	auto allocation = AllocationDesc(graphics, usage);
+	if (Config::GpuMemorySavings() && size < 1024 * 1024 && allocation.CustomPool != nullptr) {
+		// A small buffer in a pool takes a block of the pool (64 MB for the 64 KB readback buffer of the BDA table) when it is the first: its own memory instead
+		allocation.Flags |= D3D12MA::ALLOCATION_FLAG_COMMITTED;
+	}
 
 	D3D12_RESOURCE_DESC desc {};
 	desc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;

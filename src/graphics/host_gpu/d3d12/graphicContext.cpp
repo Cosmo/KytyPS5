@@ -314,6 +314,10 @@ void GraphicContext::Create(bool enable_debug_layer) {
 	D3D12MA::ALLOCATOR_DESC allocator_desc {};
 	// Guest data overwrites new memory before use, as with VMA in the Vulkan build.
 	allocator_desc.Flags    = D3D12MA::ALLOCATOR_FLAG_DEFAULT_POOLS_NOT_ZEROED;
+	// One live small allocation keeps its block: with the default of 64 MB that was 100-400 MB of GPU memory that nothing used
+	if (Config::GpuMemorySavings()) {
+		allocator_desc.PreferredBlockSize = 16ull * 1024 * 1024;
+	}
 	allocator_desc.pDevice  = device;
 	allocator_desc.pAdapter = adapter.Get();
 	Check(D3D12MA::CreateAllocator(&allocator_desc, &allocator), "create memory allocator");
