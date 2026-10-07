@@ -7,6 +7,7 @@
 #include "common/slotVector.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
+#include "graphics/host_gpu/renderer/cache/bdaLayout.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
@@ -35,6 +36,7 @@ public:
 	static constexpr uint32_t CACHING_PAGEBITS  = 14;
 	static constexpr uint64_t CACHING_PAGESIZE  = uint64_t {1} << CACHING_PAGEBITS;
 	static constexpr uint64_t CACHING_NUMPAGES  = (LOWER_ADDRESS_SIZE + LibKernel::Memory::kExtendedMemorySize) >> CACHING_PAGEBITS;
+	static_assert(CACHING_PAGEBITS == BdaLayout::PAGE_BITS && CACHING_NUMPAGES == BdaLayout::PAGE_COUNT);
 
 	static constexpr uint64_t PageIndex(uint64_t address) {
 		return (address < LOWER_ADDRESS_SIZE
