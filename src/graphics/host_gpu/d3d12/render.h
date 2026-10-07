@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/d3d12/pipelineCache.h"
 #include "graphics/host_gpu/renderArgs.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
+#include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 
 #include <array>
@@ -195,12 +196,32 @@ private:
 	void CommitBindings(CommandBuffer& buffer, bool graphics, const PipelineCache::Pipeline& pipeline,
 	                    std::span<PreparedBindings* const> stages,
 	                    std::span<const uint8_t>           runtime_data);
+	// Draws a mesh program that runs as a compute shader (ShaderRecompiler::IR::MeshEmulation):
+	// in chunks that fit the scratch buffers, `compute` writes the vertices and triangles of the
+	// chunk's groups and `graphics` draws them. Both have their bindings committed already;
+	// `draw_data` are the draw's mesh parameters (PushData::MeshDrawDwordCount of them).
+	void RecordEmulatedMeshDraw(CommandBuffer& buffer, const ShaderVertexInputInfo& vs_input_info,
+	                            const PipelineCache::Pipeline& compute,
+	                            const PipelineCache::Pipeline& graphics,
+	                            std::span<const uint32_t> draw_data, uint32_t groups,
+	                            uint32_t instances);
+
+	// GET_LOD_STATS counters since their last reset. With --lod-stats a bound T# with counting
+	// enabled counts as sampled at its BASE_LEVEL, clamped when its MIN_LOD lies above that level.
+	struct MipStatsCounter {
+		uint8_t finest_level = 15; // no samples
+		bool    clamped      = false;
+		bool    unclamped    = false;
+	};
 
 	RenderContext&              m_context;
 	Statistics                  m_statistics;
+	bool                        m_lod_stats = Config::LodStatsEnabled();
+	std::array<MipStatsCounter, 256> m_mip_stats {};
 	std::vector<ImageId>        m_bound_images;
 	// Reused across draws and dispatches (their vectors keep their capacity).
 	GraphicsBindings            m_graphics_bindings;
+	DrawTargets                 m_targets;
 	PreparedBindings            m_compute_bindings;
 	D3D12_CPU_DESCRIPTOR_HANDLE m_null_render_target {}; // fills unused color slots
 	// The depth target of the draw being recorded while the draw also samples it; its state
@@ -211,6 +232,10 @@ private:
 	    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 	// Arguments of the indirect dispatch being recorded (see RecordDispatchIndirect).
 	std::unique_ptr<Buffer> m_indirect_args;
+	// The vertices and triangles of the mesh draw being recorded (see RecordEmulatedMeshDraw),
+	// made when the first one is drawn.
+	std::unique_ptr<Buffer> m_mesh_records;
+	std::unique_ptr<Buffer> m_mesh_indices;
 	// By root signature; null for pipelines without runtime data.
 	std::unordered_map<ID3D12RootSignature*, D3D12::ComPtr<ID3D12CommandSignature>>
 	    m_dispatch_signatures;
