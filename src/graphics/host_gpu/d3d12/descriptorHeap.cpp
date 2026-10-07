@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/d3d12/descriptorHeap.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "graphics/host_gpu/d3d12/commandScheduler.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
 
@@ -157,6 +158,35 @@ DescriptorRange DescriptorHeap::AllocateViews(CommandBuffer& command, uint32_t c
 DescriptorRange DescriptorHeap::AllocateSamplers(CommandBuffer& command, uint32_t count) {
 	Bind(command);
 	return m_samplers.Allocate(m_scheduler, count);
+}
+
+DescriptorRange DescriptorHeap::WriteSamplers(CommandBuffer& command, std::span<const D3D12_CPU_DESCRIPTOR_HANDLE> handles) {
+	const auto tick = m_scheduler.CurrentTick();
+	if (m_sampler_tick != tick) {
+		m_sampler_sets.clear();
+		m_sampler_used = 0;
+		m_sampler_tick = tick;
+	}
+	std::vector<SIZE_T> key;
+	key.reserve(handles.size());
+	for (const auto handle: handles) {
+		key.push_back(handle.ptr);
+	}
+	if (const auto found = m_sampler_sets.find(key); found != m_sampler_sets.end()) {
+		return found->second;
+	}
+	const auto range = AllocateSamplers(command, static_cast<uint32_t>(handles.size()));
+	for (uint32_t i = 0; i < handles.size(); i++) {
+		m_graphics.device->CopyDescriptorsSimple(1, range.Cpu(i), handles[i], D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+	}
+	m_sampler_used += static_cast<uint32_t>(handles.size());
+	// How close a command list comes to the limit, logged when it is a new high in steps of a quarter.
+	if (m_sampler_used >= m_sampler_reported + SamplerCapacity / 4) {
+		m_sampler_reported = m_sampler_used;
+		LOGF("D3D12: one command list uses %u of %u sampler descriptors (%zu sets)\n", m_sampler_used, SamplerCapacity, m_sampler_sets.size() + 1);
+	}
+	m_sampler_sets.emplace(std::move(key), range);
+	return range;
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::ScratchView() const noexcept {
