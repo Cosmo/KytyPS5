@@ -1,11 +1,17 @@
 #version 450
+#ifndef GATHER_DWORDS
 #extension GL_EXT_shader_16bit_storage : require
+#endif
 
 layout(constant_id = 0) const uint D32 = 0u;
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0, std430) readonly buffer Input { uint data[]; } input_buffer;
+#ifdef GATHER_DWORDS
+layout(set = 0, binding = 1, std430) buffer Output { uint data[]; } output_buffer;
+#else
 layout(set = 0, binding = 1, std430) buffer Output { uint16_t data[]; } output_buffer;
+#endif
 
 layout(push_constant, std430) uniform Conversion {
 	uint src_base;
@@ -33,5 +39,27 @@ void main() {
 	}
 	uint src = params.src_base + y * params.source_pitch + x * 4u;
 	uint dst = params.dst_base + y * params.target_pitch + x * 2u;
+#ifdef GATHER_DWORDS
+	// The D3D12 build: without 16-bit stores (the Xbox Series X) a 16-bit store becomes atomics,
+	// which have no effect on this kernel's output buffer there (gpu_tiler_common.inc). With dword
+	// aligned rows, one invocation writes both halves of a dword.
+	if (((params.dst_base | params.target_pitch) & 3u) == 0u) {
+		if ((x & 1u) != 0u) {
+			return;
+		}
+		uint word = decode(input_buffer.data[src >> 2u]);
+		if (x + 1u < params.width) {
+			word |= decode(input_buffer.data[(src + 4u) >> 2u]) << 16u;
+		}
+		output_buffer.data[dst >> 2u] = word;
+		return;
+	}
+	uint shift = (dst & 2u) * 8u;
+	uint mask = 0xffffu << shift;
+	uint word = dst >> 2u;
+	atomicAnd(output_buffer.data[word], ~mask);
+	atomicOr(output_buffer.data[word], decode(input_buffer.data[src >> 2u]) << shift);
+#else
 	output_buffer.data[dst >> 1u] = uint16_t(decode(input_buffer.data[src >> 2u]));
+#endif
 }
