@@ -67,6 +67,8 @@ public:
 	// Shaders read guest memory by address: caches the buffers of all mapped guest ranges and has the faults processed at the next garbage collection.
 	void PrepareBda();
 	void RunGarbageCollector();
+	// Frame dump (debugging): saves the render targets when the game menu asked for it. Called at the flip, from the thread that runs the guest GPU.
+	void DumpFrameIfRequested(uint32_t max_wait_ms = 0);
 
 	void AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);
 	void DeleteInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);
