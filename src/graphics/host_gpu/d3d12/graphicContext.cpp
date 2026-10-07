@@ -79,6 +79,9 @@ std::string UnfinishedWorkReport() {
 		                      static_cast<uint32_t>(g_device->GetDeviceRemovedReason()));
 	}
 	// The pipeline the GPU was stuck in, from the GPU trace; its shaders are saved.
+	if (!GetGpuTrace().Enabled()) {
+		report += "GPU crash diagnostics are off: turn them on in the settings (Developer) to name the draw\n";
+	}
 	const auto unfinished = GetGpuTrace().Unfinished(4);
 	for (size_t i = 0; i < unfinished.size(); i++) {
 		const auto&       pipeline = *unfinished[i];
@@ -270,13 +273,16 @@ void GraphicContext::Create(bool enable_debug_layer) {
 	      "CreateDXGIFactory2");
 
 	// DRED records the GPU's progress and page faults, so a device removal can be explained
-	// (D3D12::DeviceRemovedReport). It has to be set up before the device is created.
-	D3D12::ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
-	if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
-		dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-		dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-	} else {
-		LOGF("D3D12: DRED unavailable; device removals won't be explained\n");
+	// (D3D12::DeviceRemovedReport). It has to be set up before the device is created. It costs time
+	// on every command, so only with gpu_crash_diagnostics.
+	if (Config::GpuCrashDiagnostics()) {
+		D3D12::ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
+		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
+			dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+			dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+		} else {
+			LOGF("D3D12: DRED unavailable; device removals won't be explained\n");
+		}
 	}
 
 	D3D12::ComPtr<IDXGIFactory6> factory6;
@@ -306,7 +312,9 @@ void GraphicContext::Create(bool enable_debug_layer) {
 		EXIT("D3D12: no hardware adapter with D3D12\n");
 	}
 	D3D12::g_device = device;
-	D3D12::GetGpuTrace().Create(device);
+	if (Config::GpuCrashDiagnostics() || Config::GpuHangExitSeconds() != 0) {
+		D3D12::GetGpuTrace().Create(device);
+	}
 	if (Config::GpuHangExitSeconds() != 0) {
 		D3D12::GetGpuTrace().StartWatchdog(device, Config::GpuHangExitSeconds());
 	}
