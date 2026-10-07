@@ -1,9 +1,11 @@
 #include "kernel/memory.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "xbox/lazyCounters.h"
 #include "xbox/lazyRegions.h"
+#include "xbox/pagerStore.h"
 #include "xbox/tunables.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -18,15 +20,20 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <condition_variable>
+#include <deque>
 #include <magic_enum.hpp>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <span>
+#include <stop_token>
+#include <thread>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -925,6 +932,30 @@ bool HandleCommitFault(uint64_t fault_vaddr, bool is_write) noexcept {
 
 bool EnsureGuestCommitted(uint64_t vaddr, uint64_t size) {
 	return g_guest_address_space == nullptr || g_guest_address_space->EnsureCommitted(vaddr, size);
+}
+
+void DumpPagerContext(const uint64_t* values, size_t count) {
+	if (g_guest_address_space != nullptr) {
+		g_guest_address_space->DumpPagerContext(values, count);
+	}
+}
+
+GuestBufferScope::GuestBufferScope(uint64_t vaddr, uint64_t size) {
+	if (g_guest_address_space != nullptr) {
+		m_id = g_guest_address_space->PinBuffer(vaddr, size);
+	}
+}
+
+GuestBufferScope::~GuestBufferScope() {
+	if (m_id != 0 && g_guest_address_space != nullptr) {
+		g_guest_address_space->UnpinBuffer(m_id);
+	}
+}
+
+void PinGuestStack(uint64_t vaddr, uint64_t size) {
+	if (g_guest_address_space != nullptr) {
+		g_guest_address_space->PinRange(vaddr, size);
+	}
 }
 
 void RestoreHostProtection(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode old_mode) noexcept {
