@@ -16,6 +16,14 @@
 #include <cstring>
 namespace Libs::Graphics {
 
+bool GraphicContext::SupportsDepthTargetFormat(vk::Format format, uint32_t samples) const {
+	vk::ImageFormatProperties properties {};
+	return GetImageFormatProperties(format, vk::ImageType::e2D, vk::ImageTiling::eOptimal,
+	                                DepthTargetImageUsage(), vk::ImageCreateFlags {},
+	                                &properties) == vk::Result::eSuccess &&
+	       static_cast<bool>(properties.sampleCounts & vulkan_sample_count(samples));
+}
+
 CommandBuffer::CommandBuffer(CommandScheduler& scheduler)
     : m_context(scheduler.Context()), m_graphics(scheduler.Graphics()) {}
 
