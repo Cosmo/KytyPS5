@@ -308,6 +308,13 @@ bool File::CreateDirectories(const std::filesystem::path& path) {
     return true;
 }
 
+bool File::DeleteDirectory(const std::filesystem::path& path, std::error_code* error) {
+	if (IsArchivePath(path)) {
+		return false;
+	}
+	return SysFileDeleteDirectory(WithoutTrailingSeparator(path), error);
+}
+
 bool File::DeleteFile(
     const std::filesystem::path& name) // @suppress("Member declaration not found")
 {

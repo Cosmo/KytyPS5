@@ -1273,7 +1273,7 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args) {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
+	EXIT_IF(args.offset_source == DrawOffsetSource::DrawRegisters && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
@@ -1364,7 +1364,7 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
+	EXIT_IF(args.offset_source == DrawOffsetSource::DrawRegisters && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
