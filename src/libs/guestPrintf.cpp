@@ -12,6 +12,7 @@
 #include "common/common.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
+#include "libs/crashTrail.h"
 #include "libs/vaContext.h"
 
 #include <cfloat>
@@ -776,6 +777,7 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 		int s = snprintf(sn_s, sn_n, "%s", buffer.data());
 		EXIT_NOT_IMPLEMENTED(static_cast<size_t>(s) >= sn_n);
 	} else {
+		CrashTrail::Output(buffer.data());
 		LOGF_COLOR(Log::Color::BrightMagenta, "%s", buffer.data());
 	}
 

@@ -63,12 +63,19 @@ struct AppSettings {
 	uint32_t texture_mip_skip          = 1;
 	uint32_t texture_mip_skip_min_size = 2048;
 	// The settings page, for testing: the GPU memory savings (Config::GpuMemorySavings) and the video decoder's threads (Config::VideoDecodeThreads). On.
+	// Debugging, only in the file: ask for a frame dump this many seconds after the game started (0: never; the game menu has Save frame dump).
+	uint32_t frame_dump_after_s = 0;
+	// Debugging, only in the file: 1 adds the average color of the large floating-point render targets after each draw to the frame dump's draw log (slow).
+	uint32_t frame_dump_snapshots = 0;
 	bool gpu_memory_savings   = true;
 	bool video_decode_threads = true;
 	// The settings page, Developer: the games' compiled shaders are kept across builds of the app (Config::PipelineCacheAnyBuild). Off.
 	bool shader_cache_any_build = false;
 	// Debugging the pager, only in the file: the limit of the app's memory in MB for the pager instead of the OS's (a PC has none to speak of). 0: the OS's.
 	uint32_t app_memory_limit_mb = 0;
+	// Testing, only in the file: press Cross (A on an Xbox controller) every this many milliseconds, so that nobody has to click through the menus
+	// (Pad::StartAutoPress). 0: off.
+	uint32_t auto_press_ms = 0;
 };
 [[nodiscard]] AppSettings LoadSettings();
 void                      SaveSettings(const AppSettings& settings);
