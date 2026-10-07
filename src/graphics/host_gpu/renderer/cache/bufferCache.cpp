@@ -23,6 +23,19 @@ namespace {
 constexpr uint64_t MiB           = 1024 * 1024;
 constexpr uint64_t GdsBufferSize = 64 * 1024;
 
+// The upload ring: in the D3D12 build smaller where the GPU's budget is (the Xbox's 2240 MB); uploads
+// that don't fit go through buffers of their own. The Vulkan build keeps upstream's size.
+uint64_t StagingSize(const GraphicContext& graphics) {
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	const bool limited =
+	    graphics.CanReportMemoryUsage() && graphics.GetTotalMemoryBudget() < uint64_t {4} * 1024 * MiB;
+	return (limited ? 64 : 512) * MiB;
+#else
+	(void)graphics;
+	return 512 * MiB;
+#endif
+}
+
 std::pair<Buffer*, uint64_t> UploadMemory(GraphicContext& graphics, CommandScheduler& scheduler,
                                         StreamBuffer& staging, uint64_t size, uint64_t alignment,
                                         vk::BufferUsageFlags usage, const auto& write) {
@@ -167,7 +180,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
     : m_graphics(graphics), m_scheduler(scheduler),
       m_gds_buffer(graphics, scheduler, MemoryUsage::Stream, 0, GdsBufferSize),
       m_memory_tracker(page_manager),
-      m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, 512 * MiB),
+      m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, StagingSize(graphics)),
       m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, 64 * MiB),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 64 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),

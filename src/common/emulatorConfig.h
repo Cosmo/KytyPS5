@@ -100,6 +100,10 @@ struct ConfigOptions {
 	std::filesystem::path font_folder;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
+	// Debugging (D3D12 build): the shader limits of the Xbox's UWP games on any device (shader
+	// model 6.4, 16-bit ops as 32-bit, no barycentrics, no mesh shaders), to reproduce Xbox
+	// problems on a PC.
+	bool xbox_gpu_limits_enabled = false;
 #endif
 	Keymap keymap;
 	// Ordinary boots need a non-null argv[0]; --guest-exec supplies the caller's arguments.
@@ -169,6 +173,7 @@ bool SkipNoticeScreen();
 std::filesystem::path FontFolder();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
+bool XboxGpuLimitsEnabled();
 #endif
 
 const Keymap& GetKeymap();

@@ -233,6 +233,11 @@ std::filesystem::path FontFolder() {
 bool RedZoneProtectionEnabled() {
 	return g_config->red_zone_protection_enabled;
 }
+
+bool XboxGpuLimitsEnabled() {
+	// The D3D12 self test runs before the emulator sets its configuration up.
+	return g_config != nullptr && g_config->xbox_gpu_limits_enabled;
+}
 #endif
 
 const Keymap& GetKeymap() {
