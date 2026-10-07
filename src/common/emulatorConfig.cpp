@@ -226,8 +226,24 @@ uint32_t GuestCommitLimitMb() {
 	return g_config != nullptr ? g_config->guest_commit_limit_mb : 0;
 }
 
+uint32_t TextureMipSkip() {
+	return g_config != nullptr ? g_config->texture_mip_skip : 0;
+}
+
+uint32_t TextureMipSkipMinSize() {
+	return g_config != nullptr ? g_config->texture_mip_skip_min_size : 2048;
+}
+
+bool GpuMemorySavings() {
+	return g_config == nullptr || g_config->gpu_memory_savings;
+}
+
 bool PipelineCacheAnyBuild() {
 	return g_config != nullptr && g_config->pipeline_cache_any_build;
+}
+
+bool VideoDecodeThreads() {
+	return g_config == nullptr || g_config->video_decode_threads;
 }
 
 uint64_t AppMemoryUsage() {
