@@ -5,6 +5,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <fmt/format.h>
+#include <mutex>
+#include <set>
+#include <string>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
@@ -755,10 +759,115 @@ uint32_t EmitBallot(ValueEmitContext& ctx, IR::Value predicate) {
 	return ctx.Ballot(predicate);
 }
 
+// Is the predicate true for every lane that can run the instruction that uses it? An immediate true, a phi whose inputs all are (a cycle is
+// decided by the other inputs), or an AND of two of those. This is the proof the shader compiler makes of its own (the ballot of a constant true is
+// the mask of the active lanes).
+static bool PredicateIsAlwaysTrue(const IR::Value& value, std::set<const IR::Inst*>& visiting) {
+	const auto v = value.Resolve();
+	if (v.IsImmediate()) {
+		return v.GetType() == IR::Type::U1 && v.U1();
+	}
+	const auto* instruction = v.TryInstruction();
+	if (instruction == nullptr) {
+		return false;
+	}
+	if (v.IsPhi()) {
+		if (!visiting.insert(instruction).second) {
+			return true;
+		}
+		for (size_t i = 0; i < instruction->NumArgs(); i++) {
+			if (!PredicateIsAlwaysTrue(instruction->Arg(i), visiting)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	if (instruction->GetOpcode() == IR::ValueOpcode::LogicalAnd) {
+		return PredicateIsAlwaysTrue(instruction->Arg(0), visiting) && PredicateIsAlwaysTrue(instruction->Arg(1), visiting);
+	}
+	return false;
+}
+
 uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
-	const auto ballot = ctx.Ballot(inst.Arg(1));
-	const auto lane   = ctx.FirstLane(ballot);
-	return ctx.Shuffle(inst, 0, lane);
+	// Every lane that runs is active (exec is true): the value of the first active lane is what the instruction gives, and the languages have an
+	// instruction for exactly that (WaveReadLaneFirst in DXIL). The ballot, the find first bit and the shuffle of the general case, in the
+	// waterfall loops of a pixel shader, hung the Xbox's GPU.
+	static std::atomic<int> native_count {0}, general_count {0};
+	static std::mutex       seen_mutex;
+	static std::set<std::string> seen;
+	const auto              exec = inst.Arg(1).Resolve();
+	const auto describe = [](const auto& self, const IR::Value& value, int depth) -> std::string {
+		const auto v = value.Resolve();
+		if (v.IsImmediate()) {
+			return v.GetType() == IR::Type::U1 ? (v.U1() ? "true" : "false") : "imm";
+		}
+		if (v.IsPhi()) {
+			std::string text = "phi";
+			if (depth > 0 && v.TryInstruction() != nullptr) {
+				text += "{";
+				for (size_t i = 0; i < v.TryInstruction()->NumArgs(); i++) {
+					text += (i != 0 ? ", " : "") + self(self, v.TryInstruction()->Arg(i), depth - 1);
+				}
+				text += "}";
+			}
+			return text;
+		}
+		const auto* instruction = v.TryInstruction();
+		if (instruction == nullptr) {
+			return "?";
+		}
+		std::string text(ValueOpcodeName(instruction->GetOpcode()));
+		if (depth > 0) {
+			text += "(";
+			for (size_t i = 0; i < instruction->NumArgs(); i++) {
+				text += (i != 0 ? ", " : "") + self(self, instruction->Arg(i), depth - 1);
+			}
+			text += ")";
+		}
+		return text;
+	};
+	std::set<const IR::Inst*> visiting;
+	// DIAGNOSTIC: kForceNative uses the native instruction for every read first lane, also where exec is a real mask (wrong values there), to see whether the
+	// ballot form is what hangs the console GPU. Not a fix.
+	constexpr bool kForceNative = false;
+	const bool native = ctx.other_half == nullptr && (kForceNative || PredicateIsAlwaysTrue(exec, visiting));
+	{
+		// debugging: every distinct form of exec once, and how often the native instruction was used
+		const std::string key = std::string(ctx.other_half != nullptr ? "two halves, " : "") + describe(describe, exec, 3);
+		const int         n   = native ? native_count.fetch_add(1) + 1 : native_count.load();
+		const int         g   = native ? general_count.load() : general_count.fetch_add(1) + 1;
+		std::lock_guard   lock(seen_mutex);
+		if (seen.insert(key).second || (native && n % 10 == 0)) {
+			Log::WriteToConsoleAndLog(fmt::format("recompiler: read first lane, exec is {} -> {} (native {}, ballot {} so far)\n", key,
+			                                      native ? "native wave instruction" : "ballot", n, g));
+		}
+	}
+	if (native) {
+		const auto result = ctx.state.builder.AllocateId();
+		ctx.state.builder.AddFunction(spv::OpGroupNonUniformBroadcastFirst, TypeId(ctx.state, inst.Arg(0).GetType()), result,
+		                              ConstantU32(ctx.state, spv::ScopeSubgroup), ctx.Arg(inst, 0));
+		return result;
+	}
+	auto&      state    = ctx.state;
+	const auto ballot   = ctx.Ballot(inst.Arg(1));
+	const auto lane     = ctx.FirstLane(ballot);
+	const auto shuffled = ctx.Shuffle(inst, 0, lane);
+	// A lane the ballot does not count (a helper lane: a pixel shader's wave operations leave out the lanes that only exist to complete quads of
+	// pixels, unless the shader has the attribute of shader model 6.7) sees no lane at all once every other lane left the loop: the first lane of
+	// an empty ballot is no lane, the shuffle gives it nothing it could compare with, and a waterfall loop that waits for its value to be served
+	// never ends. It takes its own value then, which counts as served. (A hang of the GPU: the Xbox's shader model 6.4 build of such pixel shaders,
+	// which the same shader at shader model 6.8, with the attribute, does not have.)
+	const auto word0 = state.builder.AllocateId();
+	const auto word1 = state.builder.AllocateId();
+	const auto words = state.builder.AllocateId();
+	const auto empty = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), word0, ballot, 0);
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), word1, ballot, 1);
+	state.builder.AddFunction(spv::OpBitwiseOr, TypeU32(state), words, word0, word1);
+	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), empty, words, ConstantU32(state, 0));
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpSelect, TypeId(state, inst.Arg(0).GetType()), result, empty, ctx.Arg(inst, 0), shuffled);
+	return result;
 }
 
 uint32_t EmitReadLane(ValueEmitContext& ctx, const IR::Inst& inst) {

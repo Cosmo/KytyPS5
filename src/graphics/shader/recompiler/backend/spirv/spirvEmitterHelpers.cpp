@@ -1,5 +1,7 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
+
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
 DppTargetLane EmitDppPermTargetLane(EmitterState& state, uint32_t subid, uint32_t control,
@@ -256,6 +258,53 @@ uint32_t EmitBallotLaneActiveBool(EmitterState& state, uint32_t active_ballot, u
 	                          ConstantU32(state, state.program.wave_size));
 	state.builder.AddFunction(spv::OpLogicalAnd, TypeBool(state), ret, active, in_range);
 	return ret;
+}
+
+uint32_t EmitSubgroupShuffle(EmitterState& state, uint32_t type, uint32_t value, uint32_t lane) {
+	const auto subgroup = ConstantU32(state, spv::ScopeSubgroup);
+	if (!GetHostShaderFeatures().lane_shuffle_loop) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, result, subgroup, value, lane);
+		return result;
+	}
+	// Each pass reads one source lane (the loop counter: the same in every lane) and the lane that asked for it takes the value. 32 passes for the pairs of half waves that
+	// stand in for a wave of 64, 64 otherwise.
+	const auto type_u32 = TypeU32(state);
+	const auto type_bool = TypeBool(state);
+	const auto count     = ConstantU32(state, state.lane_count == 2 ? 32u : 64u);
+	const auto before    = state.current_label;
+	const auto header    = state.builder.AllocateId();
+	const auto body      = state.builder.AllocateId();
+	const auto next      = state.builder.AllocateId();
+	const auto merge     = state.builder.AllocateId();
+	const auto index     = state.builder.AllocateId(); // phi: the source lane of this pass
+	const auto result    = state.builder.AllocateId(); // phi: what the lane has read so far (its own value to begin with)
+	const auto index_next  = state.builder.AllocateId();
+	const auto result_next = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpBranch, header);
+
+	EmitLabel(state, header);
+	state.builder.AddFunction(spv::OpPhi, type_u32, index, ConstantU32(state, 0), before, index_next, next);
+	state.builder.AddFunction(spv::OpPhi, type, result, value, before, result_next, next);
+	const auto more = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpULessThan, type_bool, more, index, count);
+	state.builder.AddFunction(spv::OpLoopMerge, merge, next, spv::LoopControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, more, body, merge);
+
+	EmitLabel(state, body);
+	const auto read = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, read, subgroup, value, index);
+	const auto wanted = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpIEqual, type_bool, wanted, lane, index);
+	state.builder.AddFunction(spv::OpSelect, type, result_next, wanted, read, result);
+	state.builder.AddFunction(spv::OpBranch, next);
+
+	EmitLabel(state, next);
+	state.builder.AddFunction(spv::OpIAdd, type_u32, index_next, index, ConstantU32(state, 1));
+	state.builder.AddFunction(spv::OpBranch, header);
+
+	EmitLabel(state, merge);
+	return result;
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter
