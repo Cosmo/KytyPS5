@@ -149,6 +149,9 @@ struct ConfigOptions {
 	// signature still ties it. A build that translates shaders differently then uses the old translations, which can draw wrongly or crash, so it
 	// is off unless a setting turns it on.
 	bool pipeline_cache_any_build = false;
+	// Debugging: DRED and the GPU trace (a marker before and after every draw and dispatch), so that a GPU hang or a device removal names the draw
+	// it happened in. They cost time on every draw, so they are off unless a setting turns them on (gpu_hang_exit_seconds also needs the trace).
+	bool gpu_crash_diagnostics = false;
 	// The app's memory use as the OS counts it (the Series X ends the app at its limit), and the limit: set by the UWP host. Null or 0 elsewhere.
 	uint64_t (*app_memory_usage)() = nullptr;
 	uint64_t app_memory_limit_bytes = 0;
@@ -235,6 +238,7 @@ uint32_t TextureMipSkipMinSize();
 bool GpuMemorySavings();
 bool GpuMemoryLog();
 bool PipelineCacheAnyBuild();
+bool GpuCrashDiagnostics();
 bool VideoDecodeThreads();
 uint64_t AppMemoryUsage();
 uint64_t AppMemoryLimit();
