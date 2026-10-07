@@ -87,6 +87,8 @@ struct ImageInfo {
 	Prospero::TileMode           tile_mode       = Prospero::TileMode::kLinear;
 	bool                         bgra16          = false;
 	std::array<ImageMipInfo, 16> mip_layout {};
+	// Low quality: the host image is made without this many of the finest mip levels (the rest of the ImageInfo stays in guest terms: extent, levels, layout).
+	uint8_t host_skip = 0;
 	TileTextureBlockLayout       tiling;
 	uint64_t                     tiled_slice_stride = 0;
 	// Nonzero for guest-linear and depth-plane transfers; tiled colors are mip-major.
