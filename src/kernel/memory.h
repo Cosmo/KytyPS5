@@ -121,6 +121,12 @@ void                   WriteBacking(uint64_t vaddr, const void* data, uint64_t s
 void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
 void                   InstallGpuResources(Graphics::RenderContext* renderer) noexcept;
 [[nodiscard]] bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept;
+// Xbox fork (T3): commit the window of a lazily committed page that was touched; false when the fault is not a commit fault.
+[[nodiscard]] bool HandleCommitFault(uint64_t fault_vaddr, bool is_write) noexcept;
+// Xbox fork (T3): commit the lazy windows of a range before a host call writes into it.
+bool EnsureGuestCommitted(uint64_t vaddr, uint64_t size);
+// Xbox fork (T3): after a host copy opened protected guest pages for a moment, set them to what they should be now (the page manager decides for watched pages).
+void RestoreHostProtection(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode old_mode) noexcept;
 
 int KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags,
                                                const char* name);

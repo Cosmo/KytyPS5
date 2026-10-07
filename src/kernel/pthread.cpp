@@ -659,6 +659,8 @@ static int CreateGuestStack(PthreadAttr attr) {
 		attr->stack_user     = true;
 		attr->stack_map_addr = 0;
 		attr->stack_map_size = 0;
+		// Xbox fork (T3): a thread runs on this memory; a first-touch fault on its own stack cannot be delivered, so commit it now
+		Memory::EnsureGuestCommitted(reinterpret_cast<uint64_t>(attr->stack_addr), attr->stack_size);
 		return OK;
 	}
 
