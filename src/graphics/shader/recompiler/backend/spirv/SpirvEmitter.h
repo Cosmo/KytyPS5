@@ -5,6 +5,7 @@
 #include "common/stringUtils.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <span>
 #include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
@@ -14,6 +15,10 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
                                   uint32_t push_data_start_dword = 0,
                                   bool maintenance8_enabled = false,
                                   bool emit_debug_info = false);
+
+// The vertex stage that goes with a mesh program run as a compute shader (IR::MeshEmulation):
+// it reads the records the program wrote and outputs what the program exported.
+std::vector<uint32_t> EmitMeshFetchProgram(std::span<const IR::StageOutput> outputs);
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv
 

@@ -327,6 +327,10 @@ void GraphicContext::Create(bool enable_debug_layer) {
 		barycentrics = false;
 		Log::WriteToConsoleAndLog("D3D12: the Xbox's limits apply (no barycentrics, no mesh shaders)\n");
 	}
+	if (Config::MeshComputeForced() && mesh_shaders) {
+		mesh_shaders = false;
+		Log::WriteToConsoleAndLog("D3D12: merged geometry programs run as compute shaders (forced)\n");
+	}
 	// The BDA page table has two levels here (d3d12/bdaPageTable.h).
 	ShaderRecompiler::SetHostShaderFeatures({.barycentrics = barycentrics, .bda_two_level = true});
 }

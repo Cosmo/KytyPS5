@@ -99,6 +99,8 @@ public:
 
 	// Mesh shaders need shader model 6.5.
 	[[nodiscard]] bool SupportsMeshShaders() const noexcept;
+	// Shaders index the descriptor heap directly (ResourceDescriptorHeap) from shader model 6.6.
+	[[nodiscard]] bool SupportsHeapIndexing() const noexcept;
 
 	// Identifies the translator: saved translations are only valid for the same one.
 	[[nodiscard]] std::string CacheSignature() const;
