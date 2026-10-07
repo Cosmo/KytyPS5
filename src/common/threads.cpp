@@ -113,6 +113,10 @@ void Mutex::Unlock() {
 	LeaveCriticalSection(ToCs(m_cs));
 }
 
+bool Mutex::TryLock() {
+	return TryEnterCriticalSection(ToCs(m_cs)) != 0;
+}
+
 void CondVar::Signal() {
 	WakeConditionVariable(ToCv(&m_cv));
 }
