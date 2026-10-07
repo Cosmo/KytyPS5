@@ -8,9 +8,15 @@
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
-#include "graphics/host_gpu/renderer/image/blitHelper.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+
+#if defined(KYTY_GPU_BACKEND_D3D12)
+#include "graphics/host_gpu/d3d12/blitHelper.h"
+#include "graphics/host_gpu/d3d12/tiler.h"
+#else
+#include "graphics/host_gpu/renderer/image/blitHelper.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
+#endif
 
 #include <map>
 #include <type_traits>
@@ -47,9 +53,9 @@ public:
 	void                        UpdateImage(ImageId id);
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);
-	[[nodiscard]] vk::ImageView FindTexture(ImageId id, const ImageDesc& desc);
-	[[nodiscard]] vk::ImageView FindRenderTarget(ImageId id, const ImageDesc& desc);
-	[[nodiscard]] vk::ImageView FindDepthTarget(ImageId id, const ImageDesc& desc);
+	[[nodiscard]] ImageViewHandle FindTexture(ImageId id, const ImageDesc& desc);
+	[[nodiscard]] ImageViewHandle FindRenderTarget(ImageId id, const ImageDesc& desc);
+	[[nodiscard]] ImageViewHandle FindDepthTarget(ImageId id, const ImageDesc& desc);
 	[[nodiscard]] Image&        GetImage(ImageId id) {
 		auto& image = m_slot_images[id];
 		TouchImage(image);

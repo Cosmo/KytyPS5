@@ -4,6 +4,7 @@
 #include "common/common.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
+#include "graphics/host_gpu/renderer/image/tileDispatch.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
@@ -58,47 +59,15 @@ public:
 private:
 	friend struct TileManagerTestAccess;
 
-	static constexpr uint32_t FamilyCount          = static_cast<uint32_t>(TileBlockFamily::Count);
-	static constexpr uint32_t BytesPerElementCount = 5;
-	static constexpr uint32_t DirectionCount       = 2;
-	static constexpr uint32_t PipelineCount = FamilyCount * BytesPerElementCount * DirectionCount;
-	static constexpr uint32_t MaxMipLevels         = 16;
+	static constexpr uint32_t PipelineCount = TileShaders::PipelineCount;
 
-	struct alignas(16) Mip {
-		uint32_t src_base;
-		uint32_t dst_base;
-		uint32_t width;
-		uint32_t height;
-		uint32_t pitch_bytes;
-		uint32_t slice_bytes;
-		uint32_t tiled_slice_bytes;
-		uint32_t blocks_per_row;
-		uint32_t surface_z;
-		uint32_t tail_x;
-		uint32_t tail_y;
-		uint32_t num_texels;
-	};
-	struct TilingParams {
-		uint32_t                      num_texels      = 0;
-		uint32_t                      color_transform = 0;
-		std::array<uint32_t, 2>        padding {};
-		std::array<Mip, MaxMipLevels> mips;
-	};
+	using Conversion = TileShaders::Conversion;
+	// A dispatch whose parameters are in the stream buffer.
 	struct Tiling {
 		uint64_t params_offset;
 		uint32_t num_texels;
 		uint16_t params_size;
 		uint16_t pipeline_slot;
-	};
-	struct Conversion {
-		uint32_t src_base;
-		uint32_t dst_base;
-		uint32_t width;
-		uint32_t height;
-		uint32_t source_pitch;
-		uint32_t target_pitch;
-		uint32_t color_transform;
-		uint32_t to_host;
 	};
 	struct StorageBinding {
 		vk::DescriptorBufferInfo info;
