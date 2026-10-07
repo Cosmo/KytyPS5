@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -84,6 +85,8 @@ public:
 	static bool IsFileExisting(const std::filesystem::path& name);
 	static bool CreateDirectory(const std::filesystem::path& path);
 	static bool CreateDirectories(const std::filesystem::path& path);
+	// `error`, if any, says why it failed.
+	static bool DeleteDirectory(const std::filesystem::path& path, std::error_code* error = nullptr);
 	static bool DeleteFile(const std::filesystem::path& name);
 
 	static std::vector<DirEntry> GetDirEntries(const std::filesystem::path& path);
