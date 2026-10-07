@@ -1,0 +1,32 @@
+diff --git a/include/zarchive/zarchivereader.h b/include/zarchive/zarchivereader.h
+index 2352c91..d466f4f 100644
+--- a/include/zarchive/zarchivereader.h
++++ b/include/zarchive/zarchivereader.h
+@@ -27,6 +27,8 @@ public:
+ 	};
+ 
+ 	static ZArchiveReader* OpenFromFile(const std::filesystem::path& path);
++	// For hosts that must open the file themselves (UWP apps read files outside their package through the *FromApp functions).
++	static ZArchiveReader* OpenFromStream(std::ifstream&& file);
+ 
+ 	~ZArchiveReader();
+ 
+diff --git a/src/zarchivereader.cpp b/src/zarchivereader.cpp
+index c55f20c..140a6fe 100644
+--- a/src/zarchivereader.cpp
++++ b/src/zarchivereader.cpp
+@@ -31,6 +31,14 @@ ZArchiveReader* ZArchiveReader::OpenFromFile(const std::filesystem::path& path)
+ {
+ 	std::ifstream file;
+ 	file.open(path, std::ios_base::in | std::ios_base::binary);
++	if (!file.is_open())
++		return nullptr;
++	return OpenFromStream(std::move(file));
++}
++
++ZArchiveReader* ZArchiveReader::OpenFromStream(std::ifstream&& streamIn)
++{
++	std::ifstream file(std::move(streamIn));
+ 	if (!file.is_open())
+ 		return nullptr;
+ 	uint64_t fileSize = _ifstream_getFileSize(file);
