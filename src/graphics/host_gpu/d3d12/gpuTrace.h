@@ -30,6 +30,8 @@ class GpuTrace {
 public:
 	void Create(ID3D12Device* device);
 	void Destroy();
+	// Without Create (gpu_crash_diagnostics off) Begin and End do nothing and nothing is unfinished.
+	[[nodiscard]] bool Enabled() const noexcept { return m_buffer != nullptr; }
 
 	// Around a draw or dispatch with `pipeline`, which must outlive the trace.
 	[[nodiscard]] uint32_t Begin(ID3D12GraphicsCommandList* list, const TracedPipeline* pipeline);
