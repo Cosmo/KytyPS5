@@ -64,6 +64,9 @@ AppSettings LoadSettings() {
 	read("overlay_size", settings.overlay_size);
 	read("overlay_log_lines", settings.overlay_log_lines);
 	read("xbox_gpu_limits", settings.xbox_gpu_limits);
+	read("shader_cache_any_build", settings.shader_cache_any_build);
+	read("impulse_triggers", settings.impulse_triggers);
+	read("haptic_rumble", settings.haptic_rumble);
 	return settings;
 }
 
@@ -89,6 +92,9 @@ void SaveSettings(const AppSettings& settings) {
 	json["d3d12_selftest"]   = settings.d3d12_selftest;
 	json["overlay_size"]     = settings.overlay_size;
 	json["overlay_log_lines"] = settings.overlay_log_lines;
+	json["shader_cache_any_build"]     = settings.shader_cache_any_build;
+	json["impulse_triggers"]           = settings.impulse_triggers;
+	json["haptic_rumble"]              = settings.haptic_rumble;
 	std::ofstream(SettingsPath(), std::ios::binary | std::ios::trunc) << json.dump(2);
 }
 
