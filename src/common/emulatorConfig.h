@@ -126,6 +126,19 @@ struct ConfigOptions {
 	uint32_t guest_ram_pager_mode = 0;
 	// Debugging the pager: a commit of guest memory fails above this many MB of guest memory (a wall like the console's, which the PC does not have). 0: none.
 	uint32_t guest_commit_limit_mb = 0;
+	// Low quality: a sampled, block-compressed 2D texture whose larger side has at least texture_mip_skip_min_size texels (and enough mip levels) is made on the host
+	// without its texture_mip_skip finest mip levels: a quarter of the memory for one level. 0: off.
+	uint32_t texture_mip_skip          = 0;
+	uint32_t texture_mip_skip_min_size = 2048;
+	// GPU memory savings (a scratch buffer made when needed, committed small pool buffers, 16 MB allocator blocks) and the video decoder's threads: on in the UWP app, unless a
+	// setting turns them off for testing; off in the desktop build, which keeps upstream's behaviour.
+#if defined(KYTY_PLATFORM_UWP)
+	bool gpu_memory_savings   = true;
+	bool video_decode_threads = true;
+#else
+	bool gpu_memory_savings   = false;
+	bool video_decode_threads = false;
+#endif
 	// Development: the pipeline cache of a game (its translated shaders) is kept across builds, also dirty ones; only the shader compiler's own
 	// signature still ties it. A build that translates shaders differently then uses the old translations, which can draw wrongly or crash, so it
 	// is off unless a setting turns it on.
@@ -210,7 +223,11 @@ bool MeshComputeForced();
 uint32_t GuestRamBudgetMb();
 uint32_t GuestRamPagerMode();
 uint32_t GuestCommitLimitMb();
+uint32_t TextureMipSkip();
+uint32_t TextureMipSkipMinSize();
+bool GpuMemorySavings();
 bool PipelineCacheAnyBuild();
+bool VideoDecodeThreads();
 uint64_t AppMemoryUsage();
 uint64_t AppMemoryLimit();
 #endif
