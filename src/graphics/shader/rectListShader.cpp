@@ -39,7 +39,7 @@ public:
 
 		ptr_input_vec4_float  = Pointer(spv::StorageClassInput, vec4_float_type);
 		ptr_output_vec4_float = Pointer(spv::StorageClassOutput, vec4_float_type);
-		if (model == spv::ExecutionModelTessellationControl) {
+		if (model != spv::ExecutionModelTessellationEvaluation) {
 			bool_type        = builder.Type(spv::OpTypeBool);
 			vec2_bool_type   = builder.Type(spv::OpTypeVector, bool_type, 2u);
 			vec2_float_type  = builder.Type(spv::OpTypeVector, float_type, 2u);
@@ -61,47 +61,15 @@ public:
 			Store(Access(ptr_output_float, tess_inner, Int(i)), float_one);
 		}
 
-		std::array<uint32_t, 3> positions {};
-		for (uint32_t i = 0; i < positions.size(); i++) {
-			positions[i] =
-			    Load(vec4_float_type, Access(ptr_input_vec4_float, gl_in, Int(i), Int(0)));
-		}
-
-		std::array<uint32_t, 3> coordinate_equal {};
-		for (uint32_t i = 0; i < coordinate_equal.size(); i++) {
-			const auto left =
-			    Result(spv::OpVectorShuffle, vec2_float_type, positions[i], positions[i], 0u, 1u);
-			const auto right = Result(spv::OpVectorShuffle, vec2_float_type,
-			                          positions[(i + 1u) % 3u], positions[(i + 1u) % 3u], 0u, 1u);
-			coordinate_equal[i] = Result(spv::OpFOrdEqual, vec2_bool_type, left, right);
-		}
-
-		std::array<uint32_t, 3> barycentric {};
-		std::array<uint32_t, 3> edge_vertex {};
-		const auto float_minus_one = Constant(float_type, std::bit_cast<uint32_t>(-1.0f));
-		for (uint32_t i = 0; i < edge_vertex.size(); i++) {
-			const auto previous = (i + 2u) % 3u;
-			const auto xy =
-			    Result(spv::OpLogicalAnd, bool_type,
-			           Result(spv::OpCompositeExtract, bool_type, coordinate_equal[i], 0u),
-			           Result(spv::OpCompositeExtract, bool_type, coordinate_equal[previous], 1u));
-			const auto yx =
-			    Result(spv::OpLogicalAnd, bool_type,
-			           Result(spv::OpCompositeExtract, bool_type, coordinate_equal[i], 1u),
-			           Result(spv::OpCompositeExtract, bool_type, coordinate_equal[previous], 0u));
-			edge_vertex[i] = Result(spv::OpLogicalOr, bool_type, xy, yx);
-			barycentric[i] =
-			    Result(spv::OpSelect, float_type, edge_vertex[i], float_minus_one, float_one);
-		}
-
-		auto vertex_index = Result(spv::OpSelect, int_type, edge_vertex[2], Int(2), Int(0));
-		vertex_index      = Result(spv::OpSelect, int_type, edge_vertex[1], Int(1), vertex_index);
+		const auto positions  = LoadPositions();
+		const auto corners    = FindCorners(positions);
 		const auto invocation = Load(int_type, invocation_id);
 		const auto is_fourth  = Result(spv::OpIEqual, bool_type, invocation, Int(3));
-		const auto index = Result(spv::OpSMod, int_type,
-		                          Result(spv::OpIAdd, int_type, vertex_index, invocation), Int(3));
+		const auto index      = Result(
+            spv::OpSMod, int_type, Result(spv::OpIAdd, int_type, corners.first_vertex, invocation),
+            Int(3));
 
-		const auto position3 = Interpolate(positions[0], positions[1], positions[2], barycentric);
+		const auto position3 = Interpolate(positions[0], positions[1], positions[2], corners.weights);
 		const auto position =
 		    Result(spv::OpSelect, vec4_float_type, is_fourth, position3,
 		           Load(vec4_float_type, Access(ptr_input_vec4_float, gl_in, index, Int(0))));
@@ -118,12 +86,53 @@ public:
 			    Load(vec4_float_type, Access(ptr_input_vec4_float, inputs[i], Int(1)));
 			const auto input2 =
 			    Load(vec4_float_type, Access(ptr_input_vec4_float, inputs[i], Int(2)));
-			const auto input3 = Interpolate(input0, input1, input2, barycentric);
+			const auto input3 = Interpolate(input0, input1, input2, corners.weights);
 			const auto value =
 			    Result(spv::OpSelect, vec4_float_type, is_fourth, input3,
 			           Load(vec4_float_type, Access(ptr_input_vec4_float, inputs[i], index)));
 			Store(Access(ptr_output_vec4_float, outputs[i], invocation), value);
 		}
+
+		builder.AddFunction(spv::OpReturn);
+		builder.AddFunction(spv::OpFunctionEnd);
+		return builder.Build();
+	}
+
+	// Emits the quad's corners as a triangle strip, in the tessellation domain's corner order.
+	std::vector<uint32_t> EmitGeometry() {
+		DefineEntry(spv::ExecutionModelGeometry);
+
+		const auto positions = LoadPositions();
+		const auto corners   = FindCorners(positions);
+		for (uint32_t corner = 0; corner < 4; corner++) {
+			const bool computed = corner == 3;
+			const auto index    = computed ? 0u
+			                               : Result(spv::OpSMod, int_type,
+			                                        Result(spv::OpIAdd, int_type, corners.first_vertex,
+			                                               Int(corner)),
+			                                        Int(3));
+			const auto position =
+			    computed ? Interpolate(positions[0], positions[1], positions[2], corners.weights)
+			             : Load(vec4_float_type, Access(ptr_input_vec4_float, gl_in, index, Int(0)));
+			Store(Access(ptr_output_vec4_float, gl_out, Int(0)), position);
+			for (uint32_t i = 0; i < parameters.size(); i++) {
+				const auto input0 =
+				    Load(vec4_float_type, Access(ptr_input_vec4_float, inputs[i], Int(0)));
+				auto value = input0;
+				if (!parameters[i].flat && !computed) {
+					value = Load(vec4_float_type, Access(ptr_input_vec4_float, inputs[i], index));
+				} else if (!parameters[i].flat) {
+					const auto input1 =
+					    Load(vec4_float_type, Access(ptr_input_vec4_float, inputs[i], Int(1)));
+					const auto input2 =
+					    Load(vec4_float_type, Access(ptr_input_vec4_float, inputs[i], Int(2)));
+					value = Interpolate(input0, input1, input2, corners.weights);
+				}
+				Store(outputs[i], value);
+			}
+			builder.AddFunction(spv::OpEmitVertex);
+		}
+		builder.AddFunction(spv::OpEndPrimitive);
 
 		builder.AddFunction(spv::OpReturn);
 		builder.AddFunction(spv::OpFunctionEnd);
@@ -154,6 +163,56 @@ public:
 	}
 
 private:
+	// The rectangle's corners: the input vertex opposite its diagonal comes first, and the
+	// weights of the input vertices that extrapolate the missing fourth corner.
+	struct Corners {
+		std::array<uint32_t, 3> weights {};
+		uint32_t                first_vertex = 0;
+	};
+
+	std::array<uint32_t, 3> LoadPositions() {
+		std::array<uint32_t, 3> positions {};
+		for (uint32_t i = 0; i < positions.size(); i++) {
+			positions[i] =
+			    Load(vec4_float_type, Access(ptr_input_vec4_float, gl_in, Int(i), Int(0)));
+		}
+		return positions;
+	}
+
+	Corners FindCorners(const std::array<uint32_t, 3>& positions) {
+		std::array<uint32_t, 3> coordinate_equal {};
+		for (uint32_t i = 0; i < coordinate_equal.size(); i++) {
+			const auto left =
+			    Result(spv::OpVectorShuffle, vec2_float_type, positions[i], positions[i], 0u, 1u);
+			const auto right = Result(spv::OpVectorShuffle, vec2_float_type,
+			                          positions[(i + 1u) % 3u], positions[(i + 1u) % 3u], 0u, 1u);
+			coordinate_equal[i] = Result(spv::OpFOrdEqual, vec2_bool_type, left, right);
+		}
+
+		Corners                 corners;
+		std::array<uint32_t, 3> edge_vertex {};
+		const auto float_one       = Constant(float_type, std::bit_cast<uint32_t>(1.0f));
+		const auto float_minus_one = Constant(float_type, std::bit_cast<uint32_t>(-1.0f));
+		for (uint32_t i = 0; i < edge_vertex.size(); i++) {
+			const auto previous = (i + 2u) % 3u;
+			const auto xy =
+			    Result(spv::OpLogicalAnd, bool_type,
+			           Result(spv::OpCompositeExtract, bool_type, coordinate_equal[i], 0u),
+			           Result(spv::OpCompositeExtract, bool_type, coordinate_equal[previous], 1u));
+			const auto yx =
+			    Result(spv::OpLogicalAnd, bool_type,
+			           Result(spv::OpCompositeExtract, bool_type, coordinate_equal[i], 1u),
+			           Result(spv::OpCompositeExtract, bool_type, coordinate_equal[previous], 0u));
+			edge_vertex[i] = Result(spv::OpLogicalOr, bool_type, xy, yx);
+			corners.weights[i] =
+			    Result(spv::OpSelect, float_type, edge_vertex[i], float_minus_one, float_one);
+		}
+
+		auto vertex_index    = Result(spv::OpSelect, int_type, edge_vertex[2], Int(2), Int(0));
+		corners.first_vertex = Result(spv::OpSelect, int_type, edge_vertex[1], Int(1), vertex_index);
+		return corners;
+	}
+
 	uint32_t Constant(uint32_t type, uint32_t value) {
 		return builder.Constant(spv::OpConstant, type, value);
 	}
@@ -205,9 +264,15 @@ private:
 
 	void DefineEntry(spv::ExecutionModel model) {
 		builder.RequireCapability(spv::CapabilityShader);
-		builder.RequireCapability(spv::CapabilityTessellation);
+		builder.RequireCapability(model == spv::ExecutionModelGeometry ? spv::CapabilityGeometry
+		                                                               : spv::CapabilityTessellation);
 		main = Result(spv::OpFunction, void_type, spv::FunctionControlMaskNone, function_type);
 		if (model == spv::ExecutionModelTessellationControl) {
+			builder.AddExecutionMode(main, spv::ExecutionModeOutputVertices, 4u);
+		} else if (model == spv::ExecutionModelGeometry) {
+			builder.AddExecutionMode(main, spv::ExecutionModeTriangles);
+			builder.AddExecutionMode(main, spv::ExecutionModeInvocations, 1u);
+			builder.AddExecutionMode(main, spv::ExecutionModeOutputTriangleStrip);
 			builder.AddExecutionMode(main, spv::ExecutionModeOutputVertices, 4u);
 		} else {
 			builder.AddExecutionMode(main, spv::ExecutionModeQuads);
@@ -221,11 +286,12 @@ private:
 	}
 
 	void DefineInputs(spv::ExecutionModel model) {
-		const auto tess_control = model == spv::ExecutionModelTessellationControl;
-		if (tess_control) {
+		// The control and geometry shaders read the rect-list triangle; evaluation reads the quad.
+		const auto tess_control = model != spv::ExecutionModelTessellationEvaluation;
+		if (model == spv::ExecutionModelTessellationControl) {
 			invocation_id = AddInterface(spv::StorageClassInput, int_type);
 			Decorate(invocation_id, spv::DecorationBuiltIn, spv::BuiltInInvocationId);
-		} else {
+		} else if (model == spv::ExecutionModelTessellationEvaluation) {
 			tess_coord = AddInterface(spv::StorageClassInput, vec3_float_type);
 			Decorate(tess_coord, spv::DecorationBuiltIn, spv::BuiltInTessCoord);
 		}
@@ -342,6 +408,21 @@ RectListShaders BuildRectListShaders(std::span<const RectListParameter> paramete
 	RectListEmitter control(exported, spv::ExecutionModelTessellationControl);
 	RectListEmitter evaluation(exported, spv::ExecutionModelTessellationEvaluation);
 	return {control.EmitControl(), evaluation.EmitEvaluation()};
+}
+
+std::vector<uint32_t> BuildRectListGeometryShader(std::span<const RectListParameter> parameters,
+                                                  uint32_t                           param_export_mask) {
+	std::vector<RectListParameter> exported;
+	std::array<bool, 32>           output_locations {};
+	for (const auto& parameter: parameters) {
+		if ((param_export_mask & (1u << parameter.input_location)) != 0 &&
+		    !output_locations[parameter.output_location]) {
+			exported.push_back(parameter);
+			output_locations[parameter.output_location] = true;
+		}
+	}
+	RectListEmitter geometry(exported, spv::ExecutionModelGeometry);
+	return geometry.EmitGeometry();
 }
 
 } // namespace Libs::Graphics
