@@ -150,6 +150,22 @@ void                   InstallGpuResources(Graphics::RenderContext* renderer) no
 [[nodiscard]] bool HandleCommitFault(uint64_t fault_vaddr, bool is_write) noexcept;
 // Xbox fork (T3): commit the lazy windows of a range before a host call writes into it.
 bool EnsureGuestCommitted(uint64_t vaddr, uint64_t size);
+// Xbox fork (debugging the pager): what happened to the guest memory windows that these values point into (printed when the game crashes).
+void DumpPagerContext(const uint64_t* values, size_t count);
+// Xbox fork (the pager): a guest buffer that a host call reads or writes through the system (file and network I/O). It is committed (and brought
+// back from the pager's store) when the scope starts and stays in memory until it ends; the system cannot fault a window back in.
+class GuestBufferScope {
+public:
+	GuestBufferScope(uint64_t vaddr, uint64_t size);
+	~GuestBufferScope();
+	GuestBufferScope(const GuestBufferScope&)            = delete;
+	GuestBufferScope& operator=(const GuestBufferScope&) = delete;
+
+private:
+	uint64_t m_id = 0;
+};
+// Xbox fork (the pager): a thread or a fiber runs on this memory. It stays in memory: a stack that is not accessible cannot even deliver the fault.
+void PinGuestStack(uint64_t vaddr, uint64_t size);
 // Xbox fork (T3): after a host copy opened protected guest pages for a moment, set them to what they should be now (the page manager decides for watched pages).
 void RestoreHostProtection(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode old_mode) noexcept;
 
