@@ -279,6 +279,8 @@ if(KYTY_GPU_BACKEND STREQUAL "D3D12")
 	list(APPEND kyty_emulator_src ${kyty_d3d12_src}
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/sync.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/imageInfo.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/textureCommon.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/blendMapping.cpp"
 	)
 elseif(NOT KYTY_GPU_BACKEND STREQUAL "Vulkan")
 	message(FATAL_ERROR "Unknown KYTY_GPU_BACKEND '${KYTY_GPU_BACKEND}'")
@@ -300,6 +302,7 @@ set(gpu_tiler_shader_names
 	promote_d16
 	demote_d16
 	color_transform
+	copy_rows
 	color_clear
 )
 file(GLOB gpu_tiler_shader_includes CONFIGURE_DEPENDS "${gpu_tiler_shader_dir}/gpu_tiler_*.inc")
@@ -358,6 +361,7 @@ function(add_gpu_blit_shader shader_name shader_file)
 endfunction()
 add_gpu_blit_shader(gpu_blit_fs_triangle gpu_blit_fs_triangle.vert)
 add_gpu_blit_shader(gpu_blit_color_to_ms_depth gpu_blit_color_to_ms_depth.frag)
+add_gpu_blit_shader(gpu_blit_present gpu_blit_present.frag)
 add_gpu_blit_shader(gpu_video_out_overlay gpu_video_out_overlay.frag)
 add_gpu_blit_shader(gpu_imgui_hdr gpu_video_out_overlay.frag -DIMGUI_HDR=1)
 list(APPEND kyty_emulator_src ${gpu_blit_shader_headers})

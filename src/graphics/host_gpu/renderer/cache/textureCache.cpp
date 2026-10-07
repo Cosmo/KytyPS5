@@ -8,13 +8,9 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/tile.h"
-#include "graphics/host_gpu/graphicContext.h"
-#include "graphics/host_gpu/renderer/cache/bufferCache.h"
-#include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/gpuBackend.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
-#include "graphics/host_gpu/renderer/image/tiler.h"
-#include "graphics/host_gpu/renderer/render.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
@@ -1087,6 +1083,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		if (m_buffer_cache.IsColorMetadataChecked(viewed.address, viewed.size, keys)) {
 			return;
 		}
+#if !defined(KYTY_GPU_BACKEND_D3D12)
 		{
 			std::scoped_lock lock {m_lock};
 			auto&            image = m_slot_images[id];
@@ -1114,8 +1111,8 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 					m_buffer_cache.MarkColorMetadataChecked(viewed.address, viewed.size, keys);
 				}
 				const auto command = m_scheduler.Current().Handle();
-				const auto area    = BeginColorRendering(image, view.format, view.base_level,
-				                                         image_first, count, nullptr, command);
+				const auto area    = image.BeginColorRendering(view.format, view.base_level,
+				                                               image_first, count, nullptr, command);
 				vk::ClearRect rect {.rect = area, .layerCount = 1};
 				for (uint32_t slice = 0; slice < count; slice++) {
 					rect.baseArrayLayer = slice;
@@ -1135,13 +1132,47 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 				return;
 			}
 		}
+#endif
 		// Finish native metadata writes before reading backing bytes. This can submit the
 		// scheduler, so discovery runs before final draw uploads and never holds the texture
 		// lock across it.
+#if defined(KYTY_GPU_BACKEND_D3D12)
+		// A fast-clear stamps the whole DCC metadata range with one uniform code; an ordinary
+		// draw also touches these bytes (per-block compression state) but leaves a mixed
+		// pattern, so it never passes the all-same-code check below -- yet it re-marks the range
+		// GPU-dirty just the same, so gating the readback purely on that flag re-triggers a
+		// synchronous GPU wait on every draw to an already-bound render target. The D3D12 build
+		// reads the same metadata back at most once per scheduler tick instead: the draws
+		// recorded since cannot have executed yet. CPU writes land in guest memory directly, so
+		// the bytes themselves are inspected on every lookup.
+		bool read_back_this_tick = false;
+		{
+			std::scoped_lock lock {m_lock};
+			const auto&      image = m_slot_images[id];
+			read_back_this_tick    = image.dcc_readback_tick == m_scheduler.CurrentTick() &&
+			                      viewed.address >= image.dcc_readback_address &&
+			                      viewed.address + viewed.size <=
+			                          image.dcc_readback_address + image.dcc_readback_size;
+		}
+		if (!read_back_this_tick) {
+			{
+				Common::DebugCounters::ScopedTimer timer(
+				    Common::DebugCounters::Counter::ColorMetadataReadbacks,
+				    Common::DebugCounters::Counter::ColorMetadataReadbackNs);
+				m_buffer_cache.ReadMemory(viewed.address, viewed.size, false);
+			}
+			std::scoped_lock lock {m_lock};
+			auto&            image     = m_slot_images[id];
+			image.dcc_readback_tick    = m_scheduler.CurrentTick();
+			image.dcc_readback_address = viewed.address;
+			image.dcc_readback_size    = viewed.size;
+		}
+#else
 		Common::DebugCounters::ScopedTimer timer(
 		    Common::DebugCounters::Counter::ColorMetadataReadbacks,
 		    Common::DebugCounters::Counter::ColorMetadataReadbackNs);
 		m_buffer_cache.ReadMemory(viewed.address, viewed.size, false);
+#endif
 	}
 	for (uint32_t slice = 0; slice < count; slice++) {
 		const auto address = range.address + slice_size * (first + slice);
@@ -1414,7 +1445,7 @@ ImageId TextureCache::FindImageFromRange(uint64_t address, uint64_t size, bool e
 	return selected;
 }
 
-vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
+ImageViewHandle TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 	std::scoped_lock lock {m_lock};
 	auto&            image = m_slot_images[id];
 	TouchImage(image);
@@ -1449,7 +1480,7 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 	return image.FindView(desc.view_info);
 }
 
-vk::ImageView TextureCache::FindRenderTarget(ImageId id, const ImageDesc& desc) {
+ImageViewHandle TextureCache::FindRenderTarget(ImageId id, const ImageDesc& desc) {
 	if (desc.type != BindingType::RenderTarget) {
 		EXIT("TextureCache: invalid color-target binding\n");
 	}
@@ -1467,7 +1498,7 @@ vk::ImageView TextureCache::FindRenderTarget(ImageId id, const ImageDesc& desc) 
 	return image.FindView(desc.view_info);
 }
 
-vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
+ImageViewHandle TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 	if (desc.type != BindingType::DepthTarget) {
 		EXIT("TextureCache: invalid depth-target binding\n");
 	}
@@ -1639,67 +1670,8 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 			CommitGpuWrite(m_slot_images[stencil_id]);
 		}
 	}
-	command.EndRendering();
-	// Transfer clears use the backing format; aliased clears must encode through their view.
-	if (format != image.backing.format || (image.info.IsVolume() && !full_image)) {
-		EXIT_NOT_IMPLEMENTED(range.aspectMask != vk::ImageAspectFlagBits::eColor ||
-		                     range.levelCount != 1);
-		BeginColorRendering(image, format, range.baseMipLevel, range.baseArrayLayer,
-		                    range.layerCount, &clear, command.Handle());
-		command.Handle().endRendering();
-		CommitGpuWrite(image);
-		return;
-	}
-	image.Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {},
-	              command.Handle());
-	auto native_range = range;
-	if (image.info.IsVolume()) {
-		native_range.baseArrayLayer = 0;
-		native_range.layerCount     = 1;
-	}
-	if (range.aspectMask == vk::ImageAspectFlagBits::eColor) {
-		command.Handle().clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal,
-		                                 &clear.color, 1, &native_range);
-	} else {
-		command.Handle().clearDepthStencilImage(image.backing.image,
-		                                        vk::ImageLayout::eTransferDstOptimal,
-		                                        &clear.depthStencil, 1, &native_range);
-	}
+	image.Clear(command, format, range, clear, full_image);
 	CommitGpuWrite(image);
-}
-
-vk::Rect2D TextureCache::BeginColorRendering(Image& image, vk::Format format, uint32_t level,
-                                             uint32_t layer, uint32_t layers,
-                                             const vk::ClearValue* clear,
-                                             vk::CommandBuffer     command) {
-	ImageViewInfo view {};
-	view.format      = format;
-	view.type        = layers == 1 ? vk::ImageViewType::e2D : vk::ImageViewType::e2DArray;
-	view.base_level  = level;
-	view.base_layer  = layer;
-	view.layer_count = layers;
-	view.usage       = vk::ImageUsageFlagBits::eColorAttachment;
-	image.Transit(vk::ImageLayout::eColorAttachmentOptimal,
-	              vk::AccessFlagBits2::eColorAttachmentRead |
-	                  vk::AccessFlagBits2::eColorAttachmentWrite,
-	              {}, command);
-	vk::RenderingAttachmentInfo attachment {};
-	attachment.imageView   = image.FindView(view);
-	attachment.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
-	attachment.loadOp      = vk::AttachmentLoadOp::eLoad;
-	attachment.storeOp     = vk::AttachmentStoreOp::eStore;
-	if (clear != nullptr) {
-		attachment.loadOp     = vk::AttachmentLoadOp::eClear;
-		attachment.clearValue = *clear;
-	}
-	vk::RenderingInfo rendering {};
-	rendering.renderArea.extent    = {std::max(image.info.extent.width >> level, 1u),
-	                                  std::max(image.info.extent.height >> level, 1u)};
-	rendering.layerCount           = layers;
-	rendering.colorAttachmentCount = 1;
-	rendering.pColorAttachments    = &attachment;
-	command.beginRendering(&rendering);
-	return rendering.renderArea;
 }
 
 void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
@@ -1863,19 +1835,7 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 
 	DownloadImage(image, download, offset, range.size, image.info.resources.levels);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureDownloadBytes, range.size);
-	vk::BufferMemoryBarrier barrier {};
-	barrier.srcAccessMask = vk::AccessFlagBits::eMemoryWrite | vk::AccessFlagBits::eTransferWrite |
-	                        vk::AccessFlagBits::eShaderWrite;
-	barrier.dstAccessMask = vk::AccessFlagBits::eHostRead;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.buffer              = download.Handle();
-	barrier.offset              = offset;
-	barrier.size                = range.size;
-	m_scheduler.EndRendering();
-	m_scheduler.Current().Handle().pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
-	                                               vk::PipelineStageFlagBits::eHost, {}, 0, nullptr,
-	                                               1, &barrier, 0, nullptr);
+	download.ReadbackBarrier(m_scheduler.Current(), offset, range.size);
 	m_scheduler.DeferPriorityOperation([&download, range, mapped, offset] {
 		download.Invalidate(offset, range.size);
 		LibKernel::Memory::WriteBacking(range.address, mapped, range.size);
