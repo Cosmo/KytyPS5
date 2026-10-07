@@ -108,6 +108,20 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	m_rendering    = true;
 }
 
+void CommandBuffer::GlobalMemoryBarrier() const {
+	vk::MemoryBarrier2 barrier {};
+	barrier.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
+	barrier.srcAccessMask = vk::AccessFlagBits2::eMemoryWrite;
+	barrier.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
+	barrier.dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+
+	vk::DependencyInfo dependency {};
+	dependency.memoryBarrierCount = 1;
+	dependency.pMemoryBarriers    = &barrier;
+	EndRendering();
+	Handle().pipelineBarrier2(dependency);
+}
+
 void CommandBuffer::EndRendering() const {
 	if (!m_rendering) {
 		return;

@@ -223,6 +223,11 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 				}
 			} else if (info.result == LibKernel::KERNEL_ERROR_ENOENT) {
 				log_missing = true;
+#if defined(KYTY_PLATFORM_UWP)
+				// The UWP app does not remember a file that is not found: asked again, it is looked for again (the Xbox's USB drives can
+				// refuse a look-up for a moment).
+				g_resolved_paths.erase(it);
+#endif
 			}
 		}
 		if (log_missing) {
