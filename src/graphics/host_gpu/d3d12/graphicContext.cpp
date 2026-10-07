@@ -114,10 +114,34 @@ std::string DeviceRemovedReport() {
 		return report + "DRED: unavailable\n";
 	}
 
+	// What the system thinks happened: the GPU hung, or it faulted on an address.
+	{
+		ComPtr<ID3D12DeviceRemovedExtendedData2> dred2;
+		if (SUCCEEDED(dred->QueryInterface(IID_PPV_ARGS(&dred2)))) {
+			const auto  state = dred2->GetDeviceState();
+			const char* name  = state == D3D12_DRED_DEVICE_STATE_HUNG        ? "hung (no progress)"
+			                    : state == D3D12_DRED_DEVICE_STATE_FAULT     ? "fault"
+			                    : state == D3D12_DRED_DEVICE_STATE_PAGEFAULT ? "page fault"
+			                                                                 : "unknown";
+			report += fmt::format("DRED device state: {} ({})\n", name, static_cast<int>(state));
+		} else {
+			report += "DRED device state: interface 2 unavailable\n";
+		}
+	}
+
 	// The command lists the GPU started but didn't finish, with the operations around the last
 	// one it completed.
 	D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs {};
-	if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&breadcrumbs))) {
+	const HRESULT                      breadcrumbs_result = dred->GetAutoBreadcrumbsOutput(&breadcrumbs);
+	if (FAILED(breadcrumbs_result)) {
+		report += fmt::format("DRED breadcrumbs: not available (0x{:08x})\n", static_cast<uint32_t>(breadcrumbs_result));
+	}
+	if (SUCCEEDED(breadcrumbs_result)) {
+		int recorded = 0;
+		for (const auto* node = breadcrumbs.pHeadAutoBreadcrumbNode; node != nullptr; node = node->pNext) {
+			recorded++;
+		}
+		report += fmt::format("DRED breadcrumbs: {} command lists recorded\n", recorded);
 		int lists = 0;
 		for (const auto* node = breadcrumbs.pHeadAutoBreadcrumbNode; node != nullptr && lists < 8;
 		     node = node->pNext) {
@@ -148,7 +172,10 @@ std::string DeviceRemovedReport() {
 	report += UnfinishedWorkReport();
 
 	D3D12_DRED_PAGE_FAULT_OUTPUT page_fault {};
-	if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&page_fault)) && page_fault.PageFaultVA != 0) {
+	const HRESULT                page_fault_result = dred->GetPageFaultAllocationOutput(&page_fault);
+	report += fmt::format("DRED page fault output: 0x{:08x}, address 0x{:016x}\n", static_cast<uint32_t>(page_fault_result),
+	                      SUCCEEDED(page_fault_result) ? static_cast<uint64_t>(page_fault.PageFaultVA) : 0ull);
+	if (SUCCEEDED(page_fault_result) && page_fault.PageFaultVA != 0) {
 		report += fmt::format("Page fault at GPU address 0x{:016x}\n  live resources there:\n{}"
 		                      "  recently freed resources there:\n{}",
 		                      page_fault.PageFaultVA,
@@ -280,6 +307,9 @@ void GraphicContext::Create(bool enable_debug_layer) {
 	}
 	D3D12::g_device = device;
 	D3D12::GetGpuTrace().Create(device);
+	if (Config::GpuHangExitSeconds() != 0) {
+		D3D12::GetGpuTrace().StartWatchdog(device, Config::GpuHangExitSeconds());
+	}
 
 	D3D12MA::ALLOCATOR_DESC allocator_desc {};
 	// Guest data overwrites new memory before use, as with VMA in the Vulkan build.
@@ -336,6 +366,7 @@ void GraphicContext::Create(bool enable_debug_layer) {
 }
 
 void GraphicContext::Destroy() {
+	D3D12::GetGpuTrace().StopWatchdog();
 	for (auto** pool: {&upload_pool, &readback_pool}) {
 		if (*pool != nullptr) {
 			(*pool)->Release();

@@ -122,8 +122,13 @@ DxilCompiler::DxilCompiler(ID3D12Device* device) {
 	                                                   sizeof(options4))) ||
 	                !options4.Native16BitShaderOpsSupported;
 	if (Config::XboxGpuLimitsEnabled()) {
-		model.HighestShaderModel = std::min(model.HighestShaderModel, D3D_SHADER_MODEL_6_4);
-		m_lower_16bit            = true;
+		const uint32_t parts = Config::XboxLimitsDxilParts(); // debugging: bit 0 shader model 6.4, bit 1 16-bit operations lowered
+		if ((parts & 1u) != 0) {
+			model.HighestShaderModel = std::min(model.HighestShaderModel, D3D_SHADER_MODEL_6_4);
+		}
+		if ((parts & 2u) != 0) {
+			m_lower_16bit = true;
+		}
 	}
 	const uint32_t device_minor = static_cast<uint32_t>(model.HighestShaderModel) & 0xfu;
 
@@ -425,6 +430,17 @@ std::vector<DxilShader> DxilCompiler::TranslateLinked(std::span<const LinkedStag
 		Sign(result.back(), pipeline_hash, sources);
 	}
 	return result;
+}
+
+bool DxilCompiler::Override(DxilShader& shader, std::span<const uint8_t> bytecode, uint64_t shader_hash) const {
+	DxilShader replacement = shader;
+	replacement.bytecode.assign(bytecode.begin(), bytecode.end());
+	Sign(replacement, shader_hash, {});
+	if (!replacement.IsValid()) {
+		return false;
+	}
+	shader = std::move(replacement);
+	return true;
 }
 
 // Validates the DXIL and signs it in place, as D3D12 requires.
