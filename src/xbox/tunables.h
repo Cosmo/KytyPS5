@@ -22,6 +22,16 @@ inline bool LazyMemory() {
 #endif
 }
 
+// The pager's budget in MB (0: off) from the environment variable KYTY_GUEST_RAM_BUDGET_MB, for the desktop build; the UWP app has a setting
+// (guest_ram_budget_mb in kyty-uwp.json).
+inline unsigned long long GuestRamBudgetMbFromEnvironment() {
+	static const unsigned long long mb = [] {
+		const char* value = std::getenv("KYTY_GUEST_RAM_BUDGET_MB");
+		return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
+	}();
+	return mb;
+}
+
 } // namespace Xbox::Tunables
 
 #endif
