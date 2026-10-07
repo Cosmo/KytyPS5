@@ -8,6 +8,7 @@
 #include "input.h"
 #include "launcher.h"
 #include "log.h"
+#include "graphics/host_gpu/frameDump.h"
 #include "overlay.h"
 #include "settingsPage.h"
 #include "trophiesPage.h"
@@ -30,6 +31,7 @@
 #include <winrt/Windows.UI.Xaml.Controls.h>
 
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -309,9 +311,11 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, winrt::hstring const& title
 	};
 
 	const winrt::hstring resume = L"Resume";
+	const winrt::hstring dump   = L"Save frame dump";
 	const winrt::hstring quit   = L"Quit to library";
 	items.Items().Append(winrt::box_value(resume));
 	items.Items().Append(winrt::box_value(OverlayItem(overlay->Shown())));
+	items.Items().Append(winrt::box_value(dump));
 	items.Items().Append(winrt::box_value(quit));
 
 	const auto show = [menu, items](bool open) {
@@ -326,11 +330,32 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, winrt::hstring const& title
 	};
 	const auto is_open = [menu] { return menu.Visibility() == xaml::Visibility::Visible; };
 
-	items.ItemClick([show, items, status, resume, quit, toggle_overlay](
+	items.ItemClick([show, items, status, resume, dump, quit, toggle_overlay](
 	                    auto const&, xaml::Controls::ItemClickEventArgs const& args) {
 		const auto item = winrt::unbox_value<winrt::hstring>(args.ClickedItem());
 		if (item == resume) {
 			show(false);
+			return;
+		}
+		if (item == dump) {
+			// The renderer takes the request at the next flip and writes the render targets as PNG files: the line under the menu follows it.
+			Libs::Graphics::FrameDump::Request();
+			auto text = status.try_as<xaml::Controls::TextBlock>();
+			if (text == nullptr) {
+				return;
+			}
+			text.Text(winrt::to_hstring(Libs::Graphics::FrameDump::GetStatus()));
+			status.Visibility(xaml::Visibility::Visible);
+			xaml::DispatcherTimer timer;
+			timer.Interval(std::chrono::milliseconds(500));
+			timer.Tick([timer, text](auto const&, auto const&) {
+				const auto line = Libs::Graphics::FrameDump::GetStatus();
+				text.Text(winrt::to_hstring(line));
+				if (line.rfind("Frame dump", 0) == 0) {
+					timer.Stop();
+				}
+			});
+			timer.Start();
 			return;
 		}
 		if (item != quit) {
