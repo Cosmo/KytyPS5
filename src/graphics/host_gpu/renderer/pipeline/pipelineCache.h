@@ -4,10 +4,11 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
-#include "graphics/host_gpu/renderer/colorRenderTarget.h"
-#include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCacheFile.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineState.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/shader/programCache.h"
 #include "graphics/shader/shader.h"
 
 #include <chrono>
@@ -21,75 +22,12 @@
 namespace Libs::Graphics {
 
 struct GraphicContext;
+struct DrawRenderState;
 class CommandBuffer;
 
 namespace ShaderRecompiler::IR {
 class ImageHeapSource;
 } // namespace ShaderRecompiler::IR
-
-#pragma pack(push, 1)
-
-struct PipelineStaticParameters {
-	bool                       negative_one_to_one      = false;
-	bool                       depth_clip_enable        = true;
-	vk::PrimitiveTopology      topology                 = vk::PrimitiveTopology::ePointList;
-	bool                       primitive_restart_enable = false;
-	uint32_t                   samples                  = 1;
-	bool                       sample_shading_enable    = false;
-	bool                       alpha_to_coverage_enable = false;
-	uint32_t                   color_mask[RENDER_COLOR_ATTACHMENTS_MAX]           = {};
-	bool                       cull_front                                         = false;
-	bool                       cull_back                                          = false;
-	bool                       face                                               = false;
-	bool                       provoking_vtx_last                                 = false;
-	vk::PolygonMode            polygon_mode                                       = vk::PolygonMode::eFill;
-	uint8_t                    color_srcblend[RENDER_COLOR_ATTACHMENTS_MAX]       = {};
-	uint8_t                    color_comb_fcn[RENDER_COLOR_ATTACHMENTS_MAX]       = {};
-	uint8_t                    color_destblend[RENDER_COLOR_ATTACHMENTS_MAX]      = {};
-	uint8_t                    alpha_srcblend[RENDER_COLOR_ATTACHMENTS_MAX]       = {};
-	uint8_t                    alpha_comb_fcn[RENDER_COLOR_ATTACHMENTS_MAX]       = {};
-	uint8_t                    alpha_destblend[RENDER_COLOR_ATTACHMENTS_MAX]      = {};
-	bool                       separate_alpha_blend[RENDER_COLOR_ATTACHMENTS_MAX] = {};
-	bool                       blend_enable[RENDER_COLOR_ATTACHMENTS_MAX]         = {};
-
-	bool operator==(const PipelineStaticParameters& other) const noexcept;
-};
-
-#pragma pack(pop)
-
-static_assert(std::is_trivially_copyable_v<PipelineStaticParameters>);
-static_assert(std::is_standard_layout_v<PipelineStaticParameters>);
-static_assert(alignof(PipelineStaticParameters) == 1);
-static_assert(sizeof(PipelineStaticParameters) == 117);
-
-struct PipelineRenderingState {
-	std::array<vk::Format, RENDER_COLOR_ATTACHMENTS_MAX> color_formats {};
-	vk::Format                                           depth_format   = vk::Format::eUndefined;
-	vk::Format                                           stencil_format = vk::Format::eUndefined;
-	uint32_t                                             color_count    = 0;
-
-	bool operator==(const PipelineRenderingState&) const = default;
-};
-
-struct PipelineVertexInputState {
-	struct Binding {
-		uint32_t stride                           = 0;
-		bool     instance                         = false;
-		bool     operator==(const Binding&) const = default;
-	};
-	struct Attribute {
-		uint32_t offset                             = 0;
-		uint8_t  binding                            = 0;
-		bool     operator==(const Attribute&) const = default;
-	};
-
-	std::array<Binding, ShaderVertexInputInfo::RES_MAX>   bindings {};
-	std::array<Attribute, ShaderVertexInputInfo::RES_MAX> attributes {};
-	uint8_t                                               binding_count   = 0;
-	uint8_t                                               attribute_count = 0;
-
-	bool operator==(const PipelineVertexInputState&) const = default;
-};
 
 struct ShaderProgram {
 	uint64_t         id     = 0;
@@ -98,25 +36,6 @@ struct ShaderProgram {
 	explicit operator bool() const { return id != 0 && module != nullptr; }
 };
 
-// A draw's topology, shader stages (from PipelineCache::GetGraphicsPrograms) and targets.
-struct DrawRenderState {
-	RenderDepthInfo                      depth_info;
-	RenderColorInfo                      color_info[RENDER_COLOR_ATTACHMENTS_MAX] = {};
-	uint32_t                             color_count                              = 0;
-	// Color targets the pixel program writes.
-	uint32_t                             mrt_mask                                 = 0;
-	vk::PrimitiveTopology                topology = vk::PrimitiveTopology::ePointList;
-	bool                                 primitive_restart_enable                 = false;
-	bool                                 ps_active                                = false;
-	std::array<ShaderVertexInputInfo, 3> vertex_info;
-	ShaderPixelInputInfo                 ps_input_info;
-
-	[[nodiscard]] std::span<const ShaderVertexInputInfo> VertexStages() const {
-		return {vertex_info.data(), vertex_info[1].stage ? 3u : 1u};
-	}
-};
-
-// The owning renderer serializes access, including saves while the GPU is running.
 class PipelineCache {
 public:
 	PipelineCache(GraphicContext& graphics, ShaderRecompiler::IR::ImageHeapSource* image_heap);
@@ -142,37 +61,14 @@ public:
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info);
 
 private:
-	struct ProgramCache;
+	// The program's shader module, made once per program (nullptr: no program).
+	[[nodiscard]] const ShaderProgram* Program(const CompiledProgram& program);
 
-	struct GraphicsPipelineKey {
-		PipelineRenderingState   rendering;
-		std::array<uint64_t, 3>  vertex_shader_ids {};
-		uint64_t                 ps_shader_id = 0;
-		PipelineVertexInputState vertex_input;
-		PipelineStaticParameters static_params;
-
-		bool operator==(const GraphicsPipelineKey& other) const {
-			return rendering == other.rendering && vertex_shader_ids == other.vertex_shader_ids &&
-			       ps_shader_id == other.ps_shader_id && vertex_input == other.vertex_input &&
-			       static_params == other.static_params;
-		}
-	};
-
-	struct PipelineKeyHash {
-		static void Mix(std::size_t& hash, std::size_t value) {
-			hash ^= value + static_cast<std::size_t>(0x9e3779b97f4a7c15ull) + (hash << 6u) +
-			        (hash >> 2u);
-		}
-	};
-
-	struct GraphicsPipelineKeyHash {
-		std::size_t operator()(const GraphicsPipelineKey& key) const;
-	};
-
-	GraphicContext&               m_graphics;
-	std::unique_ptr<ProgramCache> m_program_cache;
-	vk::PipelineCache             m_driver_cache = nullptr;
-	std::filesystem::path         m_driver_cache_path;
+	GraphicContext&                                  m_graphics;
+	ShaderProgramCache                               m_programs;
+	std::unordered_map<uint64_t, ShaderProgram>      m_shader_programs;
+	vk::PipelineCache                                m_driver_cache = nullptr;
+	PipelineCacheFile             m_driver_cache_file;
 	std::chrono::steady_clock::time_point m_next_driver_cache_save;
 	bool                          m_driver_cache_dirty = false;
 	std::unordered_map<GraphicsPipelineKey, Pipeline, GraphicsPipelineKeyHash> m_graphics_pipelines;
