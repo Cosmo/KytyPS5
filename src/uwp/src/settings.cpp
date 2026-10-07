@@ -64,6 +64,7 @@ AppSettings LoadSettings() {
 	read("overlay_size", settings.overlay_size);
 	read("overlay_log_lines", settings.overlay_log_lines);
 	read("xbox_gpu_limits", settings.xbox_gpu_limits);
+	read("mesh_compute", settings.mesh_compute);
 	read("shader_cache_any_build", settings.shader_cache_any_build);
 	read("impulse_triggers", settings.impulse_triggers);
 	read("haptic_rumble", settings.haptic_rumble);

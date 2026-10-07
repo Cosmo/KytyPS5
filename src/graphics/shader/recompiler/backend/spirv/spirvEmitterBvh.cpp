@@ -46,10 +46,19 @@ uint32_t Triangle(EmitterState& s, uint32_t block, uint32_t kind, uint32_t bary,
 } // namespace
 
 uint32_t BvhNode(EmitterState& s, uint32_t address) {
+	// (The guest buffer table has no pointers: a node stays an address, which BvhNodeWord reads through the table.)
+	if (s.guest_buffer_table != 0) {
+		return address;
+	}
 	return Unary(s, spv::OpConvertUToPtr, TypePhysicalU32BufferPointer(s), address);
 }
 
 uint32_t BvhNodeWord(EmitterState& s, uint32_t block, uint32_t word) {
+	if (s.guest_buffer_table != 0) {
+		const auto offset = Binary(s, spv::OpShiftLeftLogical, TypeU32(s), word, ConstantU32(s, 2));
+		return LoadGuestPointerDword(
+		    s, Binary(s, spv::OpIAdd, TypeU64(s), block, Unary(s, spv::OpUConvert, TypeU64(s), offset)));
+	}
 	const auto pointer = s.builder.AllocateId();
 	s.builder.AddFunction(spv::OpAccessChain, TypePhysicalU32Pointer(s), pointer, block,
 	                      ConstantU32(s, 0), word);
