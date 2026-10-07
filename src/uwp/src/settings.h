@@ -39,6 +39,8 @@ struct AppSettings {
 	bool headset_mic = false;
 	// Debugging, only in the file: the Xbox's shader limits on any GPU (Config::XboxGpuLimitsEnabled).
 	bool xbox_gpu_limits = false;
+	// Debugging, only in the file: merged geometry programs run as compute shaders even where the device has mesh shaders (Config::MeshComputeForced).
+	bool mesh_compute = false;
 	// The settings page, Developer: the games' compiled shaders are kept across builds of the app (Config::PipelineCacheAnyBuild). Off.
 	bool shader_cache_any_build = false;
 };

@@ -29,6 +29,9 @@ struct HostShaderLimits {
 	uint32_t max_viewport_width     = 0;
 	uint32_t max_viewport_height    = 0;
 	bool     mesh_shader_enabled    = false;
+	// Without mesh shaders, the backend can run a mesh program as a compute shader (see
+	// IR::MeshEmulation); otherwise draws with a mesh program are skipped.
+	bool     mesh_compute_emulation = false;
 	uint32_t max_mesh_invocations   = 0;
 	uint32_t max_mesh_group_size_x  = 0;
 	uint32_t max_mesh_vertices      = 0;
@@ -44,6 +47,8 @@ struct HostShaderLimits {
 struct CompiledProgram {
 	uint64_t                                     id = 0;
 	std::shared_ptr<const std::vector<uint32_t>> spirv;
+	// A mesh program run as a compute shader has the vertex stage that draws what it wrote.
+	std::shared_ptr<const std::vector<uint32_t>> mesh_fetch;
 
 	explicit operator bool() const { return id != 0 && spirv != nullptr; }
 };
