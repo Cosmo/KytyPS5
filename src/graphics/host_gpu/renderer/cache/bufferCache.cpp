@@ -14,6 +14,7 @@
 #include <cinttypes>
 #include <cstring>
 #include <memory>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -631,6 +632,61 @@ void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {
 			(void)SynchronizeBuffer(buffer, start, finish - start, false, false);
 		}
 	}
+}
+
+void BufferCache::LogMemoryBreakdown() {
+	struct Total {
+		uint64_t count = 0, bytes = 0;
+		void     Add(uint64_t b) {
+			count++;
+			bytes += b;
+		}
+		[[nodiscard]] std::string Text() const { return fmt::format("{} MB in {}", bytes >> 20u, count); }
+	};
+	std::unordered_set<BufferId> idle[2];
+	constexpr uint64_t           ages[2] = {16, 160};
+	for (int i = 0; i < 2; i++) {
+		if (m_gc_tick > ages[i]) {
+			m_lru_cache.ForEachItemBelow(m_gc_tick - ages[i], [&](BufferId id) { idle[i].insert(id); });
+		}
+	}
+	Total                 all, by_usage[4], gpu_dirty, idle_total[2];
+	constexpr const char* usage_names[4] = {"device-local", "upload", "download", "stream"};
+	struct Item {
+		uint64_t    bytes;
+		std::string text;
+	};
+	std::vector<Item> biggest;
+	m_slot_buffers.ForEach([&](BufferId id, Buffer& buffer) {
+		const uint64_t bytes = buffer.Size();
+		const auto     usage = std::min<size_t>(static_cast<size_t>(buffer.Usage()), 3);
+		all.Add(bytes);
+		by_usage[usage].Add(bytes);
+		const bool guest = buffer.CpuAddress() != 0 && (GuestRange {buffer.CpuAddress(), buffer.Size()}.Valid());
+		const bool dirty = guest && m_memory_tracker.IsRegionGpuModified(buffer.CpuAddress(), buffer.Size());
+		if (dirty) {
+			gpu_dirty.Add(bytes);
+		}
+		int age = 0;
+		for (int i = 0; i < 2; i++) {
+			if (idle[i].contains(id)) {
+				idle_total[i].Add(bytes);
+				age = i + 1;
+			}
+		}
+		biggest.push_back({bytes, fmt::format("{} at 0x{:x}{}{}", usage_names[usage], buffer.CpuAddress(), dirty ? " gpu-modified" : "",
+		                                      age == 0 ? "" : age == 1 ? " idle>16" : " idle>160")});
+	});
+	std::sort(biggest.begin(), biggest.end(), [](const Item& a, const Item& b) { return a.bytes > b.bytes; });
+	std::string top;
+	for (size_t i = 0; i < std::min<size_t>(6, biggest.size()); i++) {
+		top += fmt::format(" [{} MB {}]", biggest[i].bytes >> 20u, biggest[i].text);
+	}
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "GPU buffers: {} cache buffers ({} total). By memory: {} {}, {} {}, {} {}, {} {}. GPU-modified {}. Idle for more than 16 GC runs {}, 160 runs {}. "
+	    "Rings: staging {} MB, stream {} MB. Biggest:{}\n",
+	    all.count, all.Text(), usage_names[0], by_usage[0].Text(), usage_names[1], by_usage[1].Text(), usage_names[2], by_usage[2].Text(), usage_names[3],
+	    by_usage[3].Text(), gpu_dirty.Text(), idle_total[0].Text(), idle_total[1].Text(), m_staging_buffer.Size() >> 20u, m_stream_buffer.Size() >> 20u, top));
 }
 
 } // namespace Libs::Graphics

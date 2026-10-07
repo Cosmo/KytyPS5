@@ -239,6 +239,14 @@ std::filesystem::path ShaderOverrideFolder() {
 	return g_config != nullptr ? g_config->shader_override_folder : std::filesystem::path();
 }
 
+std::filesystem::path FrameDumpFolder() {
+	return g_config != nullptr ? g_config->frame_dump_folder : std::filesystem::path();
+}
+
+bool FrameDumpSnapshots() {
+	return g_config != nullptr && g_config->frame_dump_snapshots;
+}
+
 uint32_t GpuHangExitSeconds() {
 	return g_config != nullptr ? g_config->gpu_hang_exit_seconds : 0;
 }
