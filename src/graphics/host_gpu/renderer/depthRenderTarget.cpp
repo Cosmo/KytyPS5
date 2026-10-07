@@ -9,13 +9,10 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/tile.h"
-#include "graphics/host_gpu/graphicContext.h"
-#include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/gpuBackend.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
-#include "graphics/host_gpu/renderer/render.h"
-#include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
@@ -109,15 +106,10 @@ static vk::StencilOpState ConvertStencilState(
                                                                  const DepthFormatPolicy& policy,
                                                                  bool     has_stencil,
                                                                  uint32_t samples) {
-	auto&      graphics         = buffer.GetGraphics();
-	const auto required_samples = vulkan_sample_count(samples);
-	const auto supports         = [&](vk::Format format) {
-		vk::ImageFormatProperties properties {};
+	auto&      graphics = buffer.GetGraphics();
+	const auto supports = [&](vk::Format format) {
 		return format != vk::Format::eUndefined &&
-		       graphics.GetImageFormatProperties(
-		           format, vk::ImageType::e2D, vk::ImageTiling::eOptimal, DepthTargetImageUsage(),
-		           vk::ImageCreateFlags {}, &properties) == vk::Result::eSuccess &&
-		       static_cast<bool>(properties.sampleCounts & required_samples);
+		       graphics.SupportsDepthTargetFormat(format, samples);
 	};
 	if (!has_stencil) {
 		return supports(policy.depth_attachment_format) ? policy.depth_attachment_format
@@ -384,16 +376,9 @@ bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
 	auto& destination = cache.GetImage(write_id);
 	EXIT_IF(read_id == write_id || source.backing.format != destination.backing.format);
 
-	auto& scheduler = m_context.GetCommandScheduler();
-	scheduler.EndRendering();
-	const auto command = scheduler.Current().Handle();
 	const ImageSubresourceRange range {read_desc.view_info.base_level, 1,
 	                                  read_desc.view_info.base_layer,
 	                                  read_desc.view_info.layer_count};
-	source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
-	               range, command);
-	destination.Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite,
-	                    range, command);
 	std::array<vk::ImageCopy, 2> regions {};
 	uint32_t                   count = 0;
 	for (const auto aspect: {vk::ImageAspectFlagBits::eDepth, vk::ImageAspectFlagBits::eStencil}) {
@@ -407,10 +392,25 @@ bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
 		region.dstSubresource = region.srcSubresource;
 		region.extent = write_desc.info.extent;
 	}
-	command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal,
-	                  destination.backing.image, vk::ImageLayout::eTransferDstOptimal,
-	                  count, regions.data());
+	destination.CopySubresources(source, range, {regions.data(), count});
 	return true;
+}
+
+void ConsumeDepthClearState(TextureCache& cache, RenderDepthInfo& depth) {
+	const auto& metadata = depth.desc.info.metadata;
+	const bool  meta_clear =
+	    metadata.kind == ImageMetadataKind::Htile &&
+	    cache.IsMetaCleared(metadata.range.address, depth.desc.view_info.base_layer);
+	depth.load_clear_aspects = {};
+	if (depth.depth_clear_enable || meta_clear)
+		depth.load_clear_aspects |= vk::ImageAspectFlagBits::eDepth;
+	// Apply pending clears to compressed stencil as well as depth.
+	if (depth.stencil_clear_enable || (meta_clear && metadata.stencil_compressed))
+		depth.load_clear_aspects |= vk::ImageAspectFlagBits::eStencil;
+	if (meta_clear &&
+	    !cache.TouchMeta(metadata.range.address, depth.desc.view_info.base_layer, false)) {
+		EXIT("failed to consume HTile clear state\n");
+	}
 }
 
 vk::ImageAspectFlags RenderDepthInfo::AttachmentWriteAspects() const {
