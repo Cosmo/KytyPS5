@@ -112,6 +112,8 @@ struct ConfigOptions {
 	bool                   playgo_hack_enabled         = false;
 	bool                   skip_notice_screen          = false;
 	std::string            launch_activity;
+	// Where the host keeps the fonts that stand in for the console's system fonts (Roboto); empty: the font library looks in the source tree.
+	std::filesystem::path font_folder;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 #endif
@@ -194,6 +196,7 @@ bool PlayGoHackEnabled();
 bool SkipNoticeScreen();
 // Activity ID of the one-shot launchActivity game intent; empty sends none.
 const std::string& GetLaunchActivity();
+std::filesystem::path FontFolder();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
 #endif
