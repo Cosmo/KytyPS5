@@ -1,6 +1,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "libs/errno.h"
@@ -699,13 +700,18 @@ static std::vector<uint8_t> read_file_bytes(const std::filesystem::path& path) {
 }
 
 static std::vector<uint8_t> load_fallback_font_data(const char* file_name) {
-	const char* base_path = SDL_GetBasePath();
-	if (base_path == nullptr) {
-		LOGF("Font: SDL_GetBasePath failed: %s\n", SDL_GetError());
-		return {};
+	// A host that keeps the fonts elsewhere (the UWP app, in its package) names the folder.
+	auto folder = Config::FontFolder();
+	if (folder.empty()) {
+		const char* base_path = SDL_GetBasePath();
+		if (base_path == nullptr) {
+			LOGF("Font: SDL_GetBasePath failed: %s\n", SDL_GetError());
+			return {};
+		}
+		// SDL returns UTF-8; path(const char*) would read it in the Windows ANSI code page.
+		folder = Common::PathFromUtf8(base_path) / "assets" / "fonts";
 	}
-	// SDL returns UTF-8; path(const char*) would read it in the Windows ANSI code page.
-	const auto path = Common::PathFromUtf8(base_path) / "assets" / "fonts" / file_name;
+	const auto path = folder / file_name;
 	auto       data = read_file_bytes(path);
 	if (data.empty()) {
 		LOGF("Font: fallback font not found: %s\n", Common::PathToString(path).c_str());

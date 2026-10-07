@@ -566,6 +566,13 @@ inline constexpr std::array<VideoOutFormatPolicy, 8> VIDEO_OUT_FORMAT_POLICIES {
 	return ImagePageRangesOverlap(left.address, left.size, right.address, right.size);
 }
 
+namespace ImageOps {
+
+void                                 Validate(const ImageInfo& info);
+[[nodiscard]] Prospero::BufferFormat RenderTargetTransferFormat(uint32_t bytes_per_element);
+
+} // namespace ImageOps
+
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_IMAGEINFO_H_

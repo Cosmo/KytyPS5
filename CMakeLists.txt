@@ -195,6 +195,12 @@ if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0.0)
 endif()
 
 option(KYTY_BUILD_LAUNCHER "Build Qt launcher" ON)
+option(KYTY_BUILD_UWP "Build the UWP app (Windows and Xbox Dev Mode; src/uwp)" OFF)
+if(KYTY_BUILD_UWP)
+	# Everything in this build directory runs inside the UWP app container (src/uwp/README.md).
+	add_compile_definitions(KYTY_PLATFORM_UWP=1)
+	set(KYTY_BUILD_LAUNCHER OFF)
+endif()
 
 config_compiler_and_linker()
 
@@ -248,6 +254,39 @@ file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
 	"${KYTY_SOURCE_DIR}/loader/*.cpp"
 	"${KYTY_SOURCE_DIR}/loader/*.h"
 )
+
+# Host GPU backend. Each build contains exactly one renderer; shared code reaches it through graphics/host_gpu/gpuBackend.h. The UWP app uses D3D12.
+set(KYTY_GPU_BACKEND "Vulkan" CACHE STRING "Host GPU backend: Vulkan or D3D12")
+set_property(CACHE KYTY_GPU_BACKEND PROPERTY STRINGS Vulkan D3D12)
+if(KYTY_BUILD_UWP)
+	set(KYTY_GPU_BACKEND "D3D12" CACHE STRING "Host GPU backend: Vulkan or D3D12" FORCE)
+endif()
+if(KYTY_GPU_BACKEND STREQUAL "D3D12")
+	if(NOT WIN32)
+		message(FATAL_ERROR "KYTY_GPU_BACKEND=D3D12 requires Windows")
+	endif()
+	add_compile_definitions(KYTY_GPU_BACKEND_D3D12=1)
+	# The Vulkan renderer and the presentation code that is Vulkan only are replaced by host_gpu/d3d12. The guest image validation and the end-of-pipe sync
+	# logic are shared by both backends.
+	list(FILTER kyty_emulator_src EXCLUDE REGEX "/graphics/host_gpu/renderer/")
+	list(FILTER kyty_emulator_src EXCLUDE REGEX "/graphics/host_gpu/vma\\.cpp$")
+	list(FILTER kyty_emulator_src EXCLUDE REGEX "/graphics/presentation/(renderDoc|systemOverlay|performanceOverlay|ddsImage|openxrHeadset)\\.cpp$")
+	list(FILTER kyty_emulator_src EXCLUDE REGEX "/graphics/presentation/window/(vulkanWindow|swapchain)\\.cpp$")
+	file(GLOB kyty_d3d12_src CONFIGURE_DEPENDS
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/d3d12/*.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/d3d12/*.h"
+	)
+	list(APPEND kyty_emulator_src ${kyty_d3d12_src}
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/sync.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/imageInfo.cpp"
+	)
+elseif(KYTY_GPU_BACKEND STREQUAL "Vulkan")
+	# The Vulkan pipeline cache translates the shaders itself; the shared program cache and pipeline state serve the D3D12 backend.
+	list(FILTER kyty_emulator_src EXCLUDE REGEX "/graphics/shader/programCache\\.cpp$")
+	list(FILTER kyty_emulator_src EXCLUDE REGEX "/graphics/host_gpu/renderer/pipeline/pipelineState\\.cpp$")
+else()
+	message(FATAL_ERROR "Unknown KYTY_GPU_BACKEND '${KYTY_GPU_BACKEND}'")
+endif()
 
 find_program(KYTY_GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)
 set(gpu_tiler_shader_dir "${KYTY_SOURCE_DIR}/graphics/host_gpu/shaders")
@@ -337,7 +376,15 @@ if (KYTY_CLANG_CL)
 	set_source_files_properties(${kyty_emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
 endif()
 
-set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus OpenXR::openxr_loader libzstd_static)
+set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus)
+# The headset output (OpenXR) and the shader store (zstd-compressed records) are Vulkan only.
+if(NOT KYTY_GPU_BACKEND STREQUAL "D3D12")
+	list(APPEND kyty_emulator_link_libraries OpenXR::openxr_loader libzstd_static)
+endif()
+
+if(KYTY_GPU_BACKEND STREQUAL "D3D12")
+	list(APPEND kyty_emulator_link_libraries d3d12 dxgi dxguid)
+endif()
 
 # Linux system libraries.
 if(LINUX)
@@ -895,4 +942,9 @@ if(KYTY_BUILD_LAUNCHER)
 endif()
 if(KYTY_CLANG_CL)
 	install(FILES "${KYTY_THIRD_PARTY_DIR}/winpthread/bin/libwinpthread-1.dll" DESTINATION .)
+endif()
+
+if(KYTY_BUILD_UWP)
+	# Included, not added as a subdirectory: it uses the source lists and settings above as they are.
+	include("${KYTY_SOURCE_DIR}/uwp/uwp.cmake")
 endif()

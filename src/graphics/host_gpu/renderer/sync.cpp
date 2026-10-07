@@ -1,9 +1,7 @@
 #include "graphics/host_gpu/renderer/sync.h"
 
 #include "common/assert.h"
-#include "graphics/host_gpu/renderer/cache/bufferCache.h"
-#include "graphics/host_gpu/renderer/render.h"
-#include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/gpuBackend.h"
 #include "graphics/presentation/videoOut.h"
 #include "kernel/eventQueue.h"
 #include "kernel/pthread.h"
