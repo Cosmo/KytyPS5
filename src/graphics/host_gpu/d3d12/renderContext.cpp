@@ -1,13 +1,19 @@
 #include "graphics/host_gpu/d3d12/renderContext.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
+#include "common/emulatorConfig.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/frameDump.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
 
 #include <algorithm>
 #include <cinttypes>
+#include <ctime>
+#include <fstream>
+#include <fmt/format.h>
 
 namespace Libs::Graphics {
 
@@ -127,7 +133,35 @@ void RenderContext::PrepareBda() {
 	m_fault_process_pending = true;
 }
 
+void RenderContext::DumpFrameIfRequested(uint32_t max_wait_ms) {
+	if (!FrameDump::TakeRequest(max_wait_ms)) {
+		return;
+	}
+	const auto draw_log = FrameDump::TakeLog(); // (before anything slow: a new request clears it)
+	Log::WriteToConsoleAndLog("Frame dump: saving the render targets\n");
+	const auto root = Config::FrameDumpFolder();
+	if (root.empty()) {
+		FrameDump::SetStatus("Frame dump failed: no folder");
+		return;
+	}
+	FrameDump::SetStatus("Saving the frame dump...");
+	const std::time_t now = std::time(nullptr);
+	char              stamp[32] {};
+	std::tm           local {};
+	localtime_s(&local, &now);
+	std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local);
+	const auto result = m_texture_cache.DumpRenderTargets(root / stamp);
+	{
+		std::ofstream log_file(root / stamp / "drawlog.txt", std::ios::binary | std::ios::trunc);
+		log_file << draw_log;
+		Log::WriteToConsoleAndLog(fmt::format("Frame dump: draw log of {} KiB\n", draw_log.size() / 1024));
+	}
+	FrameDump::SetStatus(result.empty() ? "Frame dump failed: not supported here" : result);
+	Log::WriteToConsoleAndLog(fmt::format("Frame dump: {}\n", FrameDump::GetStatus()));
+}
+
 void RenderContext::RunGarbageCollector() {
+	DumpFrameIfRequested(3000); // (a request that no flip has taken for 3 seconds)
 	if (m_fault_process_pending) {
 		m_fault_process_pending = false;
 		m_buffer_cache.ProcessFaultBuffer();
@@ -135,6 +169,14 @@ void RenderContext::RunGarbageCollector() {
 	m_texture_cache.ProcessDownloadImages();
 	m_texture_cache.RunGarbageCollector();
 	m_buffer_cache.RunGarbageCollector();
+	// Experiment: where the GPU memory is, every 10 seconds.
+	static uint64_t last_breakdown_ms = 0;
+	const auto      now_ms            = GetTickCount64();
+	if (now_ms - last_breakdown_ms >= 10000) {
+		last_breakdown_ms = now_ms;
+		m_texture_cache.LogMemoryBreakdown();
+		m_buffer_cache.LogMemoryBreakdown();
+	}
 }
 
 void RenderContext::AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id) {
