@@ -5,12 +5,15 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
+#include "graphics/host_gpu/d3d12/descriptorHeap.h"
 #include "graphics/host_gpu/d3d12/formats.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
 #include "graphics/host_gpu/d3d12/render.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/rectListShader.h"
 #include "kytyGitVersion.h"
 
@@ -47,6 +50,8 @@ HostShaderLimits ShaderLimits(const GraphicContext& graphics, const D3D12::DxilC
 	    .max_viewport_width     = D3D12_VIEWPORT_BOUNDS_MAX,
 	    .max_viewport_height    = D3D12_VIEWPORT_BOUNDS_MAX,
 	    .mesh_shader_enabled    = graphics.mesh_shaders && compiler.SupportsMeshShaders(),
+	    // Without mesh shaders, merged geometry programs run as compute shaders.
+	    .mesh_compute_emulation = true,
 	    // D3D12 fixes the mesh shader limits.
 	    .max_mesh_invocations   = 128,
 	    .max_mesh_group_size_x  = 128,
@@ -416,7 +421,10 @@ std::wstring GraphicsPipelineName(const Stream&                             stre
 void RootLayout::Add(const IR::CompiledShaderInfo& program, bool program_runtime_data) {
 	push_constants = push_constants || UsesPushConstants(program);
 	runtime_data   = runtime_data || program_runtime_data;
-	heap_indexing  = heap_indexing || program.info.uses_dma;
+	// Guest memory by address: through the descriptor heap, or the guest buffer table.
+	const bool table = ShaderRecompiler::GetHostShaderFeatures().guest_pointer_table;
+	heap_indexing    = heap_indexing || (program.info.uses_dma && !table);
+	guest_table      = guest_table || (program.info.uses_dma && table);
 	// The bindings in kind order, each sized as the SPIR-V emitter's DefineDescriptors declares
 	// it: buffers, images and samplers are arrays, every other kind is a single descriptor.
 	for (auto mask = program.bindings.descriptor_mask; mask != 0; mask &= mask - 1) {
@@ -455,7 +463,9 @@ std::size_t PipelineCache::RootLayoutHash::operator()(const RootLayout& layout) 
 		}
 	}
 	Mix(hash, (layout.push_constants ? 1u : 0u) | (layout.runtime_data ? 2u : 0u) |
-	              (layout.graphics ? 4u : 0u) | (layout.heap_indexing ? 8u : 0u));
+	              (layout.graphics ? 4u : 0u) | (layout.heap_indexing ? 8u : 0u) |
+	              (layout.guest_table ? 16u : 0u) |
+	              (static_cast<uint32_t>(layout.mesh_scratch) << 5u));
 	return hash;
 }
 
@@ -487,6 +497,11 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
       m_programs(ShaderLimits(graphics, m_compiler)) {
 	D3D12::Check(graphics.device->QueryInterface(IID_PPV_ARGS(&m_device)),
 	             "query ID3D12Device2");
+	// Shaders can only index the descriptor heap from shader model 6.6 (not on the Series X): below
+	// it, guest memory is read through a table of buffers. (Set before any shader is translated.)
+	auto features                = ShaderRecompiler::GetHostShaderFeatures();
+	features.guest_pointer_table = !m_compiler.SupportsHeapIndexing();
+	ShaderRecompiler::SetHostShaderFeatures(features);
 #if defined(KYTY_PLATFORM_UWP)
 	// Constant-alpha blend factors fail at pipeline creation on the Xbox (E_INVALIDARG, guard G4): the constant color factors stand in.
 	m_alpha_blend_factor = false;
@@ -821,6 +836,46 @@ ID3D12RootSignature* PipelineCache::GetRootSignature(const RootLayout& layout) {
 		parameter.DescriptorTable.pDescriptorRanges   = ranges->data();
 		parameters.push_back(parameter);
 	}
+	// The guest buffer table: UAV views over the persistent descriptors at the start of the view
+	// heap, which change as buffers come and go (a table that reads through them while the CPU
+	// writes new ones is what volatile descriptors are for).
+	D3D12_DESCRIPTOR_RANGE1 guest_range {};
+	if (layout.guest_table) {
+		guest_range.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+		static_assert(IR::GuestBufferTableSize == DescriptorHeap::BindlessViews);
+		guest_range.NumDescriptors     = IR::GuestBufferTableSize;
+		guest_range.BaseShaderRegister = 0;
+		guest_range.RegisterSpace      = IR::GuestBufferTableSpace;
+		guest_range.Flags              = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
+		                                 D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+		guest_range.OffsetInDescriptorsFromTableStart = 0;
+		D3D12_ROOT_PARAMETER1 parameter {};
+		parameter.ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+		parameter.DescriptorTable.NumDescriptorRanges = 1;
+		parameter.DescriptorTable.pDescriptorRanges   = &guest_range;
+		parameters.push_back(parameter);
+	}
+	// The buffers of a mesh program run as a compute shader: root descriptors, whose registers
+	// are the ones the emitter gives them (IR::MeshEmulation).
+	if (layout.mesh_scratch != RootLayout::MeshScratch::None) {
+		const bool write = layout.mesh_scratch == RootLayout::MeshScratch::Write;
+		for (const auto space: {IR::MeshEmulation::RecordSpace, IR::MeshEmulation::IndexSpace}) {
+			if (!write && space == IR::MeshEmulation::IndexSpace) {
+				continue;
+			}
+			D3D12_ROOT_PARAMETER1 parameter {};
+			parameter.ParameterType = write ? D3D12_ROOT_PARAMETER_TYPE_UAV
+			                                : D3D12_ROOT_PARAMETER_TYPE_SRV;
+			parameter.Descriptor.ShaderRegister = 0;
+			parameter.Descriptor.RegisterSpace  = space;
+			// The buffers go from written to read and back between the chunks of a draw.
+			parameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
+			// The records are read by the vertex stage only.
+			parameter.ShaderVisibility = write ? D3D12_SHADER_VISIBILITY_ALL
+			                                   : D3D12_SHADER_VISIBILITY_VERTEX;
+			parameters.push_back(parameter);
+		}
+	}
 
 	D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc {};
 	desc.Version                = D3D_ROOT_SIGNATURE_VERSION_1_1;
@@ -879,6 +934,42 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	return *found->second;
 }
 
+PipelineCache::Pipeline& PipelineCache::GetMeshComputePipeline(const ShaderVertexInputInfo& vertex_info,
+                                                               const CompiledProgram&       program) {
+	// (Translate locks the cache itself.)
+	const auto* shader_ptr = Translate(program, ShaderType::Compute);
+	static const Shader skipped;
+	const auto&         shader = shader_ptr != nullptr ? *shader_ptr : skipped;
+	Common::LockGuard   lock(m_mutex);
+	auto [found, inserted] = m_compute_pipelines.try_emplace(program.id);
+	if (!inserted) {
+		return *found->second;
+	}
+	KYTY_PROFILER_BLOCK("D3D12 create mesh compute pipeline");
+	auto pipeline = std::make_unique<Pipeline>();
+	NameNewPipeline(*pipeline, fmt::format("ms as cs {:x}", program.id));
+	pipeline->trace.dxil = {&shader.dxil};
+	pipeline->layout.Add(*vertex_info.stage.program, shader.dxil.requires_runtime_data);
+	pipeline->layout.mesh_scratch = RootLayout::MeshScratch::Write;
+	pipeline->root_signature      = GetRootSignature(pipeline->layout);
+	if (!shader.dxil.IsValid() || pipeline->root_signature == nullptr) {
+		found->second = std::move(pipeline);
+		return *found->second;
+	}
+
+	ComputePipelineStream stream {};
+	stream.root.value = pipeline->root_signature;
+	stream.cs.value   = Bytecode(shader.dxil);
+	PipelineName name;
+	name.Add(RootLayoutHash {}(pipeline->layout));
+	name.Add(stream.cs.value);
+	const auto loaded_before = m_loaded_pipelines;
+	pipeline->pipeline = LoadOrCreate(name.Get(L'C'), {sizeof(stream), &stream}, {&shader.dxil});
+	CountNewPipeline(loaded_before, shader.from_cache);
+	found->second = std::move(pipeline);
+	return *found->second;
+}
+
 const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms& programs,
                                                          bool rect_list, bool sample_rate_shading,
                                                          bool                         clip_halfz,
@@ -896,10 +987,14 @@ const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms&
 	KYTY_PROFILER_BLOCK("D3D12 link shaders");
 	using Kind = D3D12::LinkedStage::Kind;
 	const bool mesh = vertex_info.stage.program->stage == ShaderType::Mesh;
+	// A mesh program run as a compute shader is drawn by its vertex stage, which reads its records.
+	const bool emulated = mesh && vertex_info.mesh.compute_emulation;
+	EXIT_IF(emulated && vertex.mesh_fetch == nullptr);
 	// The vertex stage flips Y/Z; the rect-list corners a GS adds are affine combinations of
 	// flipped positions, so they are flipped as well.
 	std::vector<D3D12::LinkedStage> stages {
-	    {*vertex.spirv, mesh ? Kind::Mesh : Kind::Vertex, true, false, clip_halfz}};
+	    {emulated ? *vertex.mesh_fetch : *vertex.spirv, mesh && !emulated ? Kind::Mesh : Kind::Vertex,
+	     true, false, clip_halfz}};
 	std::vector<uint32_t>           geometry;
 	if (rect_list) {
 		geometry = BuildRectListGeometryShader(vertex_info, ps_input_info);
@@ -926,6 +1021,10 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
                                       const GraphicsPrograms&     programs) {
 	const auto& params    = key.state.static_params;
 	const bool  mesh      = vs_input_info.stage.program->stage == ShaderType::Mesh;
+	// A mesh program run as a compute shader is drawn like any vertex stage (the one that reads its
+	// records), from a pipeline of its own.
+	const bool  emulated  = mesh && vs_input_info.mesh.compute_emulation;
+	const bool  native_mesh = mesh && !emulated;
 	// Mesh programs expand rect lists themselves.
 	const bool  rect_list = !mesh && params.topology == vk::PrimitiveTopology::ePatchList;
 	const auto& linked = Link(programs, rect_list, params.sample_shading_enable,
@@ -938,7 +1037,7 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 	                                             programs.vertex[0].id, programs.pixel.id)
 	                               : fmt::format("{} {:x}", mesh ? "ms" : "vs", programs.vertex[0].id));
 	pipeline->trace.dxil  = {&linked.vertex};
-	pipeline->trace.spirv = {programs.vertex[0].spirv};
+	pipeline->trace.spirv = {emulated ? programs.vertex[0].mesh_fetch : programs.vertex[0].spirv};
 	if (rect_list) {
 		pipeline->trace.dxil.push_back(&linked.geometry);
 	}
@@ -946,9 +1045,15 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 		pipeline->trace.dxil.push_back(&linked.pixel);
 		pipeline->trace.spirv.push_back(programs.pixel.spirv);
 	}
-	pipeline->layout.Add(*vs_input_info.stage.program,
-	                     linked.vertex.requires_runtime_data ||
-	                         linked.geometry.requires_runtime_data);
+	if (emulated) {
+		// Only the pixel stage has resources; the vertex stage reads the records, a root SRV.
+		pipeline->layout.runtime_data = linked.vertex.requires_runtime_data;
+		pipeline->layout.mesh_scratch = RootLayout::MeshScratch::Read;
+	} else {
+		pipeline->layout.Add(*vs_input_info.stage.program,
+		                     linked.vertex.requires_runtime_data ||
+		                         linked.geometry.requires_runtime_data);
+	}
 	if (ps_input_info != nullptr) {
 		pipeline->layout.Add(*ps_input_info->stage.program, linked.pixel.requires_runtime_data);
 	}
@@ -990,7 +1095,7 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 	}
 
 	const auto root_layout_hash = RootLayoutHash {}(pipeline->layout);
-	if (mesh) {
+	if (native_mesh) {
 		MeshPipelineStream stream {};
 		stream.root.value = pipeline->root_signature;
 		stream.ms.value   = Bytecode(linked.vertex);

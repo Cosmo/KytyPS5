@@ -12,6 +12,11 @@ struct HostShaderFeatures {
 	// as P0 and zeros as P10 and P20: the same result for linear interpolation. Reads of the
 	// barycentrics (i, j) themselves give zeros.
 	bool barycentrics = true;
+	// The shaders cannot index the descriptor heap (shader model below 6.6, the Xbox's UWP games), so
+	// guest memory is read through a table of the buffers' persistent descriptors, an unbounded array
+	// of storage buffers (IR::GuestBufferTableSpace) indexed by the descriptor slot that the page
+	// table gives, instead of through physical storage buffer pointers.
+	bool guest_pointer_table = false;
 };
 
 void                                    SetHostShaderFeatures(const HostShaderFeatures& features);

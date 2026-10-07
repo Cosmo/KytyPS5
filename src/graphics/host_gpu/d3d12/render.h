@@ -187,6 +187,15 @@ private:
 	void CommitBindings(CommandBuffer& buffer, bool graphics, const PipelineCache::Pipeline& pipeline,
 	                    std::span<PreparedBindings* const> stages,
 	                    std::span<const uint8_t>           runtime_data);
+	// Draws a mesh program that runs as a compute shader (ShaderRecompiler::IR::MeshEmulation):
+	// in chunks that fit the scratch buffers, `compute` writes the vertices and triangles of the
+	// chunk's groups and `graphics` draws them. Both have their bindings committed already;
+	// `draw_data` are the draw's mesh parameters (PushData::MeshDrawDwordCount of them).
+	void RecordEmulatedMeshDraw(CommandBuffer& buffer, const ShaderVertexInputInfo& vs_input_info,
+	                            const PipelineCache::Pipeline& compute,
+	                            const PipelineCache::Pipeline& graphics,
+	                            std::span<const uint32_t> draw_data, uint32_t groups,
+	                            uint32_t instances);
 
 	RenderContext&              m_context;
 	Statistics                  m_statistics;
@@ -203,6 +212,10 @@ private:
 	    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 	// Arguments of the indirect dispatch being recorded (see RecordDispatchIndirect).
 	std::unique_ptr<Buffer> m_indirect_args;
+	// The vertices and triangles of the mesh draw being recorded (see RecordEmulatedMeshDraw),
+	// made when the first one is drawn.
+	std::unique_ptr<Buffer> m_mesh_records;
+	std::unique_ptr<Buffer> m_mesh_indices;
 	// By root signature; null for pipelines without runtime data.
 	std::unordered_map<ID3D12RootSignature*, D3D12::ComPtr<ID3D12CommandSignature>>
 	    m_dispatch_signatures;
