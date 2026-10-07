@@ -31,6 +31,16 @@ namespace Common::VirtualMemory::Windows {
 [[nodiscard]] void* MapPlaceholderView(HANDLE section, uint64_t address, uint64_t offset,
                                        uint64_t size, Mode mode);
 
+// Lazily committed guest memory (T3, src/xbox/lazyRegions.h). Never executable.
+// Replaces the placeholder [address, address + size) by reserved, not committed private memory.
+[[nodiscard]] bool ReserveLazy(uint64_t address, uint64_t size);
+// Commits read-write pages inside such a reservation (fresh pages are zero).
+[[nodiscard]] bool CommitLazy(uint64_t address, uint64_t size);
+// Returns committed pages of such a reservation to the reserved state.
+[[nodiscard]] bool DecommitLazy(uint64_t address, uint64_t size);
+// Read-only, no-access or read-write for committed pages of such a reservation.
+[[nodiscard]] bool ProtectLazy(uint64_t address, uint64_t size, Mode mode);
+
 // Called first for every access violation: makes a page that is meant to be writable and
 // executable accessible for the faulting access. False when the fault is not such a page.
 [[nodiscard]] bool HandleWriteExecuteFault(uint64_t address, bool execute);
