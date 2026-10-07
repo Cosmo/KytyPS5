@@ -197,6 +197,7 @@ private:
 		D3D12::DxilShader geometry;
 		D3D12::DxilShader pixel;
 		bool              from_cache = false; // translated by an earlier run
+		bool              overridden = false; // a stage was replaced by a file of the shader_override folder
 	};
 	// Vertex and pixel program ids, rect list, sample-rate shading, OpenGL clip-space depth.
 	using LinkKey = std::tuple<uint64_t, uint64_t, bool, bool, bool>;
