@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/host_gpu/renderArgs.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
@@ -28,40 +29,6 @@ struct DrawIndexBufferSource;
 class RenderContext;
 class CommandScheduler;
 struct RenderExecutorTestAccess;
-
-enum class DrawOffsetSource : uint8_t {
-	DrawState,
-	IndirectArgs,
-};
-
-// Nonzero address: the GPU reads count Vulkan indirect draw records, stride bytes apart.
-struct DrawIndirectArgs {
-	uint64_t              address = 0;
-	uint32_t              count   = 0;
-	uint32_t              stride  = 0;
-	ShaderIndirectOffsets offsets;
-};
-
-struct DrawIndexArgs {
-	uint32_t         index_count         = 0;
-	const void*      index_addr          = nullptr;
-	uint32_t         instance_count      = 0;
-	uint32_t         index_type_and_size = 0;
-	int32_t          base_vertex         = 0;
-	uint32_t         first_instance      = 0;
-	DrawOffsetSource offset_source       = DrawOffsetSource::DrawState;
-	// With indirect records, index_count is INDEX_BUFFER_SIZE.
-	DrawIndirectArgs indirect;
-};
-
-struct DrawAutoArgs {
-	uint32_t         vertex_count   = 0;
-	uint32_t         instance_count = 0;
-	uint32_t         first_vertex   = 0;
-	uint32_t         first_instance = 0;
-	DrawOffsetSource offset_source  = DrawOffsetSource::DrawState;
-	DrawIndirectArgs indirect;
-};
 
 struct SubmitInfo {
 	static constexpr uint32_t MaxSemaphores = 3;
@@ -99,6 +66,8 @@ public:
 
 	void BeginRendering(const RenderState& state) const;
 	void EndRendering() const;
+	// Makes all prior writes visible to all later reads and writes.
+	void GlobalMemoryBarrier() const;
 
 	[[nodiscard]] vk::CommandBuffer Handle() const noexcept { return m_buffer; }
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
@@ -208,6 +177,7 @@ private:
 	GraphicsBindings                     m_graphics_bindings;
 	PreparedBindings                     m_compute_bindings;
 	std::vector<ImageId>                  m_bound_images;
+	std::vector<vk::DescriptorBufferInfo> m_descriptor_buffers;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;
 	vk::DescriptorSetLayout               m_pssr_descriptor_layout = nullptr;

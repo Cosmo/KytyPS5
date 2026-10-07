@@ -1557,7 +1557,7 @@ int KYTY_SYSV_ABI KernelRmdir(const char* path) {
 	}
 
 	std::error_code error;
-	if (!std::filesystem::remove(real_name, error)) {
+	if (!Common::File::DeleteDirectory(real_name, &error)) {
 		return error == std::errc::directory_not_empty ? KERNEL_ERROR_ENOTEMPTY : KERNEL_ERROR_EIO;
 	}
 
