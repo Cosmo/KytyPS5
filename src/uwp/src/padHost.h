@@ -52,9 +52,15 @@ struct HostPadState {
 struct HostPadFeedback {
 	uint8_t large_motor = 0;
 	uint8_t small_motor = 0;
-	// The strongest adaptive trigger resistance, 0..255; 0 without an effect.
-	uint8_t left_trigger  = 0;
-	uint8_t right_trigger = 0;
+	// The adaptive triggers (left, right) where they are now: the resistance while a trigger moves and the vibration while it is held (0..255;
+	// 0 without an effect), the vibration's frequency in Hz, and how often a weapon effect has fired (a change is a shot).
+	std::array<uint8_t, 2>  trigger_resistance {};
+	std::array<uint8_t, 2>  trigger_vibration {};
+	std::array<uint8_t, 2>  trigger_frequency {};
+	std::array<uint32_t, 2> trigger_shots {};
+	// The DualSense's haptic feedback as a bump now (left, right actuator; 0..255): a short pulse at each of its attacks.
+	uint8_t haptic_left  = 0;
+	uint8_t haptic_right = 0;
 };
 
 void                          SetPlayerConnected(int player, bool connected);
