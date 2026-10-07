@@ -97,6 +97,10 @@ public:
 	                                                    uint64_t pipeline_hash,
 	                                                    bool*    from_cache = nullptr) const;
 
+	// Debugging (shader_override): replaces the bytecode of `shader` with `bytecode`, a DXIL container signed or not, which is validated and signed
+	// like a translation. The shader keeps its flags. Returns false, with `shader` unchanged, when validation fails (reported in the log).
+	[[nodiscard]] bool Override(DxilShader& shader, std::span<const uint8_t> bytecode, uint64_t shader_hash) const;
+
 	// Mesh shaders need shader model 6.5.
 	[[nodiscard]] bool SupportsMeshShaders() const noexcept;
 	// Shaders index the descriptor heap directly (ResourceDescriptorHeap) from shader model 6.6.
