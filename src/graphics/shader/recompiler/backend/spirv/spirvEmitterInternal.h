@@ -320,6 +320,9 @@ uint32_t OutputVariableForExport(const EmitterState& state, const IR::ExportInfo
 uint32_t ConstantU32(EmitterState& state, uint32_t value);
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
+// The value of `value` in the lane `lane` of the subgroup (a shuffle): OpGroupNonUniformShuffle, or where the host needs a wave-uniform lane number
+// (HostShaderFeatures::lane_shuffle_loop) a loop over the source lanes.
+uint32_t EmitSubgroupShuffle(EmitterState& state, uint32_t type, uint32_t value, uint32_t lane);
 
 [[noreturn]] void ExitDescriptorBindingFailure(const EmitterState&       state,
                                                IR::DescriptorBindingKind kind, uint32_t resource,

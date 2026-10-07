@@ -521,23 +521,16 @@ uint32_t ValueEmitContext::FirstLane(uint32_t ballot) {
 }
 
 uint32_t ValueEmitContext::Shuffle(const IR::Inst& inst, size_t index, uint32_t lane) {
-	const auto type  = TypeId(state, inst.Arg(index).GetType());
-	const auto scope = ConstantU32(state, spv::ScopeSubgroup);
-	const auto low   = state.builder.AllocateId();
+	const auto type = TypeId(state, inst.Arg(index).GetType());
 	if (other_half == nullptr) {
-		state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, low, scope, Arg(inst, index),
-		                          lane);
-		return low;
+		return EmitSubgroupShuffle(state, type, Arg(inst, index), lane);
 	}
 	const auto physical_lane =
 	    EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 31));
-	const auto high          = state.builder.AllocateId();
 	const auto in_high       = state.builder.AllocateId();
 	const auto value         = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, low, scope,
-	                          HalfArg(inst, index, 0), physical_lane);
-	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, high, scope,
-	                          HalfArg(inst, index, 1), physical_lane);
+	const auto low           = EmitSubgroupShuffle(state, type, HalfArg(inst, index, 0), physical_lane);
+	const auto high          = EmitSubgroupShuffle(state, type, HalfArg(inst, index, 1), physical_lane);
 	state.builder.AddFunction(spv::OpINotEqual, TypeBool(state), in_high,
 	                          EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 32)),
 	                          ConstantU32(state, 0));
