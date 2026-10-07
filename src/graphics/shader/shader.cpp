@@ -458,7 +458,8 @@ void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t
 		                       mesh.scratch_size_dwords, mesh.input_primitive,
 		                       mesh.output_primitive_size, mesh.primitives_per_group,
 		                       mesh.vertices_per_group, mesh.max_vertices, mesh.max_primitives,
-		                       mesh.provoking_vertex, static_cast<uint32_t>(mesh.fast_launch)});
+		                       mesh.provoking_vertex, static_cast<uint32_t>(mesh.fast_launch),
+		                       static_cast<uint32_t>(mesh.compute_emulation)});
 	}
 	// Each tessellation stage keys only the layout fields its module depends on.
 	const auto& tess = info.tess;
