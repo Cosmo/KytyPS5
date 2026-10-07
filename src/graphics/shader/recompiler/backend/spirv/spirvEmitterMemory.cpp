@@ -20,12 +20,8 @@ uint32_t EmitDsMaskedLaneRead(EmitterState& state, uint32_t source, uint32_t tar
 	if (state.lane_count == 2) {
 		target = Binary(state, spv::OpBitwiseAnd, TypeU32(state), target, ConstantU32(state, 31));
 	}
-	const auto shuffled = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, TypeU32(state), shuffled,
-	                          ConstantU32(state, spv::ScopeSubgroup), source, target);
-	const auto source_exec = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, TypeBool(state), source_exec,
-	                          ConstantU32(state, spv::ScopeSubgroup), exec, target);
+	const auto shuffled    = EmitSubgroupShuffle(state, TypeU32(state), source, target);
+	const auto source_exec = EmitSubgroupShuffle(state, TypeBool(state), exec, target);
 	const auto source_active =
 	    AndCondition(state, source_exec, EmitSubgroupLaneActiveBool(state, target));
 	return Select(state, TypeU32(state), source_active, shuffled, ConstantU32(state, 0));
@@ -1443,10 +1439,7 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 		                          ConstantU32(state, spv::MemorySemanticsMaskNone), count);
 		return value;
 	});
-	const auto result = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, TypeU32(state), result,
-	                          ConstantU32(state, spv::ScopeSubgroup), atomic, source_lane);
-	return result;
+	return EmitSubgroupShuffle(state, TypeU32(state), atomic, source_lane);
 }
 
 uint32_t EmitReadConst(ValueEmitContext& ctx, const IR::Inst& inst) {
@@ -1606,9 +1599,7 @@ uint32_t EmitPermuteU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto source = Select(state, TypeU32(state), active,
 	                           Binary(state, spv::OpBitwiseOr, TypeU32(state), base,
 	                                  EmitFindUMsb32(state, writers)), lane);
-	const auto result = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, TypeU32(state), result,
-	                          ConstantU32(state, spv::ScopeSubgroup), ctx.Arg(inst, 0), source);
+	const auto result = EmitSubgroupShuffle(state, TypeU32(state), ctx.Arg(inst, 0), source);
 	return Select(state, TypeU32(state), active, result, ConstantU32(state, 0));
 }
 
