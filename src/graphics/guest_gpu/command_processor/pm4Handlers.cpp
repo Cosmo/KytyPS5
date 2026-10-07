@@ -1380,8 +1380,10 @@ KYTY_CP_OP_PARSER(CpOpCondExec) {
 	EXIT_NOT_IMPLEMENTED(payload_dw + exec_count >= dw);
 
 	const uint32_t condition = *reinterpret_cast<const volatile uint32_t*>(addr);
-	cp.LogGuestRead("cond-exec", addr, sizeof(uint32_t),
-	                fmt::format("value {} -> {} {} dwords of packets", condition, condition == 0 ? "SKIP" : "run", exec_count));
+	if (FrameDump::LogActive()) {
+		cp.LogGuestRead("cond-exec", addr, sizeof(uint32_t),
+		                fmt::format("value {} -> {} {} dwords of packets", condition, condition == 0 ? "SKIP" : "run", exec_count));
+	}
 	if (condition == 0) {
 		CommandProcessor::LogSkippedPackets(buffer + payload_dw, exec_count);
 		return payload_dw + exec_count;
