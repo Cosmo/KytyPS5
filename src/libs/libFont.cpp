@@ -1,6 +1,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
@@ -713,6 +714,11 @@ static std::vector<std::filesystem::path> fallback_font_candidates(const char* f
 	const auto rel =
 	    std::filesystem::path("3rdparty") / "tracy" / "profiler" / "src" / "font" / file_name;
 	std::vector<std::filesystem::path> paths;
+
+	// A host without the source tree next to it (the UWP app) names the folder it keeps the fonts in.
+	if (const auto folder = Config::FontFolder(); !folder.empty()) {
+		paths.push_back(folder / file_name);
+	}
 
 	auto source_root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
 	paths.push_back(source_root / rel);

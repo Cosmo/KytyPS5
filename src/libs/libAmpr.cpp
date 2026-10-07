@@ -206,13 +206,13 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 			info.result = LibKernel::KERNEL_ERROR_ENOENT;
 		}
 
-		bool log_missing = false;
-		{
+		// A file that is not found is not remembered: asked again, it is looked for again (the Xbox's USB drives can refuse a look-up for a moment).
+		if (info.result == OK) {
 			std::scoped_lock lock(g_mutex);
 			auto [it, inserted] = g_resolved_paths.emplace(path, info);
 			if (!inserted) {
 				info = it->second;
-			} else if (info.result == OK) {
+			} else {
 				// Allocate once under the cache lock; distinct paths can share a hash.
 				if (g_next_file_id == 0xffffffffu) {
 					info.result = it->second.result = LibKernel::KERNEL_ERROR_ENFILE;
@@ -221,11 +221,8 @@ static int ResolveOnePath(const char* guest_path, uint32_t* id, uint64_t* size) 
 					g_files.emplace(info.file_id, info.host_path);
 					g_file_sizes.emplace(info.file_id, info.is_dir ? 0 : info.file_size);
 				}
-			} else if (info.result == LibKernel::KERNEL_ERROR_ENOENT) {
-				log_missing = true;
 			}
-		}
-		if (log_missing) {
+		} else if (info.result == LibKernel::KERNEL_ERROR_ENOENT) {
 			LOGF("\tAPR resolve missing path: %s -> %s\n", guest_path, Common::PathToString(info.host_path).c_str());
 		}
 	}
