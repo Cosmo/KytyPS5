@@ -124,6 +124,9 @@ struct ConfigOptions {
 	// off for testing.
 	bool gpu_memory_savings   = true;
 	bool video_decode_threads = true;
+	// Debugging: where the GPU memory is (images and buffers by kind and size) in the log every 10 seconds. It walks every image and buffer under the
+	// texture cache's lock, so it is off unless a setting turns it on.
+	bool gpu_memory_log = false;
 	// Development: the pipeline cache of a game (its translated shaders) is kept across builds, also dirty ones; only the shader compiler's own
 	// signature still ties it. A build that translates shaders differently then uses the old translations, which can draw wrongly or crash, so it
 	// is off unless a setting turns it on.
@@ -202,6 +205,7 @@ uint32_t GuestCommitLimitMb();
 uint32_t TextureMipSkip();
 uint32_t TextureMipSkipMinSize();
 bool GpuMemorySavings();
+bool GpuMemoryLog();
 bool PipelineCacheAnyBuild();
 bool VideoDecodeThreads();
 uint64_t AppMemoryUsage();
