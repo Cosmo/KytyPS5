@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_BUFFERCACHE_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_BUFFERCACHE_H_
 
+#include <memory>
 #include "common/abi.h"
 #include "common/common.h"
 #include "common/lruCache.h"
@@ -72,7 +73,12 @@ public:
 			case MemoryUsage::Upload: return m_staging_buffer;
 			case MemoryUsage::Stream: return m_stream_buffer;
 			case MemoryUsage::Download: return m_download_buffer;
-			case MemoryUsage::DeviceLocal: return m_device_buffer;
+			case MemoryUsage::DeviceLocal:
+				// 128 MB of GPU memory that only the compute spill and one image copy path use: made when one of them needs it
+				if (m_device_buffer == nullptr) {
+					m_device_buffer = std::make_unique<StreamBuffer>(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 128ull * 1024 * 1024);
+				}
+				return *m_device_buffer;
 		}
 		EXIT("BufferCache: invalid utility-buffer usage\n");
 	}
@@ -152,7 +158,7 @@ private:
 	StreamBuffer                                      m_staging_buffer;
 	StreamBuffer                                      m_stream_buffer;
 	StreamBuffer                                      m_download_buffer;
-	StreamBuffer                                      m_device_buffer;
+	std::unique_ptr<StreamBuffer>                     m_device_buffer;
 	BdaPageTable                                      m_bda_page_table;
 	TextureCache&                                     m_texture_cache;
 	uint64_t                                          m_total_used_memory  = 0;
