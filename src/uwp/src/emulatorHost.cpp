@@ -22,6 +22,7 @@
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Storage.h>
+#include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 #include <winrt/Windows.UI.Xaml.h>
 
@@ -123,7 +124,13 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.red_zone_protection_enabled = true;
 		config.xbox_gpu_limits_enabled     = settings.xbox_gpu_limits;
 		config.mesh_compute_forced         = settings.mesh_compute;
+		config.guest_ram_budget_mb         = settings.guest_ram_budget_mb;
+		config.guest_ram_pager_mode        = settings.guest_ram_pager_mode;
+		config.guest_commit_limit_mb       = settings.guest_commit_limit_mb;
 		config.pipeline_cache_any_build    = settings.shader_cache_any_build;
+		config.app_memory_usage            = [] { return static_cast<uint64_t>(winrt::Windows::System::MemoryManager::AppMemoryUsage()); };
+		config.app_memory_limit_bytes      = settings.app_memory_limit_mb != 0 ? static_cast<uint64_t>(settings.app_memory_limit_mb) << 20u
+		                                                                       : static_cast<uint64_t>(winrt::Windows::System::MemoryManager::AppMemoryUsageLimit());
 		Emulator::Run(options);
 
 		Log("emulator stopped\n");
