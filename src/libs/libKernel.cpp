@@ -2578,6 +2578,7 @@ int32_t KYTY_SYSV_ABI FiberInitialize(FiberObject* fiber, const char* name, Fibe
 
 	if (addr_context != nullptr) {
 		// Xbox fork (T3): a fiber runs on this memory; a first-touch fault on its own stack cannot be delivered, so commit it now
+		LibKernel::Memory::PinGuestStack(reinterpret_cast<uint64_t>(addr_context), size_context); // the pager leaves stacks in memory
 		LibKernel::Memory::EnsureGuestCommitted(reinterpret_cast<uint64_t>(addr_context), size_context);
 		*static_cast<uint64_t*>(addr_context) = FIBER_STACK_MAGIC;
 	}
