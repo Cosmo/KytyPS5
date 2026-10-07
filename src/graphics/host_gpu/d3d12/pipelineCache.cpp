@@ -501,7 +501,9 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 }
 
 std::string PipelineCache::CacheSignature() const {
-	return fmt::format("KytyD3D12PC2:{}:{}\n", KYTY_GIT_REVISION, m_compiler.CacheSignature());
+	// Kept across builds (a developer setting), the cache is tied to the shader compiler only.
+	return fmt::format("KytyD3D12PC2:{}:{}\n", Config::PipelineCacheAnyBuild() ? "any-build" : KYTY_GIT_REVISION,
+	                   m_compiler.CacheSignature());
 }
 
 // The cache file holds a u64 count of its pipelines, a u64 size and the saved translations
@@ -510,6 +512,9 @@ void PipelineCache::InitializeDiskCache() {
 	m_cache_file = PipelineCacheFile("D3D12 pipeline cache", ".d3d12.bin");
 	if (!m_cache_file.Enabled()) {
 		return;
+	}
+	if (Config::PipelineCacheAnyBuild()) {
+		m_cache_file.Log("kept across builds (developer setting): translations of another build may draw wrongly or crash");
 	}
 	const auto payload = m_cache_file.Load(CacheSignature());
 	if (!payload.empty()) {
