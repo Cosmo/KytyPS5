@@ -51,6 +51,30 @@ void copy_element(uint src, uint dst) {
 	}
 }
 
+#ifdef GATHER_DWORDS
+// Where the element at p of a mip level lies in the tiled surface, relative to the level's start.
+uint tiled_offset(Mip params, uvec3 p) {
+	uvec3 extent = block_extent();
+	uvec3 block = p / extent;
+	uvec3 swizzle = p + uvec3(params.tail_x, params.tail_y, params.surface_z);
+
+	uint block_index = block.y * params.blocks_per_row + block.x;
+	return block.z * params.tiled_slice_bytes + block_index * BLOCK_BYTES +
+	       block_offset(swizzle);
+}
+
+// The D3D12 build (GATHER_DWORDS): elements smaller than a dword share a dword with their
+// neighbours, and where the device has no byte and 16-bit stores (D3D12 below shader model 6.2, the
+// Xbox Series X) they reach the output with atomics, which have no effect on this kernel's output
+// buffer on the Series X (it stays at its initial value; plain stores work). So when the linear rows
+// are dword aligned, one invocation per output dword gathers its elements and writes the whole
+// dword. De-tiling clears its output first, which the padding bytes of a last, partial dword rely on.
+bool gathers_dwords(Mip params) {
+	return TILE == 0 && ELEMENT_BYTES < 4 &&
+	       ((params.dst_base | params.slice_bytes | params.pitch_bytes) & 3u) == 0u;
+}
+#endif
+
 void main() {
 	uint group = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
 	// Reject padding groups before multiplying: the active range may approach 4 GiB.
@@ -71,6 +95,25 @@ void main() {
 	uint row = texel / params.width;
 	uint z = row / params.height;
 	uvec3 p = uvec3(texel - row * params.width, row - z * params.height, z);
+
+#ifdef GATHER_DWORDS
+	if (gathers_dwords(params)) {
+		const uint per_dword = ELEMENT_BYTES < 4 ? 4u / ELEMENT_BYTES : 1u;
+		if (p.x % per_dword != 0u) {
+			return;
+		}
+		const uint mask = ELEMENT_BYTES == 1 ? 0xffu : 0xffffu;
+		uint word = 0u;
+		for (uint i = 0u; i < per_dword && p.x + i < params.width; i++) {
+			uint src = params.src_base + tiled_offset(params, uvec3(p.x + i, p.y, p.z));
+			uint value = (input_buffer.data[src >> 2] >> ((src & 3u) * 8u)) & mask;
+			word |= value << (i * ELEMENT_BYTES * 8u);
+		}
+		uint linear = p.z * params.slice_bytes + p.y * params.pitch_bytes + p.x * ELEMENT_BYTES;
+		output_buffer.data[(params.dst_base + linear) >> 2] = word;
+		return;
+	}
+#endif
 
 	uvec3 extent = block_extent();
 	uvec3 block = p / extent;
