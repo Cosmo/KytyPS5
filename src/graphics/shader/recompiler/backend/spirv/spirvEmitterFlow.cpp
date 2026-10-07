@@ -753,8 +753,9 @@ uint32_t EmitLaneId(EmitterState& state) {
 uint32_t EmitMeshDrawParameter(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state  = ctx.state;
 	const auto index  = inst.Arg(0).U32();
-	const auto count  = state.mesh_payload != 0 ? IR::PushData::MeshTaskPayloadDwordCount
-	                                            : IR::PushData::MeshDrawDwordCount;
+	const auto count  = state.mesh_compute     ? IR::MeshEmulation::DrawDwordCount
+	                    : state.mesh_payload != 0 ? IR::PushData::MeshTaskPayloadDwordCount
+	                                              : IR::PushData::MeshDrawDwordCount;
 	if (state.program.stage != ShaderType::Mesh || index >= count) {
 		ctx.Fail(inst, "invalid mesh draw parameter");
 	}
