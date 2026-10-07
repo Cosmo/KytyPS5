@@ -81,6 +81,8 @@ struct ImageInfo {
 	bool                         bgra16          = false;
 	// Records of levels [0, resources.levels); an array image's level sizes span every layer.
 	std::array<TileMipLayout, 16> mip_layout {};
+	// Low quality: the host image is made without this many of the finest mip levels (the rest of the ImageInfo stays in guest terms: extent, levels, layout).
+	uint8_t                       host_skip = 0;
 	TileTextureBlockLayout        tiling;
 	uint64_t                      tiled_slice_stride = 0;
 	uint32_t                      first_tail_level   = 16;
