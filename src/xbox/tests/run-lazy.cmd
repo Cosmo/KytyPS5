@@ -7,3 +7,5 @@ set "OUT=%TEMP%\lazyRegionsTest"
 if not exist "%OUT%" mkdir "%OUT%"
 clang-cl /nologo /std:c++20 /EHsc /O2 /W3 /I "%HERE%..\.." "%HERE%lazyRegionsTest.cpp" /Fo"%OUT%\\" /Fe"%OUT%\lazyRegionsTest.exe" || exit /b 1
 "%OUT%\lazyRegionsTest.exe"
+clang-cl /nologo /std:c++20 /EHsc /O2 /W3 /I "%HERE%..\.." "%HERE%lazyPagerTest.cpp" /Fo"%OUT%\\" /Fe"%OUT%\lazyPagerTest.exe" || exit /b 1
+"%OUT%\lazyPagerTest.exe"
