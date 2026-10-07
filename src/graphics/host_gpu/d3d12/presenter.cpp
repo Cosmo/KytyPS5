@@ -7,6 +7,7 @@
 #include "common/threads.h"
 #include "gpu_blit_shaders/gpu_blit_fs_triangle_spv.h"
 #include "gpu_blit_shaders/gpu_blit_present_spv.h"
+#include "graphics/host_gpu/frameResolution.h"
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
 #include "graphics/host_gpu/d3d12/formats.h"
 #include "graphics/host_gpu/d3d12/renderContext.h"
@@ -552,6 +553,9 @@ void Presenter::Present(std::span<const Layer> layers) {
 			m_impl->frames.Release(previous.frame);
 		}
 		previous = layer;
+		if (layer.bus == 0 && !layer.frame->blank) {
+			FrameResolution::NoteOutput(layer.frame->width, layer.frame->height);
+		}
 	}
 	m_impl->Present();
 }
