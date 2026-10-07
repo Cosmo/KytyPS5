@@ -3,6 +3,9 @@
 
 #include "common/abi.h"
 #include "common/common.h"
+
+#include <array>
+
 namespace Libs::Controller {
 
 void Initialize();
@@ -83,8 +86,21 @@ int  GetActiveControllerId();
 struct HostFeedback {
 	uint8_t large_motor = 0;
 	uint8_t small_motor = 0;
+	// The adaptive triggers' effects (left, right) where the triggers are now, with the trigger effect intensity applied, for a controller with motors
+	// in its triggers: the resistance a trigger gives while it moves and the vibration while it is held (0..255), the vibration's frequency in Hz, and
+	// how often a weapon effect has fired so far (a change is a shot).
+	std::array<uint8_t, 2>  trigger_resistance {};
+	std::array<uint8_t, 2>  trigger_vibration {};
+	std::array<uint8_t, 2>  trigger_frequency {};
+	std::array<uint32_t, 2> trigger_shots {};
+	// The haptic feedback's bump now (left, right actuator; 0..255): a short pulse where what the game plays on the vibration ports suddenly gets
+	// louder, 0 otherwise.
+	uint8_t haptic_left  = 0;
+	uint8_t haptic_right = 0;
 };
 [[nodiscard]] HostFeedback GetHostFeedback();
+// The audio library, for every block a game plays on a vibration port: the block's loudness per actuator (RMS, 0..1, volume applied).
+void SetHapticLevels(float left, float right);
 #endif
 
 enum class Setting { SpeakerVolume, VibrationIntensity, TriggerEffectIntensity };

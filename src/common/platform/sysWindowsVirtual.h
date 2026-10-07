@@ -45,6 +45,11 @@ namespace Common::VirtualMemory::Windows {
 // executable accessible for the faulting access. False when the fault is not such a page.
 [[nodiscard]] bool HandleWriteExecuteFault(uint64_t address, bool execute);
 
+// Makes the pages of [address, address + size) that are meant to be writable and executable executable now, instead of on their first execute
+// fault (a write still makes a page writable again). Code that runs in the middle of a guest function, like the red-zone trampolines, must not
+// fault on its first execution: the exception frame would land on the guest's red zone. Does nothing on the desktop.
+bool MakeWriteExecuteExecutable(uint64_t address, uint64_t size);
+
 } // namespace Common::VirtualMemory::Windows
 
 #endif
