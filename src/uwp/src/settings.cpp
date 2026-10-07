@@ -64,6 +64,10 @@ AppSettings LoadSettings() {
 	read("overlay_size", settings.overlay_size);
 	read("overlay_log_lines", settings.overlay_log_lines);
 	read("xbox_gpu_limits", settings.xbox_gpu_limits);
+	read("xbox_limits_dxil_parts", settings.xbox_limits_dxil_parts);
+	read("dump_pipeline", settings.dump_pipeline);
+	read("shader_override", settings.shader_override);
+	read("gpu_hang_exit_seconds", settings.gpu_hang_exit_seconds);
 	read("mesh_compute", settings.mesh_compute);
 	read("guest_ram_budget_mb", settings.guest_ram_budget_mb);
 	read("guest_ram_pager_mode", settings.guest_ram_pager_mode);
