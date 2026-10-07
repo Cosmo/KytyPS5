@@ -543,6 +543,13 @@ inline constexpr std::array<VideoOutFormatPolicy, 12> VIDEO_OUT_FORMAT_POLICIES 
 	return ImageRangeOverlaps(left.address, left.size, right.address, right.size);
 }
 
+namespace ImageOps {
+
+void                                 Validate(const ImageInfo& info);
+[[nodiscard]] Prospero::BufferFormat RenderTargetTransferFormat(uint32_t bytes_per_element);
+
+} // namespace ImageOps
+
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_IMAGEINFO_H_
