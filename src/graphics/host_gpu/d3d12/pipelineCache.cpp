@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/d3d12/pipelineCache.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_defs.h"
@@ -25,6 +26,9 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <set>
 #include <fmt/format.h>
@@ -970,6 +974,26 @@ PipelineCache::Pipeline& PipelineCache::GetMeshComputePipeline(const ShaderVerte
 	return *found->second;
 }
 
+// Debugging (shader_override in kyty-uwp.json): the file <size>.<stage>.dxil of the folder, when there is one, replaces `shader`; <size> is the size in
+// bytes of the pipeline's pixel program's SPIR-V. True when it did.
+static bool OverrideShader(const D3D12::DxilCompiler& compiler, const std::filesystem::path& folder, size_t size, const char* stage,
+                           D3D12::DxilShader& shader, uint64_t hash) {
+	const auto    path = folder / fmt::format("{}.{}.dxil", size, stage);
+	std::ifstream file(path, std::ios::binary);
+	if (!file) {
+		return false;
+	}
+	const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+	const size_t               translated = shader.bytecode.size();
+	if (!compiler.Override(shader, bytes, hash)) {
+		Log::WriteToConsoleAndLog(fmt::format("shader override: {} was not accepted (the translated {} shader stays)\n", path.string(), stage));
+		return false;
+	}
+	Log::WriteToConsoleAndLog(fmt::format("shader override: {} stage of the pipelines with a {} byte pixel program is {} ({} bytes; translated: {} bytes)\n",
+	                                      stage, size, path.string(), shader.bytecode.size(), translated));
+	return true;
+}
+
 const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms& programs,
                                                          bool rect_list, bool sample_rate_shading,
                                                          bool                         clip_halfz,
@@ -1012,6 +1036,14 @@ const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms&
 	if (ps) {
 		linked.pixel = std::move(dxil.back());
 	}
+	if (ps && !Config::ShaderOverrideFolder().empty()) {
+		const auto     folder = Config::ShaderOverrideFolder();
+		const auto     size   = pixel.spirv->size() * sizeof(uint32_t);
+		const uint64_t hash   = vertex.id ^ (pixel.id * 31);
+		const bool     replaced_pixel  = OverrideShader(m_compiler, folder, size, "ps", linked.pixel, hash);
+		const bool     replaced_vertex = OverrideShader(m_compiler, folder, size, "vs", linked.vertex, hash);
+		linked.overridden = replaced_pixel || replaced_vertex;
+	}
 	return linked;
 }
 
@@ -1038,12 +1070,31 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 	                               : fmt::format("{} {:x}", mesh ? "ms" : "vs", programs.vertex[0].id));
 	pipeline->trace.dxil  = {&linked.vertex};
 	pipeline->trace.spirv = {emulated ? programs.vertex[0].mesh_fetch : programs.vertex[0].spirv};
+	if (linked.overridden) {
+		D3D12::GetGpuTrace().Watch(&pipeline->trace); // the watchdog (gpu_hang_exit_seconds) logs how many of its draws finished
+		Log::WriteToConsoleAndLog(fmt::format("shader override: {} has overridden shaders\n", std::string(pipeline->trace.name.begin(), pipeline->trace.name.end())));
+	}
 	if (rect_list) {
 		pipeline->trace.dxil.push_back(&linked.geometry);
 	}
 	if (ps_input_info != nullptr) {
 		pipeline->trace.dxil.push_back(&linked.pixel);
 		pipeline->trace.spirv.push_back(programs.pixel.spirv);
+	}
+	// a number up to 9999 is the number of the pipeline, a bigger one the size in bytes of its pixel shader's SPIR-V (the same shader in another mode has another number)
+	const uint32_t dump_what = Config::DumpPipeline();
+	if (dump_what != 0 && (dump_what < 10000 ? dump_what == m_pipeline_count : (pipeline->trace.spirv.size() > 1 && pipeline->trace.spirv[1]->size() * sizeof(uint32_t) == dump_what))) {
+		// debugging (dump_pipeline in kyty-uwp.json): the shaders of this pipeline, as they are, for comparing builds of the same shader
+		std::vector<std::span<const uint8_t>>  dxil;
+		std::vector<std::span<const uint32_t>> spirv;
+		for (const auto* shader: pipeline->trace.dxil) {
+			dxil.emplace_back(shader->bytecode);
+		}
+		for (const auto& program: pipeline->trace.spirv) {
+			spirv.emplace_back(*program);
+		}
+		Log::WriteToConsoleAndLog(fmt::format("pipeline {} shaders saved to {} (\"dump_{}\")\n", m_pipeline_count,
+		                                      D3D12::SaveShaderDump(fmt::format("dump_{}", m_pipeline_count), dxil, spirv), m_pipeline_count));
 	}
 	if (emulated) {
 		// Only the pixel stage has resources; the vertex stage reads the records, a root SRV.
