@@ -239,8 +239,28 @@ bool MeshComputeForced() {
 	return g_config != nullptr && g_config->mesh_compute_forced;
 }
 
+uint32_t GuestRamBudgetMb() {
+	return g_config != nullptr ? g_config->guest_ram_budget_mb : 0;
+}
+
+uint32_t GuestCommitLimitMb() {
+	return g_config != nullptr ? g_config->guest_commit_limit_mb : 0;
+}
+
 bool PipelineCacheAnyBuild() {
 	return g_config != nullptr && g_config->pipeline_cache_any_build;
+}
+
+uint64_t AppMemoryUsage() {
+	return g_config != nullptr && g_config->app_memory_usage != nullptr ? g_config->app_memory_usage() : 0;
+}
+
+uint64_t AppMemoryLimit() {
+	return g_config != nullptr ? g_config->app_memory_limit_bytes : 0;
+}
+
+uint32_t GuestRamPagerMode() {
+	return g_config != nullptr ? g_config->guest_ram_pager_mode : 0;
 }
 #endif
 
