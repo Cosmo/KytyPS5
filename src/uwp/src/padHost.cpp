@@ -187,7 +187,8 @@ HostPadFeedback GetPlayerFeedback(int player) {
 		return {};
 	}
 	const auto feedback = C::GetHostFeedback();
-	return {feedback.large_motor, feedback.small_motor, 0, 0};
+	return {feedback.large_motor,       feedback.small_motor,       feedback.trigger_resistance, feedback.trigger_vibration,
+	        feedback.trigger_frequency, feedback.trigger_shots,     feedback.haptic_left,        feedback.haptic_right};
 }
 
 } // namespace Kyty::Uwp::Pad
