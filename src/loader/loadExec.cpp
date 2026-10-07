@@ -23,7 +23,7 @@
 
 namespace Emulator {
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS && !defined(KYTY_PLATFORM_UWP)
 static std::wstring QuoteArgument(std::wstring_view argument) {
 	std::wstring quoted  = L"\"";
 	size_t       slashes = 0;
@@ -47,7 +47,8 @@ int LoadExec(const char* path, const char* const argv[]) {
 	    !Common::File::IsFileExisting(Libs::LibKernel::FileSystem::GetRealFilename(path))) {
 		return SYSTEM_SERVICE_ERROR_PARAMETER;
 	}
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS || defined(__linux__)
+	// The UWP app cannot start itself again as a plain process: unavailable there.
+#if (KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS && !defined(KYTY_PLATFORM_UWP)) || defined(__linux__)
 	std::vector<std::string> arguments {"--guest-exec", path};
 	size_t                   bytes = 0;
 	for (size_t i = 0; argv != nullptr && argv[i] != nullptr; ++i) {

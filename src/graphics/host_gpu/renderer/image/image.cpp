@@ -96,14 +96,6 @@ ImageCreateFlags(const GraphicContext& graphics, const ImageInfo& info, vk::Imag
 	return usage;
 }
 
-void ValidateOptionalRange(GuestRange range, const char* name) {
-	if (!range.ValidOrEmpty()) {
-		EXIT("invalid %s image range: address=0x%016llx size=0x%016llx\n", name,
-		     static_cast<unsigned long long>(range.address),
-		     static_cast<unsigned long long>(range.size));
-	}
-}
-
 } // namespace
 
 vk::ImageAspectFlags Image::FullAspectMask(vk::Format format) noexcept {
@@ -338,9 +330,9 @@ std::pair<uint32_t, uint32_t> Image::SanitizeCopyLayers(const Image& source,
 	}
 	if (source_type == destination_type) {
 		source_layers = destination_layers = std::min(source_layers, destination_layers);
-	} else if (source_type == vk::ImageType::e2D) {
+	} else if (source_type == vk::ImageType::e2D && destination_type == vk::ImageType::e3D) {
 		source_layers = depth;
-	} else {
+	} else if (source_type == vk::ImageType::e3D && destination_type == vk::ImageType::e2D) {
 		destination_layers = depth;
 	}
 	return {source_layers, destination_layers};
@@ -599,92 +591,6 @@ void Image::CopyMip(Image& source, uint32_t mip, uint32_t layer) {
 	Transit(vk::ImageLayout::eGeneral,
 	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
 }
-
-namespace ImageOps {
-
-void Validate(const ImageInfo& info) {
-	ValidateOptionalRange(info.data, "data");
-	ValidateOptionalRange(info.stencil, "stencil");
-
-	if (info.pixel_format == vk::Format::eUndefined) {
-		const bool metadata_empty =
-		    info.metadata.range.Empty() && info.metadata.kind == ImageMetadataKind::None &&
-		    info.metadata.compression == VideoOutCompression::Uncompressed &&
-		    !info.metadata.stencil_compressed;
-		if (info.data.Empty() || info.HasStencil() || !metadata_empty || info.extent.width == 0 ||
-		    info.extent.height == 0 || info.extent.depth == 0 || info.resources.levels != 1 ||
-		    info.resources.layers != 1 || info.samples != 1 || info.pitch != 0 ||
-		    info.bytes_per_block != 0) {
-			EXIT("invalid stencil association image\n");
-		}
-		return;
-	}
-
-	if (info.extent.width == 0 || info.extent.height == 0 || info.extent.depth == 0 ||
-	    info.resources.levels == 0 || info.resources.levels > info.mip_layout.size() ||
-	    info.resources.layers == 0 || info.samples == 0 ||
-	    vulkan_sample_count(info.samples) == vk::SampleCountFlagBits {} ||
-	    info.bytes_per_block == 0 || (info.data.address != 0 && info.pitch == 0)) {
-		EXIT("invalid image geometry or format\n");
-	}
-
-	switch (info.type) {
-		case Prospero::ImageType::kColor3D:
-			if (info.resources.layers != 1) {
-				EXIT("3D images cannot have array layers\n");
-			}
-			break;
-		case Prospero::ImageType::kColor2D:
-			if (info.extent.depth != 1) {
-				EXIT("invalid 2D image shape\n");
-			}
-			break;
-		default: EXIT("non-base image type: %u\n", static_cast<uint32_t>(info.type));
-	}
-	if (info.samples > 1 && info.resources.levels != 1) {
-		EXIT("multisampled images cannot have mip levels\n");
-	}
-
-	if (info.metadata.stencil_compressed && !info.HasStencil()) {
-		EXIT("compressed stencil metadata requires a stencil plane\n");
-	}
-	switch (info.metadata.kind) {
-		case ImageMetadataKind::None:
-			if (!info.metadata.range.Empty() ||
-			    info.metadata.compression != VideoOutCompression::Uncompressed ||
-			    info.metadata.stencil_compressed) {
-				EXIT("metadata-free image has metadata state\n");
-			}
-			break;
-		case ImageMetadataKind::Htile:
-			if (!info.metadata.range.Valid() ||
-			    info.metadata.compression != VideoOutCompression::Uncompressed) {
-				EXIT("invalid HTILE metadata\n");
-			}
-			break;
-		case ImageMetadataKind::Dcc:
-		case ImageMetadataKind::Cmask:
-			if (!GuestRange {info.metadata.range.address,
-			                 std::max<uint64_t>(info.metadata.range.size, 1)}.Valid() ||
-			    info.metadata.compression == VideoOutCompression::Unsupported) {
-				EXIT("invalid color metadata\n");
-			}
-			break;
-	}
-}
-
-Prospero::BufferFormat RenderTargetTransferFormat(uint32_t bytes_per_element) {
-	switch (bytes_per_element) {
-		case 1: return Prospero::BufferFormat::k8UNorm;
-		case 2: return Prospero::BufferFormat::k16UNorm;
-		case 4: return Prospero::BufferFormat::k32Float;
-		case 8: return Prospero::BufferFormat::k16_16_16_16Float;
-		case 16: return Prospero::BufferFormat::k32_32_32_32Float;
-		default: EXIT("unsupported render-target element size: %u\n", bytes_per_element);
-	}
-}
-
-} // namespace ImageOps
 
 Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageInfo& image_info)
     : info(image_info),
