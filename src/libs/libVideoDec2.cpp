@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <unordered_set>
@@ -392,11 +393,9 @@ static int32_t KYTY_SYSV_ABI QueryDecoderMemoryInfo(const Videodec2DecoderConfig
 	return OK;
 }
 
-static int32_t KYTY_SYSV_ABI CreateDecoder(const Videodec2DecoderConfigInfo* config,
-                                           const Videodec2DecoderMemoryInfo* memory_info,
-                                           Videodec2Decoder*                 decoder) {
-	PRINT_NAME();
-
+static int32_t CreateDecoderChecked(const Videodec2DecoderConfigInfo* config,
+                                    const Videodec2DecoderMemoryInfo* memory_info,
+                                    Videodec2Decoder*                 decoder) {
 	if (config == nullptr || memory_info == nullptr || decoder == nullptr) {
 		return VIDEODEC2_ERROR_ARGUMENT_POINTER;
 	}
@@ -438,9 +437,21 @@ static int32_t KYTY_SYSV_ABI CreateDecoder(const Videodec2DecoderConfigInfo* con
 	return OK;
 }
 
-static int32_t KYTY_SYSV_ABI DeleteDecoder(Videodec2Decoder decoder) {
+// A decoder's creation and deletion in the log, whatever the log is set to (games make few), with the result.
+static int32_t KYTY_SYSV_ABI CreateDecoder(const Videodec2DecoderConfigInfo* config,
+                                           const Videodec2DecoderMemoryInfo* memory_info,
+                                           Videodec2Decoder*                 decoder) {
 	PRINT_NAME();
 
+	const auto result = CreateDecoderChecked(config, memory_info, decoder);
+	std::printf("Videodec2: the game creates a decoder (codec %d, up to %dx%d): %s0x%08x\n",
+	            config != nullptr ? static_cast<int>(config->codec_type) : -1, config != nullptr ? config->max_frame_width : 0,
+	            config != nullptr ? config->max_frame_height : 0, result == OK ? "ok " : "error ", static_cast<uint32_t>(result));
+	std::fflush(stdout);
+	return result;
+}
+
+static int32_t DeleteDecoderChecked(Videodec2Decoder decoder) {
 	DecoderState* state = nullptr;
 	{
 		std::scoped_lock lock(g_decoder_mutex);
@@ -455,6 +466,15 @@ static int32_t KYTY_SYSV_ABI DeleteDecoder(Videodec2Decoder decoder) {
 	Decoder::Destroy(state);
 
 	return OK;
+}
+
+static int32_t KYTY_SYSV_ABI DeleteDecoder(Videodec2Decoder decoder) {
+	PRINT_NAME();
+
+	const auto result = DeleteDecoderChecked(decoder);
+	std::printf("Videodec2: the game deletes a decoder: %s0x%08x\n", result == OK ? "ok " : "error ", static_cast<uint32_t>(result));
+	std::fflush(stdout);
+	return result;
 }
 
 static int32_t KYTY_SYSV_ABI Decode(Videodec2Decoder decoder, const Videodec2InputData* input_data,
