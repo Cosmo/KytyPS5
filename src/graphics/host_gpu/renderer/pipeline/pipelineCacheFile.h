@@ -15,8 +15,9 @@ namespace Libs::Graphics {
 // The file a host GPU backend keeps its pipeline cache of the running title in
 // (_PipelineCache/<title id><suffix>). Only Release builds use it. Contents that depend on the
 // emulator build (Builds::Same) are only used by clean builds, so they always come from the build
-// that reads them. The backend's signature ties them to the host
-// (driver, shader compiler); a file with another signature or corrupt data is ignored.
+// that reads them, unless Config::PipelineCacheAnyBuild keeps them across builds (development).
+// The backend's signature ties them to the host (driver, shader compiler); a file with another
+// signature or corrupt data is ignored.
 class PipelineCacheFile {
 public:
 	// Whether the contents depend on the emulator build (translated shaders) or not (a driver cache keyed by the shader code).
