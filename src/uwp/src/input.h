@@ -13,8 +13,9 @@
 // sticks and their clicks L3/R3, D-pad. Holding View turns the sticks into the DualSense's extras:
 // the left stick puts a finger on the touchpad (its click is the touchpad click) and the right stick
 // sets the controller's angle for its motion sensors: up and down tip it, left and right lean it, or
-// turn it with the stick pressed in; full deflection is 180 degrees. Rumble and adaptive triggers (as trigger rumble while the
-// trigger is squeezed) come back to the controller. View + Menu together open the game menu, or
+// turn it with the stick pressed in; full deflection is 180 degrees. Rumble and adaptive triggers (as rumble of the trigger's motor: while it
+// is squeezed against resistance, while it vibrates, and a kick when a weapon effect gives way) come back to the controller, and the haptic
+// feedback as gentle rumble. View + Menu together open the game menu, or
 // with both triggers pulled as well toggle the overlay.
 namespace Kyty::Uwp {
 
@@ -50,6 +51,15 @@ enum class XboxButton { A, B, X, Y, LeftBumper, RightBumper, LeftTrigger, RightT
 // While paused (the game menu is open), the game gets neutral input and no rumble; buttons held
 // when it resumes count once they are released and pressed again.
 void PauseGameInput(bool paused);
+
+// The settings page's controller options (AppSettings), set when a game starts.
+struct ControllerOptions {
+	// The games' adaptive trigger effects rumble the motors in the triggers (Impulse Triggers).
+	bool impulse_triggers = true;
+	// The DualSense's haptic feedback rumbles the controller, gently.
+	bool haptic_rumble = true;
+};
+void SetControllerOptions(const ControllerOptions& options);
 
 } // namespace Kyty::Uwp
 
