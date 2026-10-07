@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
+#include "graphics/host_gpu/renderer/renderDraw.h"
+
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
