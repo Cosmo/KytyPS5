@@ -106,6 +106,8 @@ public:
 	void                   QueueBdaSync(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] RangeSet TakeBdaSync();
 	void               RunGarbageCollector();
+	// Experiment: where the buffers' GPU memory is, as a log line.
+	void               LogMemoryBreakdown();
 
 private:
 	friend struct BufferCacheTestAccess;
