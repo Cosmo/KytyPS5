@@ -39,6 +39,16 @@ struct AppSettings {
 	bool headset_mic = false;
 	// Debugging, only in the file: the Xbox's shader limits on any GPU (Config::XboxGpuLimitsEnabled).
 	bool xbox_gpu_limits = false;
+	// Debugging, only in the file: which limits of the DXIL compiler xbox_gpu_limits applies (bit 0 shader model 6.4, bit 1 16-bit ops lowered; default 3).
+	uint32_t xbox_limits_dxil_parts = 3;
+	// Debugging, only in the file: save the shaders of the pipeline with this number when it is created (0: none).
+	uint32_t dump_pipeline = 0;
+	// Debugging, only in the file: a folder (in LocalState, or a full path) with DXIL files that replace shaders: <size>.ps.dxil and <size>.vs.dxil for the
+	// pipelines whose pixel program's SPIR-V has that many bytes (Config::ShaderOverrideFolder). Empty: off.
+	std::string shader_override;
+	// Debugging, only in the file: end the emulator with the hang report once the GPU device is removed or its oldest work hangs for this many seconds
+	// (Config::GpuHangExitSeconds). 0: off.
+	uint32_t gpu_hang_exit_seconds = 0;
 	// Debugging, only in the file: merged geometry programs run as compute shaders even where the device has mesh shaders (Config::MeshComputeForced).
 	bool mesh_compute = false;
 	// Only in the file: guest memory above this many MB is kept in a file, the coldest first (Config::GuestRamBudgetMb). 0: off. Not set (0xFFFFFFFF):
