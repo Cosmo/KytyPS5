@@ -641,6 +641,10 @@ bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_
 			case CoreAccess::Execute: access = GpuAccess::Execute; break;
 			case CoreAccess::Unknown: return false;
 		}
+		if (access != GpuAccess::Execute &&
+		    Libs::LibKernel::Memory::HandleCommitFault(info->access_violation_vaddr, access == GpuAccess::Write)) {
+			return true; // Xbox fork (T3): the first touch of lazily committed guest memory
+		}
 		if (const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(
 		        info->exception_address)) {
 			// The backing serves an SRT walker load, so false sharing with GPU-written bytes
