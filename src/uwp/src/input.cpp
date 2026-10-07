@@ -40,10 +40,23 @@ constexpr auto MISSING_GRACE = std::chrono::seconds(2);
 // zone for tilting.
 constexpr double TOUCH_START    = 0.25;
 constexpr double TILT_DEAD_ZONE = 0.1;
-// Adaptive triggers resist while squeezed; an Xbox controller rumbles the trigger instead, while it
-// moves deeper than the dead zone and briefly after.
-constexpr uint8_t TRIGGER_DEAD_ZONE   = 12;
-constexpr auto    TRIGGER_RUMBLE_HOLD = std::chrono::milliseconds(60);
+// Adaptive triggers resist while squeezed; an Xbox controller rumbles the trigger softly instead, evenly while it moves deeper than the dead
+// zone (by more than the reading's jitter) and briefly after. A trigger's vibration rumbles it while it is held there (pulsed at frequencies the
+// motor can show), and a weapon effect that gives way kicks once. Pressed all the way, a trigger is still: the effect has nothing left to give.
+constexpr uint8_t TRIGGER_DEAD_ZONE       = 12;
+constexpr uint8_t TRIGGER_FULL            = 248;
+constexpr int     TRIGGER_MOVE_MIN        = 3;
+constexpr double  TRIGGER_RUMBLE_SCALE    = 0.4;
+constexpr auto    TRIGGER_RUMBLE_HOLD     = std::chrono::milliseconds(60);
+constexpr int     TRIGGER_PULSE_BELOW_HZ  = 20;
+constexpr auto    TRIGGER_KICK            = std::chrono::milliseconds(60);
+constexpr uint8_t TRIGGER_KICK_STRENGTH   = 128;
+// The DualSense's haptic feedback as soft bumps on the small motor, which spins up quickly enough for them (the large one lags and thumps): the
+// controller library turns the haptics' attacks into short pulses (the stronger of the two actuators counts). Nothing below the gate; above it
+// at least enough to spin the motor up for a short pulse, and at most about 25 %.
+constexpr uint8_t HAPTIC_GATE        = 10;
+constexpr int     HAPTIC_RUMBLE_MIN = 24;
+constexpr int     HAPTIC_RUMBLE_MAX = 64;
 
 constexpr std::array BUTTONS = {
     std::pair {gaming::GamepadButtons::A, Controller::PAD_BUTTON_CROSS},
@@ -83,8 +96,11 @@ struct Player {
 	Controller::HostPadState sent;
 	// Large and small motor, left and right trigger.
 	std::array<uint8_t, 4>           vibration {};
-	std::array<uint8_t, 2>           trigger_position {};
+	// Per trigger: the deepest point since it last moved back, and when it last moved deeper.
+	std::array<uint8_t, 2>           trigger_deepest {};
 	std::array<Clock::time_point, 2> trigger_squeezed {};
+	std::array<uint32_t, 2>          trigger_shots {};
+	std::array<Clock::time_point, 2> trigger_kick_until {};
 };
 
 std::array<Player, Controller::MAX_PLAYERS> g_players;
@@ -94,6 +110,9 @@ std::function<void()>       g_menu_handler;
 std::function<void()>       g_overlay_handler;
 std::vector<ControllerInfo> g_controllers;
 std::atomic_bool            g_paused  = false;
+// The settings page's controller options (SetControllerOptions).
+std::atomic_bool            g_impulse_triggers = true;
+std::atomic_bool            g_haptic_rumble    = true;
 // The game gets controller input (ActivateGameInput); g_activate asks the input thread for it.
 std::atomic_bool            g_game_input = false;
 std::atomic_bool            g_activate   = false;
@@ -103,6 +122,7 @@ std::array<std::atomic<int64_t>, Controller::MAX_PLAYERS> g_last_input {};
 std::atomic_bool            g_resumed = false;
 
 void RunChord(bool overlay) {
+	Log(overlay ? "chord: View + Menu + triggers (overlay)\n" : "chord: View + Menu (game menu)\n");
 	std::function<void()> handler;
 	{
 		std::lock_guard lock(g_shared_mutex);
@@ -265,31 +285,87 @@ Controller::HostPadState MapReading(Player& player, const gaming::GamepadReading
 	return state;
 }
 
+uint8_t TriggerStrength(uint8_t strength) {
+	return static_cast<uint8_t>(std::lround(strength * TRIGGER_RUMBLE_SCALE));
+}
+
 uint8_t TriggerRumble(uint8_t strength, uint8_t position, Clock::time_point squeezed,
                       Clock::time_point now) {
-	if (strength == 0 || position <= TRIGGER_DEAD_ZONE || now - squeezed > TRIGGER_RUMBLE_HOLD) {
+	if (strength == 0 || position <= TRIGGER_DEAD_ZONE || position >= TRIGGER_FULL || now - squeezed > TRIGGER_RUMBLE_HOLD) {
 		return 0;
 	}
-	return static_cast<uint8_t>(strength * (position - TRIGGER_DEAD_ZONE) /
-	                            (255 - TRIGGER_DEAD_ZONE));
+	return TriggerStrength(strength);
+}
+
+uint8_t TriggerVibration(uint8_t strength, uint8_t frequency, uint8_t position, Clock::time_point now) {
+	if (strength == 0 || position >= TRIGGER_FULL) {
+		return 0;
+	}
+	if (frequency == 0 || frequency >= TRIGGER_PULSE_BELOW_HZ) {
+		return TriggerStrength(strength);
+	}
+	// On for the first half of each period.
+	const auto period = 1000 / frequency;
+	const auto ms     = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+	return ms % period < period / 2 ? TriggerStrength(strength) : 0;
+}
+
+uint8_t HapticRumble(uint8_t level) {
+	if (level < HAPTIC_GATE) {
+		return 0;
+	}
+	return static_cast<uint8_t>(HAPTIC_RUMBLE_MIN + (HAPTIC_RUMBLE_MAX - HAPTIC_RUMBLE_MIN) * (level - HAPTIC_GATE) / (255 - HAPTIC_GATE));
 }
 
 void ApplyFeedback(int index, Player& player, const Controller::HostPadState& state,
                    Clock::time_point now) {
+	// A trigger moves deeper once it passed the last deeper point by more than the reading's jitter; moving back resets that point.
+	std::array<uint8_t, 2> positions {};
 	for (int trigger = 0; trigger < 2; trigger++) {
 		const auto position = state.axes[static_cast<int>(Controller::Axis::TriggerLeft) + trigger];
-		if (position > player.trigger_position[trigger]) {
+		auto&      deepest  = player.trigger_deepest[trigger];
+		if (position >= deepest + TRIGGER_MOVE_MIN) {
 			player.trigger_squeezed[trigger] = now;
+			deepest                          = position;
+		} else if (position < deepest) {
+			deepest = position;
 		}
-		player.trigger_position[trigger] = position;
+		positions[trigger] = position;
 	}
-	const auto                   feedback = Controller::GetPlayerFeedback(index);
-	const std::array<uint8_t, 4> vibration {
-	    feedback.large_motor, feedback.small_motor,
-	    TriggerRumble(feedback.left_trigger, player.trigger_position[0], player.trigger_squeezed[0],
-	                  now),
-	    TriggerRumble(feedback.right_trigger, player.trigger_position[1],
-	                  player.trigger_squeezed[1], now)};
+	const auto             feedback = Controller::GetPlayerFeedback(index);
+	std::array<uint8_t, 4> vibration {feedback.large_motor, feedback.small_motor, 0, 0};
+	// Once per session in the log: which of the DualSense's feedback the game uses.
+	static bool logged_triggers = false;
+	static bool logged_haptics  = false;
+	if (!logged_triggers && (feedback.trigger_resistance != decltype(feedback.trigger_resistance) {} ||
+	                         feedback.trigger_vibration != decltype(feedback.trigger_vibration) {})) {
+		logged_triggers = true;
+		Log("controller: the game uses adaptive trigger effects%s\n", g_impulse_triggers ? "" : " (Impulse Triggers are off)");
+	}
+	if (!logged_haptics && std::max(feedback.haptic_left, feedback.haptic_right) >= HAPTIC_GATE) {
+		logged_haptics = true;
+		Log("controller: the game plays haptic feedback%s\n", g_haptic_rumble ? "" : " (haptic rumble is off)");
+	}
+	if (g_haptic_rumble) {
+		vibration[1] = std::max(vibration[1], HapticRumble(std::max(feedback.haptic_left, feedback.haptic_right)));
+	}
+	for (int trigger = 0; trigger < 2; trigger++) {
+		// One more shot is a kick; a jump (the first look at the count) is not.
+		if (feedback.trigger_shots[trigger] != player.trigger_shots[trigger]) {
+			if (feedback.trigger_shots[trigger] - player.trigger_shots[trigger] == 1) {
+				player.trigger_kick_until[trigger] = now + TRIGGER_KICK;
+			}
+			player.trigger_shots[trigger] = feedback.trigger_shots[trigger];
+		}
+		if (!g_impulse_triggers) {
+			continue;
+		}
+		const auto resistance = TriggerRumble(feedback.trigger_resistance[trigger], positions[trigger], player.trigger_squeezed[trigger], now);
+		const auto shaking =
+		    TriggerVibration(feedback.trigger_vibration[trigger], feedback.trigger_frequency[trigger], positions[trigger], now);
+		const auto kick = now < player.trigger_kick_until[trigger] ? TRIGGER_KICK_STRENGTH : uint8_t {0};
+		vibration[2 + trigger] = std::max({resistance, shaking, kick});
+	}
 	if (vibration != player.vibration) {
 		SetVibration(player.pad, vibration);
 		player.vibration = vibration;
@@ -501,6 +577,11 @@ std::vector<ControllerInfo> ConnectedControllers() {
 
 void ActivateGameInput() {
 	g_activate = true;
+}
+
+void SetControllerOptions(const ControllerOptions& options) {
+	g_impulse_triggers = options.impulse_triggers;
+	g_haptic_rumble    = options.haptic_rumble;
 }
 
 void PauseGameInput(bool paused) {
