@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/debugCounters.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -182,9 +183,11 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, StagingSize(graphics)),
       m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, 64 * MiB),
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 64 * MiB),
-      m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
       m_bda_page_table(graphics, scheduler, m_staging_buffer, *this, CACHING_NUMPAGES),
       m_texture_cache(texture_cache) {
+	if (!Config::GpuMemorySavings()) {
+		m_device_buffer = std::make_unique<StreamBuffer>(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB); // as before the savings: made at the start
+	}
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());
 #if !defined(KYTY_GPU_BACKEND_D3D12)

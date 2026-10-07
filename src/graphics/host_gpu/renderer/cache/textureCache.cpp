@@ -792,6 +792,14 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 	const auto current_tick = m_scheduler.CurrentTick();
 	const bool safe_to_delete =
 	    current_tick - std::min(current_tick, cached.tick_accessed_last) > NumFramesBeforeRemoval;
+	if (cached.info.host_skip != 0) {
+		// A reduced image (low quality) has no mip level or slice to give to another image, and cannot grow: the overlapping request gets an image of its own, and
+		// the reduced one goes when it is old enough, like an image of another mip layout.
+		if (safe_to_delete) {
+			FreeImage(cached_id);
+		}
+		return {merged_id};
+	}
 
 	const uint32_t requested_block = requested.bytes_per_block * requested.samples;
 	const uint32_t cached_block    = cached.info.bytes_per_block * cached.info.samples;
@@ -953,7 +961,15 @@ void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_off
 			EXIT("TextureCache: invalid video-out upload\n");
 		}
 		const auto linear = m_tiler.Detile(source.Handle(), source_offset, info);
-		const auto copies = info.BufferCopies(linear.offset);
+		auto       copies = info.BufferCopies(linear.offset);
+		if (info.host_skip != 0) {
+			// Low quality: the host image has no finest levels: no copies for them, and the levels count from the first one it has
+			const uint32_t skip = info.host_skip;
+			std::erase_if(copies, [skip](const vk::BufferImageCopy& copy) { return copy.imageSubresource.mipLevel < skip; });
+			for (auto& copy: copies) {
+				copy.imageSubresource.mipLevel -= skip;
+			}
+		}
 		destination.Upload(copies, linear.buffer, linear.offset, linear.size);
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureUploadBytes, linear.size);
 		return;
@@ -1214,6 +1230,23 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 	return association;
 }
 
+// Low quality: how many of its finest mip levels the host image of a texture leaves out. Only sampled, block-compressed 2D textures with a long mip chain qualify: they
+// cannot be render targets or storage images, and nothing but samplers reads them (a guest that fetches or measures them by texel sees the smaller host image).
+static uint8_t HostMipSkip(const TextureCache::ImageDesc& desc) {
+	const uint32_t skip = Config::TextureMipSkip();
+	const auto&    info = desc.info;
+	if (skip == 0 || skip > 3 || desc.type != TextureCache::BindingType::Texture || !info.IsBlock() || info.samples != 1 || info.IsVolume() || info.HasMetadata() ||
+	    info.IsDepth() || info.type != Prospero::ImageType::kColor2D || info.resources.levels < skip + 4 || info.extent.depth != 1) {
+		return 0;
+	}
+	const uint32_t size = std::max(info.extent.width, info.extent.height);
+	if (size < Config::TextureMipSkipMinSize() || ((info.extent.width >> skip) & 3u) != 0 || ((info.extent.height >> skip) & 3u) != 0 || (info.extent.width >> skip) == 0 ||
+	    (info.extent.height >> skip) == 0) {
+		return 0;
+	}
+	return static_cast<uint8_t>(skip);
+}
+
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	auto& command = m_scheduler.Current();
 	if (command.IsInvalid()) {
@@ -1288,8 +1321,15 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			}
 		}
 		if (!result) {
-			result         = InsertImage(desc.info);
-			auto& inserted = m_slot_images[result];
+			ImageInfo to_insert = desc.info;
+			// Only the D3D12 images make the smaller host image.
+#if defined(KYTY_GPU_BACKEND_D3D12)
+			to_insert.host_skip = HostMipSkip(desc);
+#else
+			(void)&HostMipSkip;
+#endif
+			result              = InsertImage(to_insert);
+			auto& inserted      = m_slot_images[result];
 			if (m_buffer_cache.HasGpuDirtyBytes(inserted.info.data.address,
 			                                    inserted.info.data.size)) {
 				inserted.MarkBufferModified();
