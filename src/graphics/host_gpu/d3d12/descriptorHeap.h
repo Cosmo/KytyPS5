@@ -8,6 +8,8 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -51,6 +53,10 @@ public:
 	void                                      FreeBindlessView(uint32_t index);
 	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE BindlessView(uint32_t index) const noexcept;
 	[[nodiscard]] DescriptorRange AllocateSamplers(CommandBuffer& command, uint32_t count);
+	// The samplers (CPU handles from the sampler cache, in binding order) as a table in the shader-visible heap. The heap holds 2048 descriptors at
+	// most (a D3D12 limit) and a draw used to write its samplers anew, so one command list ran out of them. A set of samplers is written once per
+	// command list: draws that bind the same samplers share the table.
+	[[nodiscard]] DescriptorRange WriteSamplers(CommandBuffer& command, std::span<const D3D12_CPU_DESCRIPTOR_HANDLE> handles);
 	// A non-shader-visible view slot for clear operations, which read it while recording.
 	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE ScratchView() const noexcept;
 
@@ -108,6 +114,20 @@ private:
 	CommandScheduler&     m_scheduler;
 	Ring                  m_views;
 	Ring                  m_samplers;
+	struct SamplerSetHash {
+		size_t operator()(const std::vector<SIZE_T>& key) const noexcept {
+			uint64_t hash = 0xcbf29ce484222325ull;
+			for (const auto value: key) {
+				hash = (hash ^ value) * 0x100000001b3ull;
+			}
+			return static_cast<size_t>(hash);
+		}
+	};
+	// The sets of samplers written for the current command list (tick), by their CPU handles.
+	std::unordered_map<std::vector<SIZE_T>, DescriptorRange, SamplerSetHash> m_sampler_sets;
+	uint64_t m_sampler_tick     = 0;
+	uint32_t m_sampler_used     = 0; // descriptors written for the current command list
+	uint32_t m_sampler_reported = 0; // the most one command list used so far, as last logged
 	ID3D12DescriptorHeap* m_scratch    = nullptr;
 	uint64_t              m_bound_tick = 0;
 	struct FreedView {
