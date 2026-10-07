@@ -123,6 +123,13 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		// red zone below the guest's stack pointer (the emulator's --redzone option: the guest's code is patched to keep it clear).
 		config.red_zone_protection_enabled = true;
 		config.xbox_gpu_limits_enabled     = settings.xbox_gpu_limits;
+		config.xbox_limits_dxil_parts      = settings.xbox_limits_dxil_parts;
+		config.dump_pipeline               = settings.dump_pipeline;
+		if (!settings.shader_override.empty()) {
+			// A folder name is taken in LocalState (the shader dumps' folder, for one); a full path stays as it is.
+			config.shader_override_folder = LocalStateFolder() / std::filesystem::path(winrt::to_hstring(settings.shader_override).c_str());
+		}
+		config.gpu_hang_exit_seconds       = settings.gpu_hang_exit_seconds;
 		config.mesh_compute_forced         = settings.mesh_compute;
 		config.guest_ram_budget_mb         = settings.guest_ram_budget_mb;
 		config.guest_ram_pager_mode        = settings.guest_ram_pager_mode;
