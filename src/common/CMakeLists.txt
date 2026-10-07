@@ -43,6 +43,10 @@ target_link_libraries(common
 		ZArchive::zarchive
 		nlohmann_json::nlohmann_json
 )
+if(KYTY_CLANG_CL AND NOT KYTY_BUILD_UWP)
+	# platform/sysWindowsVirtual.cpp maps placeholder views (MapViewOfFile3, from onecore; the UWP app links WindowsApp instead).
+	target_link_libraries(common PUBLIC onecore)
+endif()
 if(APPLE)
 	# hostStats.cpp reads GPU utilization from the IOAccelerator registry entries.
 	target_link_libraries(common PRIVATE "-framework CoreFoundation" "-framework IOKit")
