@@ -156,6 +156,8 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
       <ToggleSwitch x:Name="DebugLayer" Header="Graphics debug layer (slower; reports graphics errors in the log)" />
       <ToggleSwitch x:Name="GameOutput"
                     Header="Detailed log: the game's output and the emulator's trace (slower; thousands of lines a second)" />
+      <ToggleSwitch x:Name="GpuMemoryLog"
+                    Header="GPU memory report in the log every 10 seconds (short pauses while it is written)" />
       <ToggleSwitch x:Name="ShaderCacheAnyBuild" Header="Keep compiled shaders across app builds" />
       <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
@@ -433,6 +435,12 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	game_output.IsOn(settings.game_output);
 	game_output.Toggled([state, game_output, save](auto const&, auto const&) {
 		state->settings.game_output = game_output.IsOn();
+		save();
+	});
+	auto gpu_memory_log = page.FindName(L"GpuMemoryLog").as<xaml::Controls::ToggleSwitch>();
+	gpu_memory_log.IsOn(settings.gpu_memory_log);
+	gpu_memory_log.Toggled([state, gpu_memory_log, save](auto const&, auto const&) {
+		state->settings.gpu_memory_log = gpu_memory_log.IsOn();
 		save();
 	});
 	auto shader_cache_any_build = page.FindName(L"ShaderCacheAnyBuild").as<xaml::Controls::ToggleSwitch>();
