@@ -47,9 +47,6 @@ struct DrawTargets {
 // A draw's topology, shader stages (from PipelineCache::GetGraphicsPrograms) and targets. The
 // Vulkan pipeline cache defines its own, the same.
 struct DrawRenderState {
-	RenderDepthInfo                      depth_info;
-	RenderColorInfo                      color_info[RENDER_COLOR_ATTACHMENTS_MAX] = {};
-	uint32_t                             color_count                              = 0;
 	// Color targets the pixel program writes.
 	uint32_t                             mrt_mask                                 = 0;
 	vk::PrimitiveTopology                topology = vk::PrimitiveTopology::ePointList;

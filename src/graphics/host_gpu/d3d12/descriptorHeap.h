@@ -52,6 +52,9 @@ public:
 	[[nodiscard]] uint32_t                    AllocateBindlessView();
 	void                                      FreeBindlessView(uint32_t index);
 	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE BindlessView(uint32_t index) const noexcept;
+	// The first persistent descriptor, for a descriptor table over all of them (the heap is bound
+	// to `command` if it is not yet).
+	[[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE BindlessTable(CommandBuffer& command);
 	[[nodiscard]] DescriptorRange AllocateSamplers(CommandBuffer& command, uint32_t count);
 	// The samplers (CPU handles from the sampler cache, in binding order) as a table in the shader-visible heap. The heap holds 2048 descriptors at
 	// most (a D3D12 limit) and a draw used to write its samplers anew, so one command list ran out of them. A set of samplers is written once per
