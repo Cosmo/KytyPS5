@@ -51,7 +51,7 @@ struct Mock final: Xbox::Lazy::HostOps {
 		++commits;
 		return true;
 	}
-	void Decommit(uint64_t address, uint64_t size) override {
+	void Decommit(uint64_t address, uint64_t size, bool /*view*/) override {
 		for (uint64_t p = Page(address); p < Page(address + size); ++p) {
 			CHECK(committed[p] == 1, "decommit of page %llu that is not committed", (unsigned long long)p);
 			committed[p] = 0;
