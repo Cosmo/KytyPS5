@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include "common/logging/log.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 
 #include <algorithm>
 #include <atomic>
@@ -43,10 +44,19 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 		return EmitAddU32(state, local,
 		                  EmitBinaryU32(state, spv::OpIMul, group, ConstantU32(state, size)));
 	}
-	const bool centroid = kind == IR::StageInputKind::BaryCoordSmoothCentroid;
-	const bool sample = kind == IR::StageInputKind::BaryCoordSmoothSample;
+	const bool centroid_kind = kind == IR::StageInputKind::BaryCoordSmoothCentroid;
+	bool       centroid      = centroid_kind;
+	const bool sample        = kind == IR::StageInputKind::BaryCoordSmoothSample;
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// DXIL allows one perspective SV_Barycentrics input, so a shader reading the barycentrics at
+	// both the pixel center and the centroid gets the center for both. They differ only with MSAA,
+	// for pixels on triangle edges.
+	if (centroid && state.input_info.pixel->ps_perspective_center_vgpr != UINT32_MAX) {
+		centroid = false;
+	}
+#endif
 	const auto variable = InputVariableForKind(
-	    state, centroid || sample ? IR::StageInputKind::BaryCoordSmooth : kind);
+	    state, centroid_kind || sample ? IR::StageInputKind::BaryCoordSmooth : kind);
 	if (variable == 0) {
 		return ConstantU32(state, 0);
 	}
@@ -82,7 +92,7 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 		state.builder.AddFunction(spv::OpBitcast, TypeU32(state), bits, value);
 		return bits;
 	}
-	if (centroid || sample || kind == IR::StageInputKind::BaryCoordSmooth ||
+	if (centroid_kind || sample || kind == IR::StageInputKind::BaryCoordSmooth ||
 	    kind == IR::StageInputKind::BaryCoordNoPerspective) {
 		const auto value   = state.builder.AllocateId();
 		const auto bits    = state.builder.AllocateId();
@@ -257,6 +267,11 @@ uint32_t EmitInterpolationParameter(ValueEmitContext& ctx, uint32_t attr, uint32
 	auto&       state = ctx.state;
 	const auto* input = InputBindingForParameter(state, attr);
 	if (!input->per_vertex) {
+		// Without barycentrics (HostShaderFeatures.h): P0 is the interpolated value, P10 and P20
+		// are zeros.
+		if (!GetHostShaderFeatures().barycentrics && mode < 2u && !PixelParameterIsCustom(state, attr)) {
+			return ConstantU32(state, 0);
+		}
 		return EmitAttribute(ctx.state, attr, chan);
 	}
 	uint32_t selected_vertex = (mode + 1u) % 3u;
