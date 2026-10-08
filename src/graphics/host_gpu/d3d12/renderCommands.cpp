@@ -255,14 +255,14 @@ void SetDynamicState(const CommandBuffer& buffer, ID3D12GraphicsCommandList* lis
 
 // Debugging (frame_dump_snapshots): the draw log gets the statistics of the first color target after a draw that writes a large floating-point one.
 void LogSnapshot(RenderContext& context, const DrawRenderState& state) {
-	if (!Config::FrameDumpSnapshots() || !FrameDump::LogActive() || state.color_count == 0 || !state.color_info[0].image_id) {
+	if (!Config::FrameDumpSnapshots() || !FrameDump::LogActive() || m_targets.color_count == 0 || !m_targets.colors[0].image_id) {
 		return;
 	}
-	const auto& desc = state.color_info[0].desc;
+	const auto& desc = m_targets.colors[0].desc;
 	if (desc.info.extent.width < 1920) {
 		return;
 	}
-	const auto stats = context.GetTextureCache().SnapshotStats(state.color_info[0].image_id);
+	const auto stats = context.GetTextureCache().SnapshotStats(m_targets.colors[0].image_id);
 	if (!stats.empty()) {
 		FrameDump::LogEvent(fmt::format("    after that draw, the average of 0x{:x} (every 4th texel): {}", desc.info.data.address, stats));
 	}
@@ -289,12 +289,12 @@ std::string DescribeDraw(const GraphicContext& graphics, const CommandBuffer& bu
 	for (uint32_t i = 0; i < state.VertexStages().size(); i++) {
 		vertex_ids[i] = state.vertex_info[i].stage.module->id;
 	}
-	const auto key = MakeGraphicsPipelineKey(graphics, std::span {state.color_info, state.color_count}, state.depth_info, std::span {state.vertex_info.data(), 1}, buffer,
+	const auto key = MakeGraphicsPipelineKey(graphics, std::span {m_targets.colors, m_targets.color_count}, m_targets.depth, std::span {state.vertex_info.data(), 1}, buffer,
 	                                         state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable, vertex_ids,
 	                                         state.ps_active ? state.ps_input_info.stage.module->id : 0);
 	const auto& params = key.static_params;
-	for (uint32_t i = 0; i < state.color_count; i++) {
-		const auto& color = state.color_info[i];
+	for (uint32_t i = 0; i < m_targets.color_count; i++) {
+		const auto& color = m_targets.colors[i];
 		const auto  slot  = color.target_slot;
 		text += fmt::format("    color target {}: {} | write mask 0x{:x} blend {}", slot, DrawLog::Target(color.desc, color.guest_mip_level, color.guest_array_layer), params.color_mask[slot],
 		                    params.blend_enable[slot] ? "on" : "off");
@@ -304,8 +304,8 @@ std::string DescribeDraw(const GraphicContext& graphics, const CommandBuffer& bu
 		}
 		text += "\n";
 	}
-	if (state.depth_info.image_id) {
-		const auto& depth = state.depth_info;
+	if (m_targets.depth.image_id) {
+		const auto& depth = m_targets.depth;
 		text += fmt::format("    depth target: {} | test {} {} write {} stencil {}{}\n", DrawLog::Target(depth.desc, depth.desc.view_info.base_level, depth.desc.view_info.base_layer),
 		                    depth.depth_test_enable ? "on" : "off", vk::to_string(depth.depth_compare_op), depth.depth_write_enable ? "on" : "off", depth.stencil_test_enable ? "on" : "off",
 		                    depth.load_clear_aspects ? " | cleared by this draw" : "");
@@ -355,6 +355,12 @@ RenderExecutor::RenderTargets RenderExecutor::AcquireRenderTargets(CommandBuffer
 		auto&       image = cache.GetImage(target.image_id);
 		const auto& info  = target.desc.view_info;
 		EXIT_IF(image.backing.samples != target.desc.info.samples);
+		// Before the state change: an image the device cannot render to may not enter the render target state.
+		const auto rtv = image.RenderTargetView(view);
+		if (rtv.ptr == 0) {
+			targets.unrenderable = true;
+			continue;
+		}
 		image.Use(buffer, D3D12_RESOURCE_STATE_RENDER_TARGET,
 		          ImageSubresourceRange {info.base_level, info.level_count, info.base_layer,
 		                                 info.layer_count},
@@ -362,8 +368,11 @@ RenderExecutor::RenderTargets RenderExecutor::AcquireRenderTargets(CommandBuffer
 		const auto extent                      = target.Extent();
 		targets.width                          = std::min(targets.width, extent.width);
 		targets.height                         = std::min(targets.height, extent.height);
-		targets.colors[target.target_slot]     = image.RenderTargetView(view);
+		targets.colors[target.target_slot]     = rtv;
 		targets.color_count = std::max(targets.color_count, target.target_slot + 1);
+	}
+	if (targets.unrenderable) {
+		return targets; // the draw is skipped: the depth target's pending clear stays for the next draw
 	}
 	for (uint32_t slot = 0; slot < targets.color_count; slot++) {
 		if (targets.colors[slot].ptr != 0) {
@@ -681,6 +690,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	const auto targets = AcquireRenderTargets(buffer, m_targets.colors, m_targets.color_count,
 	                                          m_targets.depth, read_only_depth);
+	if (targets.unrenderable) {
+		log_skip("a color target's format cannot be rendered to on this device");
+		m_read_only_depth = {};
+		return;
+	}
 
 	// Resource preparation above may finish and restart the command list. From here on, every
 	// operation records into the current list and cannot touch guest memory.
