@@ -32,6 +32,11 @@ struct AppSettings {
 	bool impulse_triggers = true;
 	// The settings page, Controller: the DualSense's haptic feedback as gentle rumble. On.
 	bool haptic_rumble = true;
+	// The settings page, Controller: the DualSense's speaker on a headset plugged into the controller. On.
+	bool headset_speaker = true;
+	// The settings page, Controller: the microphone of that headset as the DualSense's microphone. Off (Windows asks for the microphone when it
+	// is turned on).
+	bool headset_mic = false;
 	// Debugging, only in the file: the Xbox's shader limits on any GPU (Config::XboxGpuLimitsEnabled).
 	bool xbox_gpu_limits = false;
 	// The settings page, Developer: the games' compiled shaders are kept across builds of the app (Config::PipelineCacheAnyBuild). Off.
