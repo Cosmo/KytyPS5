@@ -168,6 +168,26 @@ FormatInfo GetFormatInfo(vk::Format format) {
 	}
 }
 
+HostColorFormat RenderableHostFormat(vk::Format format, Prospero::ColorComponentMapping host_to_storage) {
+	// Each case: the format with the same bits that DXGI has without a component mapping, and for each of its channels the channel of
+	// `format` that has those bits.
+	constexpr Prospero::ColorComponentMapping RotateFromAlpha {0x39u}; // 1, 2, 3, 0
+	const auto same_bits = [&](vk::Format renderable, Prospero::ColorComponentMapping channels) {
+		return HostColorFormat {renderable, channels.Then(host_to_storage)};
+	};
+	using F = vk::Format;
+	switch (format) {
+		case F::eA2R10G10B10UnormPack32: return same_bits(F::eA2B10G10R10UnormPack32, Prospero::ColorMappingBgra);
+		case F::eA2R10G10B10UintPack32: return same_bits(F::eA2B10G10R10UintPack32, Prospero::ColorMappingBgra);
+		case F::eB8G8R8A8Snorm: return same_bits(F::eR8G8B8A8Snorm, Prospero::ColorMappingBgra);
+		case F::eB8G8R8A8Uint: return same_bits(F::eR8G8B8A8Uint, Prospero::ColorMappingBgra);
+		case F::eB8G8R8A8Sint: return same_bits(F::eR8G8B8A8Sint, Prospero::ColorMappingBgra);
+		case F::eB5G6R5UnormPack16: return same_bits(F::eR5G6B5UnormPack16, Prospero::ColorMappingBgra);
+		case F::eR4G4B4A4UnormPack16: return same_bits(F::eA4R4G4B4UnormPack16, RotateFromAlpha);
+		default: return {format, host_to_storage};
+	}
+}
+
 DXGI_FORMAT VertexFormat(vk::Format format) {
 	// The 96-bit formats are no textures (see GetFormatInfo) but fine as vertex input.
 	switch (format) {
