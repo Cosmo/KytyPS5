@@ -33,6 +33,9 @@ struct ControllerInfo {
 	int          player = 0; // 0 is player 1
 	std::wstring name;
 	bool         latest = false; // the controller with the most recent input
+	// A headset microphone is there for this player (player 1: the controller's headset or the chat headset); the DualSense's microphone when
+	// the settings page's option is on.
+	bool headset_mic = false;
 };
 // The symbol shown with a controller: the Xbox's own (Segoe Xbox Symbol U+E42D) on the Xbox, the gamepad of Segoe MDL2 Assets (U+E7FC)
 // elsewhere.
@@ -45,6 +48,10 @@ struct ControllerSymbol {
 // from Segoe MDL2 Assets).
 enum class XboxButton { A, B, X, Y, LeftBumper, RightBumper, LeftTrigger, RightTrigger, LeftStick, RightStick, DPad, Menu, View };
 [[nodiscard]] ControllerSymbol GetButtonSymbol(XboxButton button);
+// The headset shown after a controller that has a headset microphone (Segoe MDL2 Assets, on a PC and on the Xbox): bright when the settings page
+// uses it as the controller's microphone, dim otherwise.
+constexpr const wchar_t* HEADSET_SYMBOL_FONT = L"Segoe MDL2 Assets";
+constexpr const wchar_t* HEADSET_SYMBOL      = L"";
 
 // The connected controllers by player.
 [[nodiscard]] std::vector<ControllerInfo> ConnectedControllers();
@@ -58,8 +65,21 @@ struct ControllerOptions {
 	bool impulse_triggers = true;
 	// The DualSense's haptic feedback rumbles the controller, gently.
 	bool haptic_rumble = true;
+	// What games play on the DualSense's speaker plays on a headset plugged into player 1's controller.
+	bool headset_speaker = true;
+	// The microphone of that headset is the DualSense's microphone.
+	bool headset_mic = false;
 };
 void SetControllerOptions(const ControllerOptions& options);
+
+// The headset plugged into player 1's controller as the DualSense's speaker and microphone: its audio devices (Windows device ids, as XAudio2
+// and WASAPI take them), or empty when there is none or the option is off. Where the controller reports no headset (the Xbox does not), the
+// chat headset: a chat speaker of its own besides the default one, and the chat microphone, which counts without such a speaker too (a PC's
+// microphone).
+[[nodiscard]] std::wstring ControllerSpeakerDevice();
+[[nodiscard]] std::wstring ControllerMicrophoneDevice();
+// UI thread: asks the user to let the app use the microphone, unless that was decided already (Windows asks once); the answer goes to the log.
+void RequestMicrophoneAccess();
 
 } // namespace Kyty::Uwp
 
