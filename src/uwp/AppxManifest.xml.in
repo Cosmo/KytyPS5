@@ -41,5 +41,7 @@
     <!-- USB drives: on the Xbox, games are on one (README.md). -->
     <uap:Capability Name="removableStorage" />
     <!-- Game folders are read directly: they grant UWP apps read access (README.md). -->
+    <!-- The microphone of a headset on the controller, as the DualSense's microphone (a setting; Windows asks the user once). -->
+    <DeviceCapability Name="microphone" />
   </Capabilities>
 </Package>
