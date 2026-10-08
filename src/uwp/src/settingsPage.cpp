@@ -1,6 +1,7 @@
 #include "settingsPage.h"
 
 #include "fileAccess.h"
+#include "input.h"
 #include "settings.h"
 
 #include <winrt/Windows.Foundation.Collections.h>
@@ -103,6 +104,14 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
       <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
                  Text="Games play the DualSense's haptic feedback like sound for its two actuators. The Xbox controller's small rumble motor gives a short, soft bump where they strike (a knock, a step); haptics that go on stay still. The game's sound still plays as before." />
+      <ToggleSwitch x:Name="HeadsetSpeaker" Header="Controller speaker on the headset" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="What a game plays on the DualSense's speaker plays on a headset plugged into the Xbox controller. Without a headset it plays on the TV with the rest of the sound." />
+      <ToggleSwitch x:Name="HeadsetMic" Header="Headset microphone as the controller's microphone" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Games hear the microphone of a headset plugged into the Xbox controller as the DualSense's microphone (to blow into, or for voice chat); without a headset, the microphone for chat (on a PC, its default one). Windows asks once whether the app may use the microphone." />
 
       <TextBlock Text="Game folders" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,0" />
       <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
@@ -273,6 +282,23 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	haptic_rumble.Toggled([state, haptic_rumble, save](auto const&, auto const&) {
 		state->settings.haptic_rumble = haptic_rumble.IsOn();
 		save();
+	});
+
+	auto headset_speaker = page.FindName(L"HeadsetSpeaker").as<xaml::Controls::ToggleSwitch>();
+	headset_speaker.IsOn(settings.headset_speaker);
+	headset_speaker.Toggled([state, headset_speaker, save](auto const&, auto const&) {
+		state->settings.headset_speaker = headset_speaker.IsOn();
+		save();
+	});
+
+	auto headset_mic = page.FindName(L"HeadsetMic").as<xaml::Controls::ToggleSwitch>();
+	headset_mic.IsOn(settings.headset_mic);
+	headset_mic.Toggled([state, headset_mic, save](auto const&, auto const&) {
+		state->settings.headset_mic = headset_mic.IsOn();
+		save();
+		if (headset_mic.IsOn()) {
+			RequestMicrophoneAccess();
+		}
 	});
 
 	auto user_name = page.FindName(L"UserName").as<xaml::Controls::TextBox>();
