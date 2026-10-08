@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/d3d12/formats.h"
 #include "graphics/host_gpu/d3d12/dxilCompiler.h"
 #include "graphics/host_gpu/d3d12/gpuTrace.h"
+#include "graphics/host_gpu/d3d12/selfTest.h"
 #include "graphics/shader/recompiler/HostShaderFeatures.h"
 
 #include <D3D12MemAlloc.h>
@@ -374,11 +375,23 @@ void GraphicContext::Create(bool enable_debug_layer) {
 		Log::WriteToConsoleAndLog("D3D12: merged geometry programs run as compute shaders (forced)\n");
 	}
 	ShaderRecompiler::SetHostShaderFeatures({.barycentrics = barycentrics});
+
+	// (Needs the queue: the check copies a small BC array and reads it with a compute shader. The Xbox's limits force the CPU route.)
+	const bool copies_work  = D3D12::BlockArrayCopiesWork(*this);
+	cpu_written_block_arrays = !copies_work || Config::XboxGpuLimitsEnabled();
+	if (cpu_written_block_arrays) {
+		D3D12MA::POOL_DESC pool_desc {};
+		pool_desc.HeapProperties = {D3D12_HEAP_TYPE_CUSTOM, D3D12_CPU_PAGE_PROPERTY_WRITE_BACK, D3D12_MEMORY_POOL_L0, 0, 0};
+		pool_desc.HeapFlags      = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+		Check(allocator->CreatePool(&pool_desc, &cpu_texture_pool), "create CPU texture pool");
+		Log::WriteToConsoleAndLog(fmt::format("D3D12: BC texture arrays are written by the CPU ({})\n",
+		                                      copies_work ? "the Xbox's limits apply" : "this device's copies place their small layers wrongly"));
+	}
 }
 
 void GraphicContext::Destroy() {
 	D3D12::GetGpuTrace().StopWatchdog();
-	for (auto** pool: {&upload_pool, &readback_pool}) {
+	for (auto** pool: {&upload_pool, &readback_pool, &cpu_texture_pool}) {
 		if (*pool != nullptr) {
 			(*pool)->Release();
 			*pool = nullptr;
