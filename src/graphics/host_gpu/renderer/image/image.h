@@ -220,6 +220,8 @@ private:
 	void                   Synchronize(CommandBuffer& command, uint32_t resource);
 	void CopyRegions(CommandBuffer& command, std::span<const vk::BufferImageCopy> copies,
 	                 BufferHandle buffer, bool upload);
+	void UploadWithCpu(CommandBuffer& command, std::span<const vk::BufferImageCopy> copies,
+	                   BufferHandle buffer, uint64_t offset, uint64_t size);
 	void CopyContents(CommandBuffer& command, Image& source, uint32_t source_resource,
 	                  uint32_t destination_resource, std::span<const vk::ImageCopy> copies);
 #endif
