@@ -141,6 +141,8 @@ private:
 		uint8_t                     stencil_clear = 0;
 		uint32_t                    width         = 0;
 		uint32_t                    height        = 0;
+		// A color target has a format the device cannot render to: the draw is skipped.
+		bool unrenderable = false;
 	};
 
 	// Shared with the Vulkan renderer (renderer/pipeline/descriptors.cpp and
