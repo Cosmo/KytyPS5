@@ -660,19 +660,20 @@ struct CompiledShaderInfo {
 	Bindings                      bindings;
 };
 
-// Whether a program with `info` only reads the buffers of `binding`. The D3D12 build declares
-// such bindings NonWritable, which makes them shader resource views rather than unordered
-// access views.
-[[nodiscard]] inline bool IsReadOnlyBufferBinding(const ShaderInfo&        info,
-                                                  const DescriptorBinding& binding) {
-	switch (binding.kind) {
+// Whether a program with `info` only reads the buffers of its binding of `kind`. The D3D12 build
+// declares such bindings NonWritable, which makes them shader resource views rather than
+// unordered access views. A program whose buffers can only be UAVs has no read-only buffers: the
+// SPIR-V emitter makes them coherent (a GLC/DLC access), or adds 8- or 16-bit views of them, which
+// spirv_to_dxil makes UAVs whatever their decoration.
+[[nodiscard]] inline bool IsReadOnlyBufferBinding(const ShaderInfo& info, DescriptorBindingKind kind) {
+	switch (kind) {
 		case DescriptorBindingKind::ShaderData:
 		case DescriptorBindingKind::FlattenedSrt: return true;
 		case DescriptorBindingKind::Buffers:
-			return std::none_of(binding.resources.begin(), binding.resources.end(),
-			                    [&](uint32_t resource) {
-				                    return info.buffers.at(resource).written;
-			                    });
+			return !info.coherent_buffers && !info.buffer_u8 && !info.buffer_u16 &&
+			       std::none_of(info.buffers.begin(), info.buffers.end(), [](const BufferResource& buffer) {
+				       return buffer.descriptor_index != UINT32_MAX && buffer.written;
+			       });
 		default: return false;
 	}
 }
