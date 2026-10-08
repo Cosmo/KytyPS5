@@ -5,7 +5,7 @@ The D3D12 backend turns the SPIR-V that Kyty's shader recompiler makes into DXIL
 `spirv_to_dxil.patch` goes on Mesa (26.2.0-devel, commit `e24dc5bd1e7fe6101bdc866fb16a15a8fcae1aae`; `git apply`). It adds:
 
 - `spirv_to_dxil_linked`, which translates the stages of a graphics pipeline together (the DXIL signatures of consecutive stages only match when the stages are linked)
-- `SV_Barycentrics` pixel shader inputs (shader model 6.1; the Xbox does not report support for them)
+- `SV_Barycentrics` pixel shader inputs, and per-vertex ones (`PerVertexKHR`) read with `AttributeAtVertex` (shader model 6.1; the Xbox does not report support for them)
 - the `clip_halfz`, `force_sample_rate_shading` and `shadow_sampler_space_offset` runtime options
 - mesh shaders (shader model 6.5; not available on the Xbox): output counts, per-vertex and per-primitive outputs, triangle indices, `SV_CullPrimitive`
 - fixes for DXIL validator 1.8 and for wave operations in helper lanes

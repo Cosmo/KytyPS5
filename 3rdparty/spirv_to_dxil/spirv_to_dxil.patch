@@ -151,10 +151,22 @@ index 309c5d2..27e26d0 100644
  bool dxil_nir_lower_vs_vertex_conversion(nir_shader *s, enum pipe_format target_formats[]);
  
 diff --git a/src/microsoft/compiler/dxil_signature.c b/src/microsoft/compiler/dxil_signature.c
-index 0219e54..692b7f3 100644
+index 0219e54..18cb485 100644
 --- a/src/microsoft/compiler/dxil_signature.c
 +++ b/src/microsoft/compiler/dxil_signature.c
-@@ -128,6 +128,10 @@ get_additional_semantic_info(nir_shader *s, nir_variable *var, struct semantic_i
+@@ -61,6 +61,11 @@ get_interpolation(nir_variable *var)
+    if (var->data.patch)
+       return DXIL_INTERP_UNDEFINED;
+ 
++   /* Per-vertex pixel shader inputs (PerVertexKHR) are read with AttributeAtVertex, which needs
++    * nointerpolation inputs. */
++   if (var->data.per_vertex)
++      return DXIL_INTERP_CONSTANT;
++
+    if (glsl_type_is_integer(glsl_without_array_or_matrix(var->type)) ||
+        glsl_type_is_64bit(glsl_without_array_or_matrix(var->type)))
+       return DXIL_INTERP_CONSTANT;
+@@ -128,6 +133,10 @@ get_additional_semantic_info(nir_shader *s, nir_variable *var, struct semantic_i
  
     info->comp_type = dxil_get_prog_sig_comp_type(type);
     info->sig_comp_type = dxil_get_comp_type_from_prog_sig_type(info->comp_type);
@@ -165,7 +177,7 @@ index 0219e54..692b7f3 100644
  
     bool is_depth = is_depth_output(info->kind);
  
-@@ -142,10 +146,15 @@ get_additional_semantic_info(nir_shader *s, nir_variable *var, struct semantic_i
+@@ -142,10 +151,15 @@ get_additional_semantic_info(nir_shader *s, nir_variable *var, struct semantic_i
     } else if (is_depth ||
                (info->kind == DXIL_SEM_PRIMITIVE_ID && is_gs_input) ||
                info->kind == DXIL_SEM_COVERAGE ||
@@ -182,7 +194,7 @@ index 0219e54..692b7f3 100644
     } else if (info->kind == DXIL_SEM_TESS_FACTOR ||
                info->kind == DXIL_SEM_INSIDE_TESS_FACTOR) {
        assert(var->data.compact);
-@@ -265,6 +274,13 @@ get_semantic_name(nir_variable *var, struct semantic_info *info,
+@@ -265,6 +279,13 @@ get_semantic_name(nir_variable *var, struct semantic_info *info,
  {
     info->kind = DXIL_SEM_INVALID;
     info->interpolation = get_interpolation(var);
@@ -196,7 +208,7 @@ index 0219e54..692b7f3 100644
     switch (var->data.location) {
  
     case VARYING_SLOT_POS:
-@@ -334,7 +350,17 @@ get_semantic_in_name(nir_variable *var, struct semantic_info *info, mesa_shader_
+@@ -334,7 +355,17 @@ get_semantic_in_name(nir_variable *var, struct semantic_info *info, mesa_shader_
         glsl_type_is_array(type))
        type = glsl_get_array_element(type);
  
@@ -215,7 +227,7 @@ index 0219e54..692b7f3 100644
     info->sysvalue_name = in_sysvalue_name(var);
  }
  
-@@ -642,7 +668,8 @@ process_output_signature(struct dxil_module *mod, nir_shader *s)
+@@ -642,7 +673,8 @@ process_output_signature(struct dxil_module *mod, nir_shader *s)
     unsigned next_row = 0;
     nir_foreach_variable_with_modes(var, s, nir_var_shader_out) {
        struct semantic_info semantic = {0};
@@ -225,7 +237,7 @@ index 0219e54..692b7f3 100644
           continue;
  
        if (s->info.stage == MESA_SHADER_FRAGMENT) {
-@@ -733,23 +760,29 @@ patch_sysvalue_name(nir_variable *var)
+@@ -733,23 +765,29 @@ patch_sysvalue_name(nir_variable *var)
     }
  }
  
@@ -290,7 +302,7 @@ index a40ddce..b1cf335 100644
     };
  
 diff --git a/src/microsoft/compiler/nir_to_dxil.c b/src/microsoft/compiler/nir_to_dxil.c
-index 09a3203..787f5f4 100644
+index 09a3203..79a7df7 100644
 --- a/src/microsoft/compiler/nir_to_dxil.c
 +++ b/src/microsoft/compiler/nir_to_dxil.c
 @@ -229,6 +229,8 @@ get_shader_kind_str(enum dxil_shader_kind kind)
@@ -510,7 +522,37 @@ index 09a3203..787f5f4 100644
        }
     }
  
-@@ -4875,7 +4985,11 @@ emit_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *intr)
+@@ -3667,6 +3777,12 @@ emit_load_input_via_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *intr
+ 
+       attr_at_vertex = var && var->data.interpolation == INTERP_MODE_FLAT;
+    }
++   /* Per-vertex pixel shader inputs (PerVertexKHR): a vertex's value is read with AttributeAtVertex
++    * (shader model 6.1, barycentrics); LoadInput only takes a vertex index outside pixel shaders. */
++   bool per_vertex_ps_input = ctx->mod.shader_kind == DXIL_PIXEL_SHADER &&
++                              intr->intrinsic == nir_intrinsic_load_per_vertex_input;
++   if (per_vertex_ps_input)
++      attr_at_vertex = true;
+ 
+    bool is_patch_constant = (ctx->mod.shader_kind == DXIL_DOMAIN_SHADER &&
+                              intr->intrinsic == nir_intrinsic_load_input) ||
+@@ -3711,7 +3827,15 @@ emit_load_input_via_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *intr
+    int row_index = is_per_vertex ? 1 : 0;
+    const struct dxil_value *vertex_id = NULL;
+    if (!is_patch_constant) {
+-      if (is_per_vertex) {
++      if (per_vertex_ps_input) {
++         /* AttributeAtVertex takes the vertex (0, 1 or 2) as an immediate. */
++         if (!nir_src_is_const(intr->src[0])) {
++            log_nir_instr_unsupported(ctx->logger, "Per-vertex input read with a dynamic vertex",
++                                      &intr->instr);
++            return false;
++         }
++         vertex_id = dxil_module_get_int8_const(&ctx->mod, nir_src_as_uint(intr->src[0]));
++      } else if (is_per_vertex) {
+          vertex_id = get_src(ctx, &intr->src[0], 0, nir_type_int);
+       } else if (attr_at_vertex) {
+          vertex_id = dxil_module_get_int8_const(&ctx->mod, ctx->opts->provoking_vertex);
+@@ -4875,7 +4999,11 @@ emit_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *intr)
        return emit_load_input_via_intrinsic(ctx, intr);
     case nir_intrinsic_store_output:
     case nir_intrinsic_store_per_vertex_output:
@@ -522,7 +564,7 @@ index 09a3203..787f5f4 100644
  
     case nir_intrinsic_load_barycentric_at_offset:
     case nir_intrinsic_load_barycentric_at_sample:
-@@ -5961,6 +6075,12 @@ emit_function(struct ntd_context *ctx, nir_function *func, nir_function_impl *im
+@@ -5961,6 +6089,12 @@ emit_function(struct ntd_context *ctx, nir_function *func, nir_function_impl *im
        attr_values[0] = "ftz";
     else if (ctx->shader->info.float_controls_execution_mode & FLOAT_CONTROLS_DENORM_PRESERVE_FP32)
        attr_values[0] = "preserve";
@@ -535,7 +577,7 @@ index 09a3203..787f5f4 100644
  
     const struct dxil_type *void_type = dxil_module_get_void_type(&ctx->mod);
     const struct dxil_type *func_type = dxil_module_add_function_type(&ctx->mod, void_type, NULL, 0);
-@@ -6185,6 +6305,8 @@ get_dxil_shader_kind(struct nir_shader *s)
+@@ -6185,6 +6319,8 @@ get_dxil_shader_kind(struct nir_shader *s)
     case MESA_SHADER_KERNEL:
     case MESA_SHADER_COMPUTE:
        return DXIL_COMPUTE_SHADER;
@@ -544,7 +586,7 @@ index 09a3203..787f5f4 100644
     default:
        UNREACHABLE("unknown shader stage in nir_to_dxil");
        return DXIL_COMPUTE_SHADER;
-@@ -6412,6 +6534,20 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
+@@ -6412,6 +6548,20 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
        psv0->ds.output_position_present = ctx->mod.info.has_out_position;
        psv1->sig_patch_const_or_prim_vectors = ctx->mod.num_psv_patch_consts;
        break;
@@ -565,7 +607,7 @@ index 09a3203..787f5f4 100644
     default:
        assert(0 && "Shader type not (yet) supported");
     }
-@@ -6427,6 +6563,69 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
+@@ -6427,6 +6577,69 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
     }
  }
  
@@ -635,7 +677,7 @@ index 09a3203..787f5f4 100644
  static nir_variable *
  add_sysvalue(struct ntd_context *ctx,
                uint8_t value, char *name,
-@@ -6540,6 +6739,14 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
+@@ -6540,6 +6753,14 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
     return glsl_count_attribute_slots(type, false);
  }
  
@@ -650,7 +692,7 @@ index 09a3203..787f5f4 100644
  static const unsigned dxil_validator_min_capable_version = DXIL_VALIDATOR_1_4;
  static const unsigned dxil_validator_max_capable_version = DXIL_VALIDATOR_1_8;
  static const unsigned dxil_min_shader_model = SHADER_MODEL_6_0;
-@@ -6612,7 +6819,7 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6612,7 +6833,7 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     ctx->mod.major_validator = validator_version >> 16;
     ctx->mod.minor_validator = validator_version & 0xffff;
  
@@ -659,7 +701,7 @@ index 09a3203..787f5f4 100644
        uint64_t in_mask =
           s->info.stage == MESA_SHADER_VERTEX ?
           0 : (VARYING_BIT_PRIMITIVE_ID | VARYING_BIT_VIEWPORT | VARYING_BIT_LAYER);
-@@ -6632,7 +6839,16 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6632,7 +6853,16 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     s->info.disable_output_offset_src_constant_folding = true;
     NIR_PASS(_, s, dxil_nir_ensure_position_writes);
     NIR_PASS(_, s, dxil_nir_lower_system_values);
@@ -677,7 +719,7 @@ index 09a3203..787f5f4 100644
  
     /* Do a round of optimization to try to vectorize loads/stores. Otherwise the addresses used for loads
      * might be too opaque for the pass to see that they're next to each other. */
-@@ -6746,7 +6962,8 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6746,7 +6976,8 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     }
  
     if ((ctx->mod.shader_kind == DXIL_HULL_SHADER ||
