@@ -290,7 +290,10 @@ DxilShader DxilCompiler::Compile(std::span<const uint32_t> spirv, ShaderType sta
 		return found->second.front();
 	}
 	auto shader = Translate(spirv, stage, shader_hash, last_vertex_stage, constants);
-	m_cache.emplace(hash, std::vector {shader});
+	// A failed translation is reported each run and never kept: a saved one would skip the shader silently from then on.
+	if (shader.IsValid()) {
+		m_cache.emplace(hash, std::vector {shader});
+	}
 	return shader;
 }
 
@@ -329,7 +332,10 @@ std::vector<DxilShader> DxilCompiler::CompileLinked(std::span<const LinkedStage>
 		return found->second;
 	}
 	auto shaders = TranslateLinked(stages, pipeline_hash);
-	m_cache.emplace(hash, shaders);
+	// As in Compile: only complete translations are kept.
+	if (std::ranges::all_of(shaders, [](const DxilShader& shader) { return shader.IsValid(); })) {
+		m_cache.emplace(hash, shaders);
+	}
 	return shaders;
 }
 
@@ -406,6 +412,10 @@ bool DxilCompiler::LoadCache(std::span<const uint8_t> data) {
 	if (offset != data.size()) {
 		return false;
 	}
+	// Files of earlier builds kept failed translations (empty shaders): those are translated again, and report why they fail.
+	std::erase_if(loaded, [](const auto& entry) {
+		return std::ranges::any_of(entry.second, [](const DxilShader& shader) { return !shader.IsValid(); });
+	});
 	Common::LockGuard lock(m_cache_mutex);
 	for (const auto& entry: loaded) {
 		m_loaded.insert(entry.first);
