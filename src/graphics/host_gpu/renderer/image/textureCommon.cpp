@@ -6,6 +6,10 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shader.h"
 
+#if defined(KYTY_GPU_BACKEND_D3D12)
+#include "graphics/host_gpu/d3d12/formats.h"
+#endif
+
 #include <algorithm>
 #include <array>
 
@@ -30,8 +34,8 @@ struct HostFormatInfo {
 	Prospero::ColorComponentMapping host_to_storage;
 };
 
-HostFormatInfo ResolveHostFormat(Prospero::BufferFormat guest_format,
-                                 Prospero::ChannelOrder order) {
+HostFormatInfo ResolveUpstreamHostFormat(Prospero::BufferFormat guest_format,
+                                         Prospero::ChannelOrder order) {
 	if (guest_format == Prospero::BufferFormat::k10_11_11Float) {
 		return {vk::Format::eB10G11R11UfloatPack32, Prospero::ColorMappingBgra};
 	}
@@ -55,6 +59,17 @@ HostFormatInfo ResolveHostFormat(Prospero::BufferFormat guest_format,
 		case Prospero::BufferFormat::k4_4_4_4UNorm: return {format, Prospero::ColorMappingAbgr};
 		default: return {format, {}};
 	}
+}
+
+HostFormatInfo ResolveHostFormat(Prospero::BufferFormat guest_format, Prospero::ChannelOrder order) {
+	const auto host = ResolveUpstreamHostFormat(guest_format, order);
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// D3D12 keeps the guest's bits in a format it can render too; the channel order moves into the mappings (d3d12/formats.cpp).
+	const auto renderable = D3D12::RenderableHostFormat(host.format, host.host_to_storage);
+	return {renderable.format, renderable.host_to_storage};
+#else
+	return host;
+#endif
 }
 
 } // namespace
