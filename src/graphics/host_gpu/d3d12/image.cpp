@@ -584,6 +584,11 @@ D3D12_CPU_DESCRIPTOR_HANDLE Image::RenderTargetView(ImageViewHandle handle) {
 		desc.Texture3D.MipSlice    = info.base_level;
 		desc.Texture3D.FirstWSlice = info.type == vk::ImageViewType::e3D ? 0 : info.base_layer;
 		desc.Texture3D.WSize       = info.type == vk::ImageViewType::e3D ? UINT(-1) : info.layer_count;
+	} else if (backing.image_type == vk::ImageType::e1D) {
+		desc.ViewDimension                  = D3D12_RTV_DIMENSION_TEXTURE1DARRAY;
+		desc.Texture1DArray.MipSlice        = info.base_level;
+		desc.Texture1DArray.FirstArraySlice = info.base_layer;
+		desc.Texture1DArray.ArraySize       = info.layer_count;
 	} else if (backing.samples > 1) {
 		desc.ViewDimension                    = D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY;
 		desc.Texture2DMSArray.FirstArraySlice = info.base_layer;
@@ -1092,7 +1097,9 @@ void Image::Clear(CommandBuffer& command, vk::Format format, const vk::ImageSubr
 		const ImageSubresourceRange subresources {level, 1, range.baseArrayLayer, range.layerCount};
 		ImageViewInfo               view {};
 		view.format      = range.aspectMask & vk::ImageAspectFlagBits::eColor ? format : backing.format;
-		view.type        = vk::ImageViewType::e2DArray;
+		// The view the clear goes through must fit the image (Vulkan clears without one): 1D images take a 1D-array view.
+		view.type        = backing.image_type == vk::ImageType::e1D ? vk::ImageViewType::e1DArray
+		                                                          : vk::ImageViewType::e2DArray;
 		view.aspect      = range.aspectMask & vk::ImageAspectFlagBits::eColor
 		                       ? vk::ImageAspectFlags {vk::ImageAspectFlagBits::eColor}
 		                       : vk::ImageAspectFlags {vk::ImageAspectFlagBits::eDepth};
