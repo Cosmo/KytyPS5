@@ -569,7 +569,13 @@ D3D12_CPU_DESCRIPTOR_HANDLE Image::RenderTargetView(ImageViewHandle handle) {
 	const auto  format = D3D12::GetFormatInfo(info.format);
 	if (!format.Writable() || (backing.resources[view.resource].resource->GetDesc().Flags &
 	                           D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0) {
-		EXIT("D3D12: image format %d cannot be rendered to\n", static_cast<int>(info.format));
+		// A format this device cannot render to (D3D12::RenderableHostFormat leaves only those): no view, the draw is skipped.
+		static std::atomic_bool warned = false;
+		if (!warned.exchange(true, std::memory_order_relaxed)) {
+			Log::WriteToConsoleAndLog(fmt::format("D3D12: image format {} cannot be rendered to on this device; draws into it are skipped\n",
+			                                      static_cast<int>(info.format)));
+		}
+		return {};
 	}
 	D3D12_RENDER_TARGET_VIEW_DESC desc {};
 	desc.Format = format.view;
