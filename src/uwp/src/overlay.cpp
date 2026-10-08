@@ -133,6 +133,7 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
           <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
       </Grid>
     </StackPanel>
@@ -293,6 +294,7 @@ struct GameOverlay::State {
 	xaml::Controls::Grid       controllers {nullptr};
 	xaml::Controls::TextBlock  log {nullptr};
 	size_t                     log_lines = LOG_LINES;
+	bool                       headset_mic_option = false; // the settings page's: the headset microphone as the controller's
 	xaml::DispatcherTimer      timer {nullptr};
 	std::unique_ptr<LogTail>   log_tail;
 	// The process's CPU time (100 ns units) and the time, at the last update.
@@ -410,6 +412,14 @@ void GameOverlay::State::Update() {
 		xaml::Controls::TextBlock name;
 		name.Text(controller.name);
 		place(name, row, 2);
+		if (controller.headset_mic) {
+			xaml::Controls::TextBlock headset;
+			headset.FontFamily(xaml::Media::FontFamily(HEADSET_SYMBOL_FONT));
+			headset.Text(HEADSET_SYMBOL);
+			headset.VerticalAlignment(xaml::VerticalAlignment::Center);
+			headset.Opacity(headset_mic_option ? 1.0 : 0.4);
+			place(headset, row, 3);
+		}
 	}
 
 	std::wstring text;
@@ -449,6 +459,7 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	// Its size (Settings): laid out over the page enlarged by 1 / scale, then scaled down to fit.
 	const auto   settings = LoadSettings();
 	state.log_lines       = std::clamp<size_t>(settings.overlay_log_lines, 2, LOG_LINES);
+	state.headset_mic_option = settings.headset_mic;
 	const double scale    = OverlaySizes[std::min<size_t>(settings.overlay_size, OverlaySizes.size() - 1)];
 	if (scale != 1.0) {
 		xaml::Media::ScaleTransform transform;

@@ -8,6 +8,7 @@
 #include "kernel/pthread.h"
 #include "libs/audio_internal.h"
 #if defined(KYTY_PLATFORM_UWP)
+#include "libs/audioInput.h"
 #include "libs/audioOutput.h"
 #endif
 #include "libs/controller.h"
@@ -179,6 +180,9 @@ private:
 		uint64_t          last_input_time = 0;
 		SDL_AudioStream*  stream          = nullptr;
 		SDL_AudioDeviceID device          = 0;
+#if defined(KYTY_PLATFORM_UWP)
+		Input::Stream* host_stream = nullptr; // The UWP app's capture, instead of an SDL stream.
+#endif
 	};
 
 	PortIn* GetAudioInPort(Id handle); // Caller holds m_mutex.
@@ -196,6 +200,9 @@ private:
 	static void            CloseSdlDevice(PortOut* port);
 	static void            OpenSdlDevice(PortIn* port, Format format);
 	static void            CloseSdlDevice(PortIn* port);
+#if defined(KYTY_PLATFORM_UWP)
+	static uint32_t HostInput(const PortIn& port, void* dest);
+#endif
 	static const void*     PrepareOutputBuffer(const PortOut& port, const void* data,
 	                                           std::vector<uint8_t>* buffer, float gain,
 	                                           const float* gains);
@@ -303,7 +310,8 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 
 #if defined(KYTY_PLATFORM_UWP)
 	// The stream plays the port's format as it is (no conversion).
-	port->host_stream = Output::Open(port->freq, OutputChannels(*port), FormatIsFloat(port->format));
+	port->host_stream =
+	    Output::Open(port->freq, OutputChannels(*port), FormatIsFloat(port->format), port->type == AUDIO_OUT_PORT_TYPE_PADSPK);
 	return port->host_stream != nullptr;
 #else
 	if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
@@ -708,6 +716,11 @@ static bool RecordingDevicePresent(SDL_AudioDeviceID device) {
 }
 
 void Audio::OpenSdlDevice(PortIn* port, Format format) {
+#if defined(KYTY_PLATFORM_UWP)
+	// The stream captures in the port's format, whenever the app has a microphone for it.
+	port->host_stream = Input::Open(port->freq, port->bytes_per_frame / BytesPerSample(format), FormatIsFloat(format));
+	return;
+#endif
 	const auto& name = Config::GetAudioInputDevice();
 	if (name.empty()) {
 		return;
@@ -747,6 +760,10 @@ void Audio::OpenSdlDevice(PortIn* port, Format format) {
 }
 
 void Audio::CloseSdlDevice(PortIn* port) {
+#if defined(KYTY_PLATFORM_UWP)
+	Input::Close(port->host_stream);
+	port->host_stream = nullptr;
+#endif
 	if (port->stream != nullptr) {
 		SDL_DestroyAudioStream(port->stream);
 		SDL_QuitSubSystem(SDL_INIT_AUDIO);
@@ -808,11 +825,54 @@ int Audio::AudioInGetSilentState(Id handle) {
 	if (port == nullptr) {
 		return AUDIO_IN_ERROR_INVALID_HANDLE;
 	}
+#if defined(KYTY_PLATFORM_UWP)
+	return Input::Present(port->host_stream) ? 0 : AUDIO_IN_SILENT_STATE_DEVICE_NONE;
+#else
 	if (port->stream == nullptr || !RecordingDevicePresent(port->device)) {
 		return AUDIO_IN_SILENT_STATE_DEVICE_NONE;
 	}
 	return 0;
+#endif
 }
+
+#if defined(KYTY_PLATFORM_UWP)
+// AudioInInput from the UWP app's capture, paced like the SDL capture: a block of samples_num frames once that much is captured (up to
+// AUDIO_IN_GRAIN_MAX_ASYNC frames of what there is for an asynchronous port), silence without a microphone or when too little came in time.
+uint32_t Audio::HostInput(const PortIn& port, void* dest) {
+	if (dest == nullptr) {
+		Input::Clear(port.host_stream);
+		return 0;
+	}
+	const bool     live       = Input::Present(port.host_stream);
+	const uint64_t block_time = (1000000ULL * port.samples_num) / port.freq;
+	if (port.asynchronous) {
+		Common::Thread::SleepMicro(block_time);
+	} else if (!live && port.last_input_time != 0) {
+		const auto now  = LibKernel::KernelGetProcessTime();
+		const auto next = port.last_input_time + block_time;
+		if (next > now) {
+			Common::Thread::SleepMicro(next - now);
+		}
+	}
+	const uint32_t frames = port.samples_num;
+	if (live && port.asynchronous) {
+		return Input::Read(port.host_stream, dest, AUDIO_IN_GRAIN_MAX_ASYNC * port.bytes_per_frame) / port.bytes_per_frame;
+	}
+	if (live) {
+		const uint32_t requested = frames * port.bytes_per_frame;
+		const auto     deadline  = LibKernel::KernelGetProcessTime() + std::max<uint64_t>(20000, block_time * 4);
+		while (Input::Available(port.host_stream) < requested && Input::Present(port.host_stream) &&
+		       LibKernel::KernelGetProcessTime() < deadline) {
+			Common::Thread::SleepMicro(1000);
+		}
+		if (Input::Read(port.host_stream, dest, requested) == requested) {
+			return frames;
+		}
+	}
+	std::memset(dest, 0, static_cast<size_t>(frames) * port.bytes_per_frame);
+	return frames;
+}
+#endif
 
 int Audio::AudioInInput(Id handle, void* dest) {
 	PortIn snapshot;
@@ -828,6 +888,16 @@ int Audio::AudioInInput(Id handle, void* dest) {
 		port->busy = true;
 		snapshot   = *port;
 	}
+#if defined(KYTY_PLATFORM_UWP)
+	const uint32_t host_frames = HostInput(snapshot, dest);
+	{
+		Common::LockGuard lock(m_mutex);
+		auto&             port = m_in_ports[handle.GetId()];
+		port.last_input_time   = dest != nullptr ? LibKernel::KernelGetProcessTime() : 0;
+		port.busy              = false;
+	}
+	return dest != nullptr ? static_cast<int>(host_frames) : 0;
+#endif
 	bool failed = snapshot.stream != nullptr && dest != nullptr &&
 	              (!RecordingDevicePresent(snapshot.device) ||
 	               !SDL_ResumeAudioStreamDevice(snapshot.stream));
