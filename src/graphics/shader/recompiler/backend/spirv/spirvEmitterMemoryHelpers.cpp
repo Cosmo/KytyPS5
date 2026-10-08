@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
+#include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
