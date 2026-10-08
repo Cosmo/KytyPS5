@@ -61,6 +61,10 @@ struct GraphicContext {
 	D3D12MA::Allocator* allocator     = nullptr;
 	D3D12MA::Pool*      upload_pool   = nullptr;
 	D3D12MA::Pool*      readback_pool = nullptr;
+	// The device's copies place the small layers of BC texture arrays where its texture unit does not read them (the Series X: layers whose
+	// mip level is under 64 KB). Such images live in CPU-visible memory (this pool) and the CPU writes their data (d3d12/image.cpp).
+	bool                cpu_written_block_arrays = false;
+	D3D12MA::Pool*      cpu_texture_pool         = nullptr;
 	Common::Mutex       queue_mutex;
 	std::string         device_name;
 	bool                debug_layer = false;

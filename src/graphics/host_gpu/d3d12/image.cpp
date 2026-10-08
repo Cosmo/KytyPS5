@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cinttypes>
 #include <fmt/format.h>
 #include <memory>
 #include <string>
@@ -284,6 +285,13 @@ uint32_t Image::ResourceIndex(vk::Format view_format) {
 	allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
 	ImageResource resource;
 	resource.family   = format.family;
+	// A BC array on a device whose copies place its small layers wrongly lives in CPU-visible memory; Upload writes it with the CPU.
+	resource.cpu_written = m_graphics.cpu_written_block_arrays && backing.image_type == vk::ImageType::e2D && backing.layers > 1 &&
+	                       backing.samples == 1 && desc.Flags == D3D12_RESOURCE_FLAG_NONE && vk::blockSize(view_format) != 0 &&
+	                       vk::blockExtent(view_format)[0] > 1;
+	if (resource.cpu_written) {
+		allocation.CustomPool = m_graphics.cpu_texture_pool;
+	}
 	const auto result = m_graphics.allocator->CreateResource(&allocation, &desc, initial, nullptr,
 	                                                         &resource.allocation, IID_NULL,
 	                                                         nullptr);
@@ -760,10 +768,86 @@ void Image::CopyRegions(CommandBuffer& command, std::span<const vk::BufferImageC
 	}
 }
 
+// The copies' linear data (in buffer from offset, size bytes) is read back and written into the image's CPU-visible resource by the CPU: this
+// device's copies would place the small layers of the BC array where the texture unit does not read them. Waiting for the GPU is allowed
+// here: images are uploaded while a draw's resources are prepared, before anything is recorded for it.
+void Image::UploadWithCpu(CommandBuffer& command, std::span<const vk::BufferImageCopy> copies, BufferHandle buffer, uint64_t offset,
+                          uint64_t size) {
+	auto& target = backing.resources[backing.current];
+	D3D12_HEAP_PROPERTIES readback_heap {D3D12_HEAP_TYPE_READBACK};
+	D3D12_RESOURCE_DESC   buffer_desc {};
+	buffer_desc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+	buffer_desc.Width            = size;
+	buffer_desc.Height           = 1;
+	buffer_desc.DepthOrArraySize = 1;
+	buffer_desc.MipLevels        = 1;
+	buffer_desc.SampleDesc.Count = 1;
+	buffer_desc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	Microsoft::WRL::ComPtr<ID3D12Resource> readback;
+	D3D12::Check(m_graphics.device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+	                                                IID_PPV_ARGS(&readback)),
+	      "image upload: readback buffer");
+	buffer->Use(command, D3D12_RESOURCE_STATE_COPY_SOURCE);
+	command.Handle()->CopyBufferRegion(readback.Get(), 0, buffer->Resource(), offset, size);
+	m_scheduler.FlushAndWait();
+
+	const uint8_t* data = nullptr;
+	D3D12_RANGE    read {0, static_cast<SIZE_T>(size)};
+	D3D12::Check(readback->Map(0, &read, reinterpret_cast<void**>(const_cast<uint8_t**>(&data))), "image upload: map readback buffer");
+	for (const auto& copy: copies) {
+		const auto& sub        = copy.imageSubresource;
+		const auto  block      = GetCopyBlock(backing.format, sub.aspectMask);
+		const auto  row_texels = copy.bufferRowLength != 0 ? copy.bufferRowLength : copy.imageExtent.width;
+		const auto  image_rows = copy.bufferImageHeight != 0 ? copy.bufferImageHeight : copy.imageExtent.height;
+		const uint64_t row_pitch   = DivCeil(row_texels, block.width) * block.bytes;
+		const uint64_t slice_pitch = DivCeil(image_rows, block.height) * row_pitch;
+		const auto     slices      = copy.imageExtent.depth;
+		// Whole blocks, but not past the level's edge (a BC level of 1x1 texels is one block; its box is 1x1).
+		const uint64_t  level_width  = std::max(backing.extent.width >> sub.mipLevel, 1u);
+		const uint64_t  level_height = std::max(backing.extent.height >> sub.mipLevel, 1u);
+		const D3D12_BOX box {static_cast<UINT>(copy.imageOffset.x), static_cast<UINT>(copy.imageOffset.y), static_cast<UINT>(copy.imageOffset.z),
+		                    static_cast<UINT>(std::min<uint64_t>(copy.imageOffset.x + DivCeil(copy.imageExtent.width, block.width) * block.width, level_width)),
+		                    static_cast<UINT>(std::min<uint64_t>(copy.imageOffset.y + DivCeil(copy.imageExtent.height, block.height) * block.height, level_height)),
+		                    static_cast<UINT>(copy.imageOffset.z + slices)};
+		for (uint32_t layer = 0; layer < sub.layerCount; layer++) {
+			const uint64_t start = copy.bufferOffset + slice_pitch * slices * layer;
+			EXIT_IF(start < offset || start - offset + slice_pitch * slices > size);
+			const auto subresource = backing.Subresource(sub.mipLevel, sub.baseArrayLayer + layer, Plane(sub.aspectMask));
+			// A whole level is written without a box (as the self test does).
+			const bool whole = box.left == 0 && box.top == 0 && box.front == 0 && box.right == level_width && box.bottom == level_height;
+			D3D12::Check(target.resource->Map(subresource, nullptr, nullptr), "image upload: map image");
+			const HRESULT result = target.resource->WriteToSubresource(subresource, whole ? nullptr : &box, data + (start - offset),
+			                                                           static_cast<UINT>(row_pitch), static_cast<UINT>(slice_pitch));
+			target.resource->Unmap(subresource, nullptr);
+			if (FAILED(result)) {
+				EXIT("D3D12: image upload: WriteToSubresource failed (0x%08x): subresource %u (level %u, layer %u), box %u,%u,%u-%u,%u,%u%s, row "
+				     "pitch %" PRIu64 ", slice pitch %" PRIu64 ", image %ux%u, %u levels, %u layers, format %d\n",
+				     static_cast<uint32_t>(result), subresource, sub.mipLevel, sub.baseArrayLayer + layer, box.left, box.top, box.front, box.right,
+				     box.bottom, box.back, whole ? " (whole level, no box)" : "", row_pitch, slice_pitch, backing.extent.width, backing.extent.height,
+				     backing.mip_levels, backing.layers, static_cast<int>(target.family));
+			}
+		}
+	}
+	D3D12_RANGE none {0, 0};
+	readback->Unmap(0, &none);
+	// As Use does for a write: this resource now holds the image's contents.
+	backing.version++;
+	target.version = backing.version;
+	static std::atomic_int logged = 0;
+	if (logged.fetch_add(1) < 8) {
+		Log::WriteToConsoleAndLog(fmt::format("D3D12: BC array written by the CPU: {}x{}, {} layers, {} mips, {} regions\n", backing.extent.width,
+		                                      backing.extent.height, backing.layers, backing.mip_levels, copies.size()));
+	}
+}
+
 void Image::Upload(std::span<const vk::BufferImageCopy> copies, BufferHandle buffer,
-                   uint64_t /*offset*/, uint64_t size) {
+                   uint64_t offset, uint64_t size) {
 	EXIT_IF(copies.empty() || buffer == nullptr || size == 0);
 	auto& command = m_scheduler.Current();
+	if (backing.resources[backing.current].cpu_written) {
+		UploadWithCpu(command, copies, buffer, offset, size);
+		return;
+	}
 	Use(command, D3D12_RESOURCE_STATE_COPY_DEST);
 	CopyRegions(command, copies, buffer, true);
 }
