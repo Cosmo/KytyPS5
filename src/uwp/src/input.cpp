@@ -8,7 +8,11 @@
 
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Devices.Enumeration.h>
 #include <winrt/Windows.Gaming.Input.h>
+#include <winrt/Windows.Media.Capture.h>
+#include <winrt/Windows.Media.Devices.h>
+#include <winrt/Windows.System.h>
 
 #include <algorithm>
 #include <array>
@@ -20,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -33,6 +38,8 @@ using Clock          = std::chrono::steady_clock;
 
 constexpr auto POLL_INTERVAL = std::chrono::milliseconds(4);
 constexpr auto SCAN_INTERVAL = std::chrono::milliseconds(250);
+// How often the scan looks up the chat headset (ChatHeadset).
+constexpr auto CHAT_INTERVAL = std::chrono::seconds(2);
 // Wireless controllers can briefly drop out of Gamepad::Gamepads(); their player stays connected,
 // with neutral input, this long.
 constexpr auto MISSING_GRACE = std::chrono::seconds(2);
@@ -101,11 +108,14 @@ struct Player {
 	std::array<Clock::time_point, 2> trigger_squeezed {};
 	std::array<uint32_t, 2>          trigger_shots {};
 	std::array<Clock::time_point, 2> trigger_kick_until {};
+	// The controller's headset events: they may report a headset that Gamepad::Headset() does not.
+	gaming::Gamepad::HeadsetConnected_revoker    headset_connected;
+	gaming::Gamepad::HeadsetDisconnected_revoker headset_disconnected;
 };
 
 std::array<Player, Controller::MAX_PLAYERS> g_players;
 
-std::mutex                  g_shared_mutex; // guards the chord handlers and g_controllers
+std::mutex                  g_shared_mutex; // guards the chord handlers, g_controllers and the headset
 std::function<void()>       g_menu_handler;
 std::function<void()>       g_overlay_handler;
 std::vector<ControllerInfo> g_controllers;
@@ -113,6 +123,14 @@ std::atomic_bool            g_paused  = false;
 // The settings page's controller options (SetControllerOptions).
 std::atomic_bool            g_impulse_triggers = true;
 std::atomic_bool            g_haptic_rumble    = true;
+std::atomic_bool            g_headset_speaker  = true;
+std::atomic_bool            g_headset_mic      = false;
+// The audio devices of a headset plugged into player 1's controller (empty: none); guarded by g_shared_mutex.
+std::wstring                g_headset_render;
+std::wstring                g_headset_capture;
+// The headset player 1's controller reported in its HeadsetConnected event (used when Gamepad::Headset() has none); guarded by g_shared_mutex.
+std::wstring                g_event_headset_render;
+std::wstring                g_event_headset_capture;
 // The game gets controller input (ActivateGameInput); g_activate asks the input thread for it.
 std::atomic_bool            g_game_input = false;
 std::atomic_bool            g_activate   = false;
@@ -383,7 +401,24 @@ void Assign(int index, gaming::Gamepad const& pad, std::wstring id) {
 	if (g_game_input) {
 		Controller::SetPlayerConnected(index, true);
 	}
-	Log("controller connected: player %d\n", index + 1);
+	Log("controller connected: player %d (user: %s, headset: %s)\n", index + 1, pad.User() != nullptr ? "assigned" : "none",
+	    pad.Headset() != nullptr ? "yes" : "none");
+	player.headset_connected = pad.HeadsetConnected(winrt::auto_revoke, [index](auto const&, gaming::Headset const& headset) {
+		Log("controller headset event: connected to player %d\n", index + 1);
+		if (index == 0) {
+			std::lock_guard lock(g_shared_mutex);
+			g_event_headset_render  = headset.RenderDeviceId();
+			g_event_headset_capture = headset.CaptureDeviceId();
+		}
+	});
+	player.headset_disconnected = pad.HeadsetDisconnected(winrt::auto_revoke, [index](auto const&, auto const&) {
+		Log("controller headset event: disconnected from player %d\n", index + 1);
+		if (index == 0) {
+			std::lock_guard lock(g_shared_mutex);
+			g_event_headset_render.clear();
+			g_event_headset_capture.clear();
+		}
+	});
 	ListControllers();
 }
 
@@ -395,6 +430,11 @@ void Release(int index) {
 	}
 	player              = {};
 	g_last_input[index] = 0;
+	if (index == 0) {
+		std::lock_guard lock(g_shared_mutex);
+		g_event_headset_render.clear();
+		g_event_headset_capture.clear();
+	}
 	if (g_game_input) {
 		Controller::SetPlayerState(index, {});
 		Controller::SetPlayerConnected(index, false);
@@ -404,6 +444,59 @@ void Release(int index) {
 }
 
 // Matches the connected controllers to the players; new ones take the lowest free player.
+// The log's list of the audio devices: each output and input by name, marked when it is the default one, the default one for chat, or player 1's
+// controller headset.
+void LogAudioDevices() {
+	namespace media       = winrt::Windows::Media::Devices;
+	namespace enumeration = winrt::Windows::Devices::Enumeration;
+	try {
+		std::wstring headset[2];
+		{
+			std::lock_guard lock(g_shared_mutex);
+			headset[0] = g_headset_render;
+			headset[1] = g_headset_capture;
+		}
+		for (int input = 0; input < 2; input++) {
+			const std::wstring standard(input != 0 ? media::MediaDevice::GetDefaultAudioCaptureId(media::AudioDeviceRole::Default)
+			                                       : media::MediaDevice::GetDefaultAudioRenderId(media::AudioDeviceRole::Default));
+			const std::wstring chat(input != 0 ? media::MediaDevice::GetDefaultAudioCaptureId(media::AudioDeviceRole::Communications)
+			                                   : media::MediaDevice::GetDefaultAudioRenderId(media::AudioDeviceRole::Communications));
+			const auto selector = input != 0 ? media::MediaDevice::GetAudioCaptureSelector() : media::MediaDevice::GetAudioRenderSelector();
+			const auto devices  = enumeration::DeviceInformation::FindAllAsync(selector).get();
+			Log("audio %s devices: %u\n", input != 0 ? "input" : "output", devices.Size());
+			for (const auto& device: devices) {
+				const std::wstring id(device.Id());
+				Log("  \"%ls\"%s%s%s\n", device.Name().c_str(), id == standard ? " (default)" : "", id == chat ? " (chat)" : "",
+				    !id.empty() && id == headset[input] ? " (player 1's controller headset)" : "");
+			}
+		}
+	} catch (const winrt::hresult_error& error) {
+		Log("audio devices: cannot list them (0x%08x)\n", static_cast<uint32_t>(error.code()));
+	}
+}
+
+// The headset the device uses for chat, as its speaker and microphone: on the Xbox, a headset on a controller is the chat device (the TV stays
+// the default one) also where Gamepad::Headset() does not report it. Only a chat speaker of its own counts: where it is the default speaker too
+// (a PC's speakers), there is no headset speaker. The chat microphone counts without one (a PC's microphone). Looked up every CHAT_INTERVAL.
+std::pair<std::wstring, std::wstring> ChatHeadset(Clock::time_point now) {
+	namespace media = winrt::Windows::Media::Devices;
+	static std::pair<std::wstring, std::wstring> headset;
+	static Clock::time_point                     next {};
+	if (now < next) {
+		return headset;
+	}
+	next = now + CHAT_INTERVAL;
+	try {
+		const std::wstring speaker(media::MediaDevice::GetDefaultAudioRenderId(media::AudioDeviceRole::Communications));
+		const std::wstring standard(media::MediaDevice::GetDefaultAudioRenderId(media::AudioDeviceRole::Default));
+		headset = {speaker != standard ? speaker : std::wstring(),
+		           std::wstring(media::MediaDevice::GetDefaultAudioCaptureId(media::AudioDeviceRole::Communications))};
+	} catch (const winrt::hresult_error&) {
+		headset = {};
+	}
+	return headset;
+}
+
 void Scan(Clock::time_point now) {
 	std::vector<std::pair<gaming::Gamepad, std::wstring>> connected;
 	for (auto const& pad: gaming::Gamepad::Gamepads()) {
@@ -437,6 +530,51 @@ void Scan(Clock::time_point now) {
 			break;
 		}
 		Assign(static_cast<int>(free - g_players.begin()), pad, std::move(id));
+	}
+
+	// Player 1's headset: Windows lists its speaker and microphone like any other audio device. Gamepad::Headset(), or else what the
+	// controller's HeadsetConnected event reported, or else the chat headset.
+	std::wstring render;
+	std::wstring capture;
+	const char*  source = "none";
+	if (const auto& player = g_players[0]; player.pad != nullptr && !player.missing) {
+		if (const auto headset = player.pad.Headset()) {
+			render  = headset.RenderDeviceId();
+			capture = headset.CaptureDeviceId();
+			source  = "the controller's";
+		}
+	}
+	{
+		std::lock_guard lock(g_shared_mutex);
+		if (render.empty() && capture.empty() && !g_event_headset_render.empty()) {
+			render  = g_event_headset_render;
+			capture = g_event_headset_capture;
+			source  = "the controller's (from its event)";
+		}
+	}
+	if (render.empty() && capture.empty()) {
+		std::tie(render, capture) = ChatHeadset(now);
+		if (!render.empty()) {
+			source = "the chat headset";
+		} else if (!capture.empty()) {
+			source = "none; the microphone is the chat microphone";
+		}
+	}
+	bool changed = false;
+	{
+		std::lock_guard lock(g_shared_mutex);
+		changed = render != g_headset_render || capture != g_headset_capture;
+		if (changed) {
+			Log("controller headset: %s%s\n", source, render.empty() && capture.empty() ? "" : capture.empty() ? ", no microphone" : "");
+			g_headset_render  = std::move(render);
+			g_headset_capture = std::move(capture);
+		}
+	}
+	// The audio devices once at the start and whenever the headset changes, to see what the device offers.
+	static bool listed = false;
+	if (changed || !listed) {
+		listed = true;
+		LogAudioDevices();
 	}
 }
 
@@ -564,6 +702,9 @@ std::vector<ControllerInfo> ConnectedControllers() {
 	{
 		std::lock_guard lock(g_shared_mutex);
 		controllers = g_controllers;
+		for (auto& controller: controllers) {
+			controller.headset_mic = controller.player == 0 && !g_headset_capture.empty();
+		}
 	}
 	int64_t newest = 0;
 	for (auto& controller: controllers) {
@@ -582,6 +723,41 @@ void ActivateGameInput() {
 void SetControllerOptions(const ControllerOptions& options) {
 	g_impulse_triggers = options.impulse_triggers;
 	g_haptic_rumble    = options.haptic_rumble;
+	g_headset_speaker  = options.headset_speaker;
+	g_headset_mic      = options.headset_mic;
+}
+
+std::wstring ControllerSpeakerDevice() {
+	if (!g_headset_speaker) {
+		return {};
+	}
+	std::lock_guard lock(g_shared_mutex);
+	return g_headset_render;
+}
+
+std::wstring ControllerMicrophoneDevice() {
+	if (!g_headset_mic) {
+		return {};
+	}
+	std::lock_guard lock(g_shared_mutex);
+	return g_headset_capture;
+}
+
+void RequestMicrophoneAccess() {
+	// Initializing an audio-only capture is what makes Windows ask; nothing is recorded.
+	[]() -> winrt::fire_and_forget {
+		namespace capture = winrt::Windows::Media::Capture;
+		try {
+			capture::MediaCaptureInitializationSettings settings;
+			settings.StreamingCaptureMode(capture::StreamingCaptureMode::Audio);
+			capture::MediaCapture media;
+			co_await media.InitializeAsync(settings);
+			media.Close();
+			Log("microphone: the app may use it\n");
+		} catch (const winrt::hresult_error& error) {
+			Log("microphone: the app may not use it, or there is none (0x%08x)\n", static_cast<uint32_t>(error.code()));
+		}
+	}();
 }
 
 void PauseGameInput(bool paused) {
