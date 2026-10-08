@@ -10,6 +10,7 @@
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.Xaml.Automation.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.UI.Xaml.Input.h>
@@ -187,6 +188,7 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
               <ColumnDefinition Width="Auto" />
               <ColumnDefinition Width="Auto" />
               <ColumnDefinition Width="Auto" />
+              <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
           </Grid>
         </StackPanel>
@@ -321,6 +323,7 @@ struct Launcher {
 	xaml::Controls::Button                   settings_button {nullptr};
 	xaml::Controls::Grid                     controllers {nullptr};
 	std::wstring                             listed_controllers;
+	bool                                     headset_mic_option = false; // the settings page's, when the page was made
 	// The options of the game at options_index, while open.
 	xaml::FrameworkElement    options {nullptr};
 	xaml::Controls::ListView  options_items {nullptr};
@@ -468,12 +471,13 @@ bool EnsureCoverFocus(const std::shared_ptr<Launcher>& launcher) {
 	return true;
 }
 
-// A line per connected controller, a dot at the one used last; rebuilt only when that changes.
+// A line per connected controller, a dot at the one used last and the headset after one with a headset microphone; rebuilt only when that
+// changes.
 void ListControllers(const std::shared_ptr<Launcher>& launcher) {
 	const auto   controllers = ConnectedControllers();
 	std::wstring listed;
 	for (const auto& controller: controllers) {
-		listed += std::to_wstring(controller.player) + controller.name + (controller.latest ? L"*" : L"") + L"\n";
+		listed += std::to_wstring(controller.player) + controller.name + (controller.latest ? L"*" : L"") + (controller.headset_mic ? L"h" : L"") + L"\n";
 	}
 	if (listed == launcher->listed_controllers) {
 		return;
@@ -526,6 +530,18 @@ void ListControllers(const std::shared_ptr<Launcher>& launcher) {
 		name.Text(controller.name);
 		name.Foreground(brush);
 		place(name, row, 3);
+
+		if (controller.headset_mic) {
+			xaml::Controls::TextBlock headset;
+			headset.FontFamily(xaml::Media::FontFamily(HEADSET_SYMBOL_FONT));
+			headset.Text(HEADSET_SYMBOL);
+			headset.Foreground(brush);
+			headset.Opacity(launcher->headset_mic_option ? 1.0 : 0.4);
+			const auto* description = launcher->headset_mic_option ? L"Microphone" : L"Microphone (off in the settings)";
+			xaml::Controls::ToolTipService::SetToolTip(headset, winrt::box_value(description));
+			xaml::Automation::AutomationProperties::SetName(headset, description);
+			place(headset, row, 4);
+		}
 	}
 }
 
@@ -565,6 +581,7 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	launcher->actions = std::move(actions);
 	launcher->page            = page;
 	launcher->controllers     = find(L"Controllers").as<xaml::Controls::Grid>();
+	launcher->headset_mic_option = LoadSettings().headset_mic;
 	launcher->settings_button = find(L"SettingsButton").as<xaml::Controls::Button>();
 	launcher->settings_button.Click(
 	    [launcher](auto const&, auto const&) { launcher->actions.open_settings(); });
