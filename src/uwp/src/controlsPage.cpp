@@ -257,6 +257,8 @@ xaml::UIElement CreateControlsPage(std::function<void()> back) {
 	                                       {
 	                                           {{Name(L"Rumble motors")}, Setting(L"Rumble; haptic feedback as soft bumps on the small motor", settings.haptic_rumble)},
 	                                           {{Name(L"Impulse Triggers")}, Setting(L"Adaptive triggers", settings.impulse_triggers)},
+	                                           {{Name(L"Headset")}, Setting(L"Controller speaker", settings.headset_speaker) + L"\n" +
+	                                                                    Setting(L"Controller microphone", settings.headset_mic)},
 	                                       }));
 	right_column.Children().Append(Section(L"KytyPS5",
 	                                       {
