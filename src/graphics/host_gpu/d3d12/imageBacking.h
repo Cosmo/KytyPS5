@@ -47,6 +47,8 @@ struct ImageResource {
 	DXGI_FORMAT                        family   = DXGI_FORMAT_UNKNOWN;
 	std::vector<D3D12_RESOURCE_STATES> states;
 	uint64_t                           version = 0; // contents are current when equal to the image's
+	// In CPU-visible memory, written by the CPU (GraphicContext::cpu_written_block_arrays).
+	bool                               cpu_written = false;
 };
 
 // The host resources of an image. D3D12 views must share their resource's format family, so an
