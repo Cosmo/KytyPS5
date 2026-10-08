@@ -351,6 +351,12 @@ RenderExecutor::RenderTargets RenderExecutor::AcquireRenderTargets(CommandBuffer
 		auto&       image = cache.GetImage(target.image_id);
 		const auto& info  = target.desc.view_info;
 		EXIT_IF(image.backing.samples != target.desc.info.samples);
+		// Before the state change: an image the device cannot render to may not enter the render target state.
+		const auto rtv = image.RenderTargetView(view);
+		if (rtv.ptr == 0) {
+			targets.unrenderable = true;
+			continue;
+		}
 		image.Use(buffer, D3D12_RESOURCE_STATE_RENDER_TARGET,
 		          ImageSubresourceRange {info.base_level, info.level_count, info.base_layer,
 		                                 info.layer_count},
@@ -358,8 +364,11 @@ RenderExecutor::RenderTargets RenderExecutor::AcquireRenderTargets(CommandBuffer
 		const auto extent                      = target.Extent();
 		targets.width                          = std::min(targets.width, extent.width);
 		targets.height                         = std::min(targets.height, extent.height);
-		targets.colors[target.target_slot]     = image.RenderTargetView(view);
+		targets.colors[target.target_slot]     = rtv;
 		targets.color_count = std::max(targets.color_count, target.target_slot + 1);
+	}
+	if (targets.unrenderable) {
+		return targets; // the draw is skipped: the depth target's pending clear stays for the next draw
 	}
 	for (uint32_t slot = 0; slot < targets.color_count; slot++) {
 		if (targets.colors[slot].ptr != 0) {
@@ -672,6 +681,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	const auto targets = AcquireRenderTargets(buffer, state.color_info, state.color_count,
 	                                          state.depth_info, read_only_depth);
+	if (targets.unrenderable) {
+		log_skip("a color target's format cannot be rendered to on this device");
+		m_read_only_depth = {};
+		return;
+	}
 
 	// Resource preparation above may finish and restart the command list. From here on, every
 	// operation records into the current list and cannot touch guest memory.
