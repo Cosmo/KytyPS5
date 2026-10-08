@@ -82,7 +82,10 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 
 	// The settings page's choices (LocalState\kyty-uwp.json).
 	const auto settings = LoadSettings();
-	SetControllerOptions({settings.impulse_triggers, settings.haptic_rumble});
+	SetControllerOptions({settings.impulse_triggers, settings.haptic_rumble, settings.headset_speaker, settings.headset_mic});
+	if (settings.headset_mic) {
+		RequestMicrophoneAccess();
+	}
 
 	m_game_dir = game_dir;
 	Libs::LibKernel::Memory::SetAddressCollisionHandler(
