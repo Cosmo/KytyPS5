@@ -67,6 +67,8 @@ AppSettings LoadSettings() {
 	read("shader_cache_any_build", settings.shader_cache_any_build);
 	read("impulse_triggers", settings.impulse_triggers);
 	read("haptic_rumble", settings.haptic_rumble);
+	read("headset_speaker", settings.headset_speaker);
+	read("headset_mic", settings.headset_mic);
 	return settings;
 }
 
@@ -95,6 +97,8 @@ void SaveSettings(const AppSettings& settings) {
 	json["shader_cache_any_build"]     = settings.shader_cache_any_build;
 	json["impulse_triggers"]           = settings.impulse_triggers;
 	json["haptic_rumble"]              = settings.haptic_rumble;
+	json["headset_speaker"]            = settings.headset_speaker;
+	json["headset_mic"]                = settings.headset_mic;
 	std::ofstream(SettingsPath(), std::ios::binary | std::ios::trunc) << json.dump(2);
 }
 
