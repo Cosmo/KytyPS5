@@ -69,6 +69,9 @@ constexpr uint32_t AVPLAYER_DEMUX_BUFFER_DEFAULT   = 4 * 1024 * 1024;
 constexpr uint32_t AVPLAYER_DEMUX_BUFFER_MIN       = 128 * 1024;
 constexpr uint32_t AVPLAYER_DEMUX_BUFFER_MAX       = 32 * 1024 * 1024;
 constexpr int      AVPLAYER_AUDIO_BUFFERS          = 8;
+// Extra video buffers so the decoder can run ahead: games that drop late frames (sync mode none)
+// need the next frame ready to catch up.
+constexpr int      AVPLAYER_VIDEO_DECODE_AHEAD     = 8;
 
 enum AvPlayerUriType : uint32_t { AvPlayerUriTypeSource = 0 };
 enum AvPlayerSourceType : uint32_t {
@@ -1155,10 +1158,13 @@ private:
 		if (video_id) {
 			auto size     = VideoBufferSize(fmt->streams[video_id.value()]);
 			auto retained = retired_video.size() + (current_video ? 1u : 0u);
-			for (size_t i = retained; i < static_cast<size_t>(max_video_buffers); i++) {
+			for (size_t i = retained; i < static_cast<size_t>(max_video_buffers + AVPLAYER_VIDEO_DECODE_AHEAD); i++) {
 				auto buffer = std::make_unique<GuestBuffer>(mem, 0x100, size, true);
 				if (!buffer->Valid()) {
-					return false;
+					if (i < static_cast<size_t>(max_video_buffers)) {
+						return false;
+					}
+					break; // the extra buffers are optional
 				}
 				video_buffers.Push(std::move(buffer));
 			}
