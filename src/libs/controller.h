@@ -21,6 +21,23 @@ struct Lifecycle {
 
 constexpr int HOST_INPUT_CONTROLLER_ID = -1000;
 
+// Local co-op: up to four players, each with a pad of its own (handles 1 to 4) and signed in as a user of its own (Config::GetPlayerUserId), as on a
+// PS5, where every controller belongs to a user. SDL gamepads take the free players in turn and the keyboard follows the keyboard player (upstream's
+// router); the UWP app's controllers are host players of their own (HostPlayerId: player 1's is the host input, as the keyboard's). A player is
+// signed in from when a device of theirs first connects until the emulator ends (a PS5 user stays signed in when the controller turns off).
+constexpr int LOCAL_PLAYERS_MAX = 4;
+
+// The input id of a host player's controller (SetButton and the others): player 1's is the host input's.
+[[nodiscard]] constexpr int HostPlayerId(int player) {
+	return HOST_INPUT_CONTROLLER_ID - player;
+}
+void SetHostPlayerConnected(int player, bool connected);
+[[nodiscard]] int      LocalPlayerUserId(int player);
+// The local player a user is, or -1 when the user is not signed in.
+[[nodiscard]] int      LocalPlayerOfUser(int user_id);
+// The signed-in local players, a bit each (player 1 always).
+[[nodiscard]] uint32_t SignedInLocalPlayers();
+
 constexpr int PAD_ERROR_INVALID_ARG     = -2137915391; /* 0x80920001 */
 constexpr int PAD_ERROR_INVALID_HANDLE  = -2137915389; /* 0x80920003 */
 constexpr int PAD_ERROR_ALREADY_OPENED  = -2137915388; /* 0x80920004 */
@@ -108,9 +125,10 @@ struct HostFeedback {
 	uint8_t haptic_left  = 0;
 	uint8_t haptic_right = 0;
 };
-[[nodiscard]] HostFeedback GetHostFeedback();
-// The audio library, for every block a game plays on a vibration port: the block's loudness per actuator (RMS, 0..1, volume applied).
-void SetHapticLevels(float left, float right);
+[[nodiscard]] HostFeedback GetHostFeedback(int player);
+// The audio library, for every block a game plays on a local player's vibration port: the block's loudness per actuator (RMS, 0..1, volume
+// applied).
+void SetHapticLevels(int player, float left, float right);
 #endif
 
 enum class Setting { SpeakerVolume, VibrationIntensity, TriggerEffectIntensity };
