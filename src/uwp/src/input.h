@@ -7,7 +7,8 @@
 
 // Xbox controllers for the emulator, through Windows.Gaming.Input (the same on a PC and on Xbox).
 // Up to four controllers, each a local player (Libs::Controller::MAX_PLAYERS): a controller takes
-// the lowest free player when it connects.
+// the lowest free player when it connects. In a game each player is a user of its own with a pad of
+// its own (local co-op; Libs::Controller::LOCAL_PLAYERS_MAX).
 //
 // Mapping: A/B/X/Y Cross/Circle/Square/Triangle, Menu Options, LB/RB L1/R1, LT/RT L2/R2 (analog),
 // sticks and their clicks L3/R3, D-pad. Holding View turns the sticks into the DualSense's extras:
