@@ -66,7 +66,7 @@ struct OutputClock {
 #if defined(KYTY_PLATFORM_UWP)
 // A vibration port's block has no DualSense to play on: its loudness per actuator (the first two channels) goes to the controller library, and
 // the Xbox controller rumbles with it.
-void ReportHapticLevels(const void* data, uint32_t frames, int channels, bool is_float, const int* volume, float gain) {
+void ReportHapticLevels(int player, const void* data, uint32_t frames, int channels, bool is_float, const int* volume, float gain) {
 	if (data == nullptr || frames == 0 || channels <= 0) {
 		return;
 	}
@@ -84,7 +84,7 @@ void ReportHapticLevels(const void* data, uint32_t frames, int channels, bool is
 		const int channel = std::min(side, used - 1);
 		levels[side]      = static_cast<float>(std::sqrt(sums[channel] / frames) * volume[channel] / 32768.0 * gain);
 	}
-	Controller::SetHapticLevels(levels[0], levels[1]);
+	Controller::SetHapticLevels(player, levels[0], levels[1]);
 	static std::atomic_bool reported = false;
 	if (!reported.exchange(true)) {
 		LOGF("AudioOut: haptics from a vibration port (%d ch) drive the controller's rumble\n", channels);
@@ -136,7 +136,7 @@ public:
 
 	KYTY_CLASS_NO_COPY(Audio);
 
-	Id       AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format);
+	Id       AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format, int user_id = -1);
 	bool     AudioOutClose(Id handle);
 	bool     AudioOutValid(Id handle);
 	bool     AudioOutHasDevice(Id handle);
@@ -156,6 +156,7 @@ private:
 	struct PortOut {
 		bool        used        = false;
 		int         type        = 0;
+		int         player      = 0; // the local player whose user opened it (player 1 for the system's ports)
 		uint32_t    samples_num = 0;
 		uint32_t    freq        = 0;
 		Format      format      = Format::Unknown;
@@ -315,8 +316,9 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 
 #if defined(KYTY_PLATFORM_UWP)
 	// The stream plays the port's format as it is (no conversion).
-	port->host_stream =
-	    Output::Open(port->freq, OutputChannels(*port), FormatIsFloat(port->format), port->type == AUDIO_OUT_PORT_TYPE_PADSPK);
+	// Player 1's pad speaker plays on the controller's headset; the other players' play on the TV.
+	port->host_stream = Output::Open(port->freq, OutputChannels(*port), FormatIsFloat(port->format),
+	                                 port->type == AUDIO_OUT_PORT_TYPE_PADSPK && port->player == 0);
 	return port->host_stream != nullptr;
 #else
 	if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
@@ -506,7 +508,7 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 	return true;
 }
 
-Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format) {
+Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format, int user_id) {
 	if (freq == 0) {
 		return Id::Invalid();
 	}
@@ -519,6 +521,7 @@ Audio::Id Audio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, For
 
 			port.used        = true;
 			port.type        = type;
+			port.player      = std::max(Controller::LocalPlayerOfUser(user_id), 0);
 			port.samples_num = samples_num;
 			port.freq        = freq;
 			port.format      = format;
@@ -648,7 +651,7 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 		bool controller_uses_bluetooth = false;
 #if defined(KYTY_PLATFORM_UWP)
 		if (port.type == AUDIO_OUT_PORT_TYPE_VIBRATION) {
-			ReportHapticLevels(params[i].data, port.samples_num, port.channels_num, FormatIsFloat(port.format), port.volume, gain);
+			ReportHapticLevels(port.player, params[i].data, port.samples_num, port.channels_num, FormatIsFloat(port.format), port.volume, gain);
 		}
 #endif
 		if (port.haptics != nullptr) {
@@ -1066,7 +1069,7 @@ int KYTY_SYSV_ABI AudioOutOpen(int user_id, int type, int index, uint32_t len, u
 
 	EXIT_IF(g_audio == nullptr);
 
-	auto id = g_audio->AudioOutOpen(type, len, freq, format);
+	auto id = g_audio->AudioOutOpen(type, len, freq, format, user_id);
 
 	if (!id.IsValid()) {
 		return AUDIO_OUT_ERROR_PORT_FULL;
