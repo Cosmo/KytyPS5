@@ -12,8 +12,9 @@
 #include <mutex>
 #include <thread>
 
-// The app's pad state goes to the emulator's controller library as host input (the library's keyboard-style path, which is always connected once the
-// emulator started): player 1 is the game's pad. The state is forwarded as changes, since every call adds a state to the pad's history.
+// The app's pad state goes to the emulator's controller library as host input (the library's keyboard-style path): each player's to the pad of
+// the player's user (Libs::Controller::HostPlayerId), player 1's always connected once the emulator started, the others' while their
+// controller is. The state is forwarded as changes, since every call adds a state to the pad's history.
 namespace Kyty::Uwp::Pad {
 
 namespace {
@@ -31,9 +32,9 @@ constexpr float PI               = 3.14159265f;
 constexpr float MAX_ANGLE = PI;
 constexpr float MAX_RATE  = 10.0f * PI;
 
-std::mutex   g_mutex;
-HostPadState g_last {};
-bool         g_ready_before = false;
+std::mutex                              g_mutex;
+std::array<HostPadState, MAX_PLAYERS> g_last {};
+std::array<bool, MAX_PLAYERS>         g_ready_before {};
 
 bool Valid(int player) {
 	return player >= 0 && player < MAX_PLAYERS;
@@ -75,44 +76,50 @@ Quat Target(const HostPadState& state) {
 	                AxisAngle(1.0f, 0.0f, 0.0f, -state.tilt_y * MAX_ANGLE));
 }
 
-// The emulated pad: its orientation, when its sensors were last sent, and whether it rests at its target (and was sent so).
-Quat     g_motion {};
-uint64_t g_motion_time    = 0;
-bool     g_motion_settled = true;
+// An emulated pad: its orientation, when its sensors were last sent, and whether it rests at its target (and was sent so).
+struct Motion {
+	Quat     orientation {};
+	uint64_t time    = 0;
+	bool     settled = true;
+};
+std::array<Motion, MAX_PLAYERS> g_motions {};
 
 // The motion sensors as the pad feels them: gravity in the pad's frame, and the turn per second (in the pad's frame too, as a gyroscope measures).
-void SendMotion(const std::array<float, 3>& rate, uint64_t now) {
-	const Quat  up       = Multiply(Multiply(Conjugate(g_motion), {0.0f, STANDARD_GRAVITY, 0.0f, 0.0f}), g_motion);
+void SendMotion(int player, const std::array<float, 3>& rate, uint64_t now) {
+	auto&       motion   = g_motions[player];
+	const Quat  up       = Multiply(Multiply(Conjugate(motion.orientation), {0.0f, STANDARD_GRAVITY, 0.0f, 0.0f}), motion.orientation);
 	const float accel[3] = {up.x, up.y, up.z};
-	C::SetSensor(C::HOST_INPUT_CONTROLLER_ID, C::Sensor::Accel, accel, now);
-	C::SetSensor(C::HOST_INPUT_CONTROLLER_ID, C::Sensor::Gyro, rate.data(), now);
-	g_motion_time = now;
+	C::SetSensor(C::HostPlayerId(player), C::Sensor::Accel, accel, now);
+	C::SetSensor(C::HostPlayerId(player), C::Sensor::Gyro, rate.data(), now);
+	motion.time = now;
 }
 
-// One step of the emulated pad toward `target`, at most MAX_RATE for the time since the last one. The controller library turns its own
+// One step of a player's emulated pad toward `target`, at most MAX_RATE for the time since the last one. The controller library turns its own
 // orientation by the gyroscope's rate times the same time, so it follows the pad exactly.
-void StepMotion(const Quat& target) {
-	const auto now   = NowMicroseconds();
-	Quat       delta = Multiply(Conjugate(g_motion), target);
+void StepMotion(int player, const Quat& target) {
+	auto&      motion = g_motions[player];
+	auto&      pad    = motion.orientation;
+	const auto now    = NowMicroseconds();
+	Quat       delta  = Multiply(Conjugate(pad), target);
 	if (delta.w < 0.0f) {
 		delta = {-delta.x, -delta.y, -delta.z, -delta.w}; // the shorter way round
 	}
 	const float half_sin = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
 	const float angle    = 2.0f * std::atan2(half_sin, delta.w);
 	if (angle < 1e-4f) {
-		if (!g_motion_settled) {
-			g_motion = target;
-			SendMotion({0.0f, 0.0f, 0.0f}, now); // at rest: the turning stops
-			g_motion_settled = true;
+		if (!motion.settled) {
+			pad = target;
+			SendMotion(player, {0.0f, 0.0f, 0.0f}, now); // at rest: the turning stops
+			motion.settled = true;
 		}
 		return;
 	}
 	// The library ignores a gyroscope sample that comes long after the one before: a motion starts with a sample at rest, the first step
 	// follows on the next poll.
-	const uint64_t elapsed = now - g_motion_time;
-	if (g_motion_settled || now <= g_motion_time || elapsed > 90000) {
-		SendMotion({0.0f, 0.0f, 0.0f}, now);
-		g_motion_settled = false;
+	const uint64_t elapsed = now - motion.time;
+	if (motion.settled || now <= motion.time || elapsed > 90000) {
+		SendMotion(player, {0.0f, 0.0f, 0.0f}, now);
+		motion.settled = false;
 		return;
 	}
 	const float dt   = static_cast<float>(elapsed) * 0.000001f;
@@ -120,36 +127,38 @@ void StepMotion(const Quat& target) {
 	const float x    = delta.x / half_sin;
 	const float y    = delta.y / half_sin;
 	const float z    = delta.z / half_sin;
-	g_motion         = Multiply(g_motion, AxisAngle(x, y, z, step));
-	const float norm = std::sqrt(g_motion.x * g_motion.x + g_motion.y * g_motion.y + g_motion.z * g_motion.z + g_motion.w * g_motion.w);
-	g_motion         = {g_motion.x / norm, g_motion.y / norm, g_motion.z / norm, g_motion.w / norm};
-	SendMotion({x * step / dt, y * step / dt, z * step / dt}, now);
+	pad              = Multiply(pad, AxisAngle(x, y, z, step));
+	const float norm = std::sqrt(pad.x * pad.x + pad.y * pad.y + pad.z * pad.z + pad.w * pad.w);
+	pad              = {pad.x / norm, pad.y / norm, pad.z / norm, pad.w / norm};
+	SendMotion(player, {x * step / dt, y * step / dt, z * step / dt}, now);
 }
 
 } // namespace
 
-void SetPlayerConnected(int /*player*/, bool /*connected*/) {
-	// The game's pad is always connected (as the keyboard's is on a desktop).
+void SetPlayerConnected(int player, bool connected) {
+	// Player 1's pad is always connected (as the keyboard's is on a desktop); the others sign their user in when they first connect.
+	if (Valid(player)) {
+		C::SetHostPlayerConnected(player, connected);
+	}
 }
 
 void SetPlayerState(int player, const HostPadState& state) {
-	if (player != 0) {
-		return; // one local player for now
+	if (!Valid(player)) {
+		return;
 	}
 	std::lock_guard lock(g_mutex);
 	// Until the emulator's controller library exists there is nothing to forward to; once it does, the first state goes in full.
 	const bool ready = C::GetActiveControllerId() != -1;
 	if (!ready) {
-		g_ready_before = false;
+		g_ready_before[player] = false;
 		return;
 	}
-	const auto id   = C::HOST_INPUT_CONTROLLER_ID;
-	auto&      last = g_last;
-	if (!g_ready_before) {
-		last             = {};
-		g_ready_before   = true;
-		g_motion         = {};
-		g_motion_settled = true;
+	const auto id   = C::HostPlayerId(player);
+	auto&      last = g_last[player];
+	if (!g_ready_before[player]) {
+		last                   = {};
+		g_ready_before[player] = true;
+		g_motions[player]      = {};
 	}
 
 	const uint32_t changed = state.buttons ^ last.buttons;
@@ -175,14 +184,14 @@ void SetPlayerState(int player, const HostPadState& state) {
 }
 
 void StepPlayerMotion(int player) {
-	if (player != 0) {
+	if (!Valid(player)) {
 		return;
 	}
 	std::lock_guard lock(g_mutex);
-	if (!g_ready_before || C::GetActiveControllerId() == -1) {
+	if (!g_ready_before[player] || C::GetActiveControllerId() == -1) {
 		return;
 	}
-	StepMotion(Target(g_last));
+	StepMotion(player, Target(g_last[player]));
 }
 
 void StartAutoPress(uint32_t interval_ms) {
@@ -217,10 +226,10 @@ void StartAutoPress(uint32_t interval_ms) {
 }
 
 HostPadFeedback GetPlayerFeedback(int player) {
-	if (player != 0) {
+	if (!Valid(player)) {
 		return {};
 	}
-	const auto feedback = C::GetHostFeedback();
+	const auto feedback = C::GetHostFeedback(player);
 	return {feedback.large_motor,       feedback.small_motor,       feedback.trigger_resistance, feedback.trigger_vibration,
 	        feedback.trigger_frequency, feedback.trigger_shots,     feedback.haptic_left,        feedback.haptic_right};
 }
