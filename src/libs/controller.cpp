@@ -17,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -221,6 +222,42 @@ static GameController* PlayerForHandle(int handle) {
 	}
 	// The Sense controller ports belong to the initial user.
 	return PadVrHand(handle) >= 0 ? g_players[0].get() : nullptr;
+}
+
+static_assert(LOCAL_PLAYERS_MAX == Config::MAX_PLAYERS);
+
+// The players signed in, a bit each: player 1 from the start, the others from when a device of theirs first connects, until the emulator ends
+// (a PS5 user stays signed in when the controller turns off).
+static std::atomic<uint32_t> g_signed_in {1u};
+
+int LocalPlayerUserId(int player) {
+	return Config::GetPlayerUserId(player);
+}
+
+int LocalPlayerOfUser(int user_id) {
+	const int player = Config::GetPlayerFromUserId(user_id);
+	return player >= 0 && (g_signed_in.load() & (1u << player)) != 0 ? player : -1;
+}
+
+uint32_t SignedInLocalPlayers() {
+	return g_signed_in.load();
+}
+
+// A host player's controller (the UWP app's players 2 to 4) is a device of that player's own: it is not assigned to a free player as a gamepad is.
+// Player 1's controller is the host input, as the keyboard's.
+void SetHostPlayerConnected(int player, bool connected) {
+	if (player <= 0 || player >= Config::MAX_PLAYERS) {
+		return;
+	}
+	Common::LockGuard lock(g_router_mutex);
+	const int         id = HostPlayerId(player);
+	std::erase_if(g_pad_players, [id](const auto& pad) { return pad.first == id; });
+	if (connected) {
+		g_pad_players.emplace_back(id, player);
+	}
+	if (g_players[0] != nullptr) {
+		RefreshPlayers();
+	}
 }
 
 static void pad_fill_data(PadData* data, const ControllerState& state, bool connected,
@@ -1090,7 +1127,8 @@ static void RefreshPlayers() {
 		taken[keyboard] = true;
 	}
 	for (auto& [id, player]: g_pad_players) {
-		if (g_keyboard_player != 0 && player == keyboard) {
+		// (a host player's controller keeps its player: SetHostPlayerConnected)
+		if (g_keyboard_player != 0 && player == keyboard && HOST_INPUT_CONTROLLER_ID - id <= 0) {
 			player = -1;
 		}
 		if (player >= 0) {
@@ -1130,6 +1168,9 @@ static void RefreshPlayers() {
 	}
 	for (int player = 0; player < Config::MAX_PLAYERS; player++) {
 		g_players[player]->SetDevices(active[player]);
+		if (active[player] != -1) {
+			g_signed_in.fetch_or(1u << player);
+		}
 	}
 }
 
@@ -1224,9 +1265,12 @@ struct HapticSide {
 	uint64_t pulse_until = 0;
 	uint64_t quiet_until = 0; // no next pulse before
 };
-static Common::Mutex             g_haptic_mutex;
-static std::array<HapticSide, 2> g_haptics {};
-static uint64_t                  g_haptic_time = 0;
+struct HapticPad {
+	std::array<HapticSide, 2> sides {};
+	uint64_t                  time = 0;
+};
+static Common::Mutex                                g_haptic_mutex;
+static std::array<HapticPad, LOCAL_PLAYERS_MAX> g_haptics {};
 // From RMS to about the signal's amplitude.
 constexpr float HAPTIC_LEVEL_GAIN = 2.0f;
 // A rise counts when the level is more than twice the average and above it by at least HAPTIC_ONSET_MIN.
@@ -1237,14 +1281,18 @@ constexpr uint64_t HAPTIC_PULSE_MS    = 45;
 // From a pulse's start to the next one at the earliest, so that a rattle stays a row of bumps rather than a buzz.
 constexpr uint64_t HAPTIC_QUIET_MS = 90;
 
-void SetHapticLevels(float left, float right) {
+void SetHapticLevels(int player, float left, float right) {
+	if (player < 0 || player >= LOCAL_PLAYERS_MAX) {
+		return;
+	}
 	Common::LockGuard          lock(g_haptic_mutex);
+	auto&                      pad    = g_haptics[player];
 	const auto                 now    = SDL_GetTicks();
-	const float                follow = 1.0f - std::exp(-static_cast<float>(now - g_haptic_time) / HAPTIC_AVERAGE_MS);
+	const float                follow = 1.0f - std::exp(-static_cast<float>(now - pad.time) / HAPTIC_AVERAGE_MS);
 	const std::array<float, 2> levels {std::clamp(left * HAPTIC_LEVEL_GAIN, 0.0f, 1.0f), std::clamp(right * HAPTIC_LEVEL_GAIN, 0.0f, 1.0f)};
-	g_haptic_time = now;
+	pad.time = now;
 	for (size_t i = 0; i < levels.size(); i++) {
-		auto&       side = g_haptics[i];
+		auto&       side = pad.sides[i];
 		const float rise = levels[i] - side.average;
 		if (now >= side.quiet_until && levels[i] > side.average * HAPTIC_ONSET_RATIO && rise > HAPTIC_ONSET_MIN) {
 			side.pulse       = std::min(rise, 1.0f);
@@ -1255,17 +1303,18 @@ void SetHapticLevels(float left, float right) {
 	}
 }
 
-HostFeedback GetHostFeedback() {
-	if (g_players[0] == nullptr) {
+HostFeedback GetHostFeedback(int player) {
+	if (player < 0 || player >= LOCAL_PLAYERS_MAX || g_players[player] == nullptr) {
 		return {};
 	}
-	auto                 feedback = g_players[0]->GetHostFeedback();
+	auto                 feedback = g_players[player]->GetHostFeedback();
 	std::array<float, 2> level {};
 	{
 		Common::LockGuard lock(g_haptic_mutex);
 		const auto        now = SDL_GetTicks();
 		for (size_t i = 0; i < level.size(); i++) {
-			level[i] = now < g_haptics[i].pulse_until ? g_haptics[i].pulse : 0.0f;
+			const auto& side = g_haptics[player].sides[i];
+			level[i]         = now < side.pulse_until ? side.pulse : 0.0f;
 		}
 	}
 	feedback.haptic_left  = static_cast<uint8_t>(std::lround(level[0] * 255.0f));
@@ -1377,7 +1426,14 @@ int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param) {
 		return PadVrPort(user_id, hand, index, true);
 	}
 	const int player = Config::GetPlayerFromUserId(user_id);
-	return player >= 0 ? g_players[player]->OpenPort(user_id, type, index) : PAD_ERROR_INVALID_ARG;
+	const int result = player >= 0 ? g_players[player]->OpenPort(user_id, type, index) : PAD_ERROR_INVALID_ARG;
+	// Which users a game plays with (local co-op), in the log.
+	if (result > 0) {
+		printf("Pad: user %d opened pad %d\n", user_id, result);
+	} else {
+		printf("Pad: user %d (type %d) could not open a pad: 0x%08x\n", user_id, type, static_cast<uint32_t>(result));
+	}
+	return result;
 }
 
 int KYTY_SYSV_ABI PadGetHandle(int user_id, int type, int index) {
