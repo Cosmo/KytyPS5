@@ -115,8 +115,10 @@ struct ConfigOptions {
 	bool                   playgo_hack_enabled         = false;
 	bool                   skip_notice_screen          = false;
 	std::string            launch_activity;
-	// Where the host keeps the fonts that stand in for the console's system fonts (Roboto); empty: the font library looks in the source tree.
+	// Where the host keeps the fonts that stand in for the console's system fonts (Noto Sans); empty: assets/fonts next to the executable.
 	std::filesystem::path font_folder;
+	// Where the user's data is kept: saves (_SaveData) and trophy unlocks (_Trophies); empty: the working directory.
+	std::filesystem::path user_data_folder;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 	// Debugging (D3D12 build): the shader limits of the Xbox's UWP games on any device (shader
@@ -256,6 +258,7 @@ bool SkipNoticeScreen();
 // Activity ID of the one-shot launchActivity game intent; empty sends none.
 const std::string& GetLaunchActivity();
 std::filesystem::path FontFolder();
+std::filesystem::path UserDataFolder();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
 bool XboxGpuLimitsEnabled();
