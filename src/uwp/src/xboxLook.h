@@ -15,8 +15,8 @@ namespace Kyty::Uwp {
 
 // The Xbox's own look, measured on the Series X's Settings at 1920x1080 (2 pixels per effective pixel there), for all of the app's pages.
 
-// The app's resources for it (App merges them after the XAML controls' resources): PageTitleTextBlockStyle for the pages' titles and HintBarStyle
-// for the bar of controller hints (SetHints fills it).
+// The app's resources for it (App merges them after the XAML controls' resources): PageTitleTextBlockStyle for the pages' titles, HintBarStyle
+// for the bar of controller hints (SetHints fills it), and on the Xbox its text size for the body text and the controls.
 [[nodiscard]] winrt::Windows::UI::Xaml::ResourceDictionary XboxLookResources();
 
 // The face buttons in the Xbox's colours, the other buttons in the text's (none).
