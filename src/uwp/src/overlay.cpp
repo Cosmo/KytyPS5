@@ -3,6 +3,7 @@
 #include "emulatorHost.h"
 #include "fileAccess.h"
 #include "input.h"
+#include "settingTiles.h"
 #include "settings.h"
 
 #include <windows.h>
@@ -22,6 +23,7 @@
 #include <cmath>
 #include <cstdio>
 #include <deque>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -59,10 +61,12 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
     <RowDefinition Height="Auto" />
   </Grid.RowDefinitions>
 
-  <Border Width="300" HorizontalAlignment="Left" VerticalAlignment="Top" Padding="12"
+  <!-- Its parts by AppSettings::overlay_detail: the frame rate alone (in a box that fits it); with the graph and Compact; with the game,
+       the graph and Statistics (Full). -->
+  <Border x:Name="StatsPanel" Width="300" HorizontalAlignment="Left" VerticalAlignment="Top" Padding="12"
           Background="{StaticResource PanelBrush}">
     <StackPanel Spacing="6">
-      <StackPanel>
+      <StackPanel x:Name="Header">
         <TextBlock x:Name="Game" Style="{StaticResource BodyTextBlockStyle}" FontWeight="SemiBold"
                    TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
         <TextBlock x:Name="RunTime" Style="{StaticResource CaptionTextBlockStyle}"
@@ -184,10 +188,34 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
         <TextBlock x:Name="CompileWait" Grid.Row="27" Grid.Column="2" />
         <TextBlock x:Name="SwapWait" Grid.Row="28" Grid.Column="2" />
       </Grid>
+      <!-- Compact: the GPU's time per frame, RAM in use and the game's memory in the swap file (where there is one), as in Statistics. -->
+      <Grid x:Name="Compact" ColumnSpacing="12" Visibility="Collapsed">
+        <Grid.Resources>
+          <Style TargetType="TextBlock" BasedOn="{StaticResource CaptionTextBlockStyle}">
+            <Setter Property="TextWrapping" Value="NoWrap" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+          </Style>
+        </Grid.Resources>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TextBlock Grid.Row="0" Text="GPU time" />
+        <TextBlock Grid.Row="1" Text="RAM" />
+        <TextBlock x:Name="CompactSwapLabel" Grid.Row="2" Text="Swap file" />
+        <TextBlock x:Name="CompactGpuTime" Grid.Row="0" Grid.Column="1" />
+        <TextBlock x:Name="CompactMemory" Grid.Row="1" Grid.Column="1" />
+        <TextBlock x:Name="CompactSwap" Grid.Row="2" Grid.Column="1" />
+      </Grid>
     </StackPanel>
   </Border>
 
-  <Border MinWidth="220" HorizontalAlignment="Right" VerticalAlignment="Top" Padding="12"
+  <Border x:Name="ControllersPanel" MinWidth="220" HorizontalAlignment="Right" VerticalAlignment="Top" Padding="12"
           Background="{StaticResource PanelBrush}">
     <StackPanel Spacing="4">
       <TextBlock Text="Controllers" Style="{StaticResource CaptionTextBlockStyle}"
@@ -204,7 +232,7 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
     </StackPanel>
   </Border>
 
-  <Border Grid.Row="2" Padding="12,8" Background="{StaticResource PanelBrush}">
+  <Border x:Name="LogPanel" Grid.Row="2" Padding="12,8" Background="{StaticResource PanelBrush}">
     <TextBlock x:Name="Log" FontFamily="Consolas" FontSize="12" LineHeight="16" TextWrapping="NoWrap"
                TextTrimming="CharacterEllipsis" Foreground="#D8DCE3" />
   </Border>
@@ -341,11 +369,31 @@ std::wstring Duration(uint64_t ms) {
 // The overlay's scale for AppSettings::overlay_size (small, medium, large). Large is the system's
 // size, which the Xbox doubles for the TV.
 constexpr std::array<double, 3> OverlaySizes {0.6, 0.8, 1.0};
+// The width of the performance box (StatsPanel) when it shows more than the frame rate.
+constexpr double STATS_WIDTH = 300.0;
+
+xaml::Visibility VisibleIf(bool shown) {
+	return shown ? xaml::Visibility::Visible : xaml::Visibility::Collapsed;
+}
 
 } // namespace
 
 struct GameOverlay::State {
+	xaml::Controls::Grid       page {nullptr};
 	xaml::Controls::Grid       root {nullptr};
+	xaml::Controls::Border     stats_panel {nullptr};
+	xaml::UIElement            header {nullptr};
+	xaml::Controls::Grid       compact {nullptr};
+	xaml::Controls::TextBlock  compact_gpu_time {nullptr};
+	xaml::Controls::TextBlock  compact_memory {nullptr};
+	xaml::UIElement            compact_swap_label {nullptr};
+	xaml::Controls::TextBlock  compact_swap {nullptr};
+	xaml::UIElement            controllers_panel {nullptr};
+	xaml::UIElement            log_panel {nullptr};
+	uint32_t                   detail            = OVERLAY_FULL;
+	bool                       log_shown         = true;
+	bool                       controllers_shown = true;
+	double                     scale             = 1.0;
 	xaml::Controls::TextBlock  run_time {nullptr};
 	xaml::Controls::TextBlock  fps {nullptr};
 	xaml::Controls::TextBlock  frame_time {nullptr};
@@ -396,7 +444,10 @@ struct GameOverlay::State {
 
 	void Update();
 	void UpdateRates(const MemoryTotals& totals);
+	void UpdateControllers();
 	void ShowSwapFile(bool shown);
+	void SetScale(double value);
+	void Fit(double width, double height);
 };
 
 void GameOverlay::State::Update() {
@@ -483,7 +534,28 @@ void GameOverlay::State::Update() {
 		new_pipelines.Text(std::to_wstring(statistics->pipelines - std::min(statistics->cached_pipelines, statistics->pipelines)));
 		saved_pipelines.Text(std::to_wstring(statistics->saved_pipelines));
 	}
+	if (detail == OVERLAY_COMPACT) {
+		compact_gpu_time.Text(gpu_time.Text());
+		compact_memory.Text(memory.Text());
+		compact_swap.Text(swapped_memory.Text());
+	}
 
+	// The parts the settings hide are not filled; the log is read again from its end when it shows again.
+	if (controllers_shown) {
+		UpdateControllers();
+	}
+	if (log_shown) {
+		std::wstring text;
+		const auto&  lines = log_tail->Update();
+		for (size_t i = lines.size() > log_lines ? lines.size() - log_lines : 0; i < lines.size(); i++) {
+			text += (text.empty() ? L"" : L"\n") + std::wstring(winrt::to_hstring(lines[i]));
+		}
+		log.Text(text);
+	}
+}
+
+// One row per connected controller: its player number, the controller symbol, its name and, with a headset, the headset symbol.
+void GameOverlay::State::UpdateControllers() {
 	controllers.Children().Clear();
 	controllers.RowDefinitions().Clear();
 	const auto connected = ConnectedControllers();
@@ -528,13 +600,6 @@ void GameOverlay::State::Update() {
 			place(headset, row, 3);
 		}
 	}
-
-	std::wstring text;
-	const auto&  lines = log_tail->Update();
-	for (size_t i = lines.size() > log_lines ? lines.size() - log_lines : 0; i < lines.size(); i++) {
-		text += (text.empty() ? L"" : L"\n") + std::wstring(winrt::to_hstring(lines[i]));
-	}
-	log.Text(text);
 }
 
 // The rates and the values per frame, over the last second (they stay until the next second is over).
@@ -597,15 +662,57 @@ void GameOverlay::State::ShowSwapFile(bool shown) {
 		}
 	}
 	statistics.RowDefinitions().GetAt(SWAP_GAP_ROW).Height(xaml::GridLengthHelper::FromPixels(shown ? 8.0 : 0.0));
+	compact_swap_label.Visibility(visibility);
+	compact_swap.Visibility(visibility);
+}
+
+// The overlay's size: below the system's size, laid out over the page enlarged by 1 / scale, then scaled down to fit.
+void GameOverlay::State::SetScale(double value) {
+	if (value == scale) {
+		return;
+	}
+	scale = value;
+	if (scale == 1.0) {
+		root.RenderTransform(nullptr);
+		root.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
+		root.VerticalAlignment(xaml::VerticalAlignment::Stretch);
+		root.ClearValue(xaml::FrameworkElement::WidthProperty());
+		root.ClearValue(xaml::FrameworkElement::HeightProperty());
+		return;
+	}
+	xaml::Media::ScaleTransform transform;
+	transform.ScaleX(scale);
+	transform.ScaleY(scale);
+	root.RenderTransform(transform);
+	root.HorizontalAlignment(xaml::HorizontalAlignment::Left);
+	root.VerticalAlignment(xaml::VerticalAlignment::Top);
+	Fit(page.ActualWidth(), page.ActualHeight());
+}
+
+void GameOverlay::State::Fit(double width, double height) {
+	if (scale != 1.0 && width > 0.0 && height > 0.0) {
+		root.Width(width / scale);
+		root.Height(height / scale);
+	}
 }
 
 GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
                          winrt::hstring const& game_name)
     : m_state(std::make_shared<State>()) {
 	auto& state = *m_state;
+	state.page  = page;
 	state.root  = xaml::Markup::XamlReader::Load(OverlayMarkup).as<xaml::Controls::Grid>();
 	const auto find = [&state](const wchar_t* name) { return state.root.FindName(name); };
 	find(L"Game").as<xaml::Controls::TextBlock>().Text(game_name);
+	state.stats_panel        = find(L"StatsPanel").as<xaml::Controls::Border>();
+	state.header             = find(L"Header").as<xaml::UIElement>();
+	state.compact            = find(L"Compact").as<xaml::Controls::Grid>();
+	state.compact_gpu_time   = find(L"CompactGpuTime").as<xaml::Controls::TextBlock>();
+	state.compact_memory     = find(L"CompactMemory").as<xaml::Controls::TextBlock>();
+	state.compact_swap_label = find(L"CompactSwapLabel").as<xaml::UIElement>();
+	state.compact_swap       = find(L"CompactSwap").as<xaml::Controls::TextBlock>();
+	state.controllers_panel  = find(L"ControllersPanel").as<xaml::UIElement>();
+	state.log_panel          = find(L"LogPanel").as<xaml::UIElement>();
 	state.run_time         = find(L"RunTime").as<xaml::Controls::TextBlock>();
 	state.fps              = find(L"Fps").as<xaml::Controls::TextBlock>();
 	state.frame_time       = find(L"FrameTime").as<xaml::Controls::TextBlock>();
@@ -638,30 +745,11 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.controllers      = find(L"Controllers").as<xaml::Controls::Grid>();
 	state.log              = find(L"Log").as<xaml::Controls::TextBlock>();
 	page.Children().InsertAt(index, state.root);
-
-	// Its size (Settings): laid out over the page enlarged by 1 / scale, then scaled down to fit.
-	const auto   settings = LoadSettings();
-	state.log_lines       = std::clamp<size_t>(settings.overlay_log_lines, 2, LOG_LINES);
-	state.headset_mic_option = settings.headset_mic;
-	const double scale    = OverlaySizes[std::min<size_t>(settings.overlay_size, OverlaySizes.size() - 1)];
-	if (scale != 1.0) {
-		xaml::Media::ScaleTransform transform;
-		transform.ScaleX(scale);
-		transform.ScaleY(scale);
-		state.root.RenderTransform(transform);
-		state.root.HorizontalAlignment(xaml::HorizontalAlignment::Left);
-		state.root.VerticalAlignment(xaml::VerticalAlignment::Top);
-		const auto fit = [root = state.root, scale](double width, double height) {
-			if (width > 0.0 && height > 0.0) {
-				root.Width(width / scale);
-				root.Height(height / scale);
-			}
-		};
-		fit(page.ActualWidth(), page.ActualHeight());
-		page.SizeChanged([fit](auto const&, xaml::SizeChangedEventArgs const& args) {
-			fit(args.NewSize().Width, args.NewSize().Height);
-		});
-	}
+	page.SizeChanged([weak = std::weak_ptr<State>(m_state)](auto const&, xaml::SizeChangedEventArgs const& args) {
+		if (auto shared = weak.lock()) {
+			shared->Fit(args.NewSize().Width, args.NewSize().Height);
+		}
+	});
 
 	state.timer = xaml::DispatcherTimer();
 	state.timer.Interval(UPDATE_INTERVAL);
@@ -670,6 +758,7 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 			shared->Update();
 		}
 	});
+	Apply(LoadSettings());
 }
 
 GameOverlay::~GameOverlay() {
@@ -692,6 +781,65 @@ void GameOverlay::Show(bool shown) {
 
 bool GameOverlay::Shown() const {
 	return m_state->root.Visibility() == xaml::Visibility::Visible;
+}
+
+void GameOverlay::Apply(const AppSettings& settings) {
+	auto& state              = *m_state;
+	state.detail             = std::min(settings.overlay_detail, OVERLAY_FULL);
+	state.log_shown          = settings.overlay_log;
+	state.controllers_shown  = settings.overlay_controllers;
+	state.log_lines          = std::clamp<size_t>(settings.overlay_log_lines, 2, LOG_LINES);
+	state.headset_mic_option = settings.headset_mic;
+	state.header.Visibility(VisibleIf(state.detail == OVERLAY_FULL));
+	state.graph.Visibility(VisibleIf(state.detail != OVERLAY_FRAME_RATE));
+	state.statistics.Visibility(VisibleIf(state.detail == OVERLAY_FULL));
+	state.compact.Visibility(VisibleIf(state.detail == OVERLAY_COMPACT));
+	state.stats_panel.Width(state.detail == OVERLAY_FRAME_RATE ? std::numeric_limits<double>::quiet_NaN() : STATS_WIDTH);
+	state.controllers_panel.Visibility(VisibleIf(state.controllers_shown));
+	state.log_panel.Visibility(VisibleIf(state.log_shown));
+	state.SetScale(OverlaySizes[std::min<size_t>(settings.overlay_size, OverlaySizes.size() - 1)]);
+	if (Shown()) {
+		state.Update();
+	}
+}
+
+void AddOverlaySettings(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, std::shared_ptr<AppSettings> settings,
+                        std::function<void()> changed) {
+	AddChoice(
+	    panel, explanation, L"Overlay", {L"Off", L"Frame rate", L"Compact", L"Full"},
+	    OverlayShown() ? 1 + std::min(settings->overlay_detail, OVERLAY_FULL) : 0,
+	    [settings, changed](size_t index) {
+		    SetOverlayShown(index != 0);
+		    if (index != 0) {
+			    settings->overlay_detail = static_cast<uint32_t>(index - 1);
+		    }
+		    changed();
+	    },
+	    {L"What the overlay shows over games.",
+	     L"Frame rate: the frames per second and the time per frame. Compact: also a graph of the last frames, the GPU's time per frame, RAM and "
+	     L"the swap file. Full: everything, from the draws to the shaders.",
+	     L"To turn it off and on during a game, pull both triggers while pressing View and Menu together."});
+	AddSwitch(
+	    panel, explanation, L"Log on screen", settings->overlay_log,
+	    [settings, changed](bool on) {
+		    settings->overlay_log = on;
+		    changed();
+	    },
+	    {L"The latest lines of the emulator's log, under the game.", L"The log file is written either way."});
+	AddSwitch(
+	    panel, explanation, L"Controllers on screen", settings->overlay_controllers,
+	    [settings, changed](bool on) {
+		    settings->overlay_controllers = on;
+		    changed();
+	    },
+	    {L"The connected controllers and their player numbers, at the top right."});
+	AddChoice(
+	    panel, explanation, L"Overlay size", {L"Small", L"Medium", L"Large"}, std::min<uint32_t>(settings->overlay_size, 2),
+	    [settings, changed](size_t index) {
+		    settings->overlay_size = static_cast<uint32_t>(index);
+		    changed();
+	    },
+	    {L"The size of the overlay over games."});
 }
 
 } // namespace Kyty::Uwp
