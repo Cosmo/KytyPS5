@@ -29,8 +29,9 @@ namespace Kyty::Uwp {
 struct ShaderStatistics {
 	uint64_t drawing_shaders  = 0; // vertex, pixel and the other drawing stages
 	uint64_t compute_shaders  = 0;
+	uint64_t new_shaders      = 0; // translated in this run, not taken from the cache an earlier run saved
 	uint64_t pipelines        = 0;
-	uint64_t cached_pipelines = 0; // of `pipelines`, made from the cache an earlier run saved
+	uint64_t cached_pipelines = 0; // of `pipelines`, made from that cache
 	uint64_t saved_pipelines  = 0; // in the cache file
 };
 // The shaders and pipelines the emulator has made so far (window.cpp); none before the game's
@@ -47,16 +48,31 @@ struct FrameResolutions {
 };
 [[nodiscard]] FrameResolutions CurrentFrameResolutions();
 
-// The parts of the app's memory the overlay shows (window.cpp), in bytes: the game's memory in RAM, the part of it in the pager's swap file and the
-// swap file's bytes written and read back since the start (0 without the pager), and the GPU's memory (0 before the game's renderer exists).
+// The parts of the app's memory the overlay shows (window.cpp), in bytes: the game's memory in RAM, the part of it in the pager's swap file, the
+// swap file's bytes written and read back and the time the game waited for them since the start (0 and `pager` false without the pager), and the GPU's
+// memory (0 before the game's renderer exists).
 struct MemoryTotals {
-	uint64_t game        = 0;
-	uint64_t swapped     = 0;
-	uint64_t swapped_out = 0;
-	uint64_t swapped_in  = 0;
-	uint64_t gpu         = 0;
+	uint64_t game         = 0;
+	uint64_t swapped      = 0;
+	uint64_t swapped_out  = 0;
+	uint64_t swapped_in   = 0;
+	uint64_t swap_wait_ns = 0;
+	bool     pager        = false;
+	uint64_t gpu          = 0;
 };
 [[nodiscard]] MemoryTotals CurrentMemoryTotals();
+
+// The work the overlay shows (window.cpp), since the start: draws made, draws skipped as not supported (and the reason of the last one), the GPU's time,
+// the time spent compiling shaders and making pipelines, and the bytes the game read from its files.
+struct WorkTotals {
+	uint64_t    draws         = 0;
+	uint64_t    skipped_draws = 0;
+	const char* skip_reason   = nullptr;
+	uint64_t    gpu_ns        = 0;
+	uint64_t    compile_ns    = 0;
+	uint64_t    bytes_read    = 0;
+};
+[[nodiscard]] WorkTotals CurrentWorkTotals();
 
 // Runs the emulator on its own thread inside the app. The XAML page (UI thread) provides the panel
 // frames are presented to and reports its size; the emulator's window (window.cpp) presents to it
@@ -98,6 +114,8 @@ public:
 	// Any thread: the times between the last presented frames, in milliseconds, oldest first; at
 	// most `count` of them.
 	[[nodiscard]] std::vector<double> RecentFrameTimes(size_t count) const;
+	// Any thread: the frames presented since the start.
+	[[nodiscard]] uint64_t FramesPresented() const;
 	// Any thread: goes up when the emulator's log (LocalState\kyty-emulator.txt) starts anew.
 	[[nodiscard]] uint32_t LogGeneration() const { return m_log_generation.load(); }
 	// Any thread: how long the game has been running, in milliseconds (0 before it starts).
