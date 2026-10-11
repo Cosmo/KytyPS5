@@ -64,7 +64,7 @@ Saves, patches and trophies can live on the USB drive too: choose a folder under
 
 ## Settings
 
-The settings page (the gear at the top right) keeps its choices in `LocalState\kyty-uwp.json`, in categories, as the Xbox's own Settings: Display (TV resolution, V-Sync, the overlay: what it shows, its log and controllers, its size and log lines), User (name, console language), Controller (Impulse Triggers, haptics, the headset's speaker and microphone), Game folders, User Data Path, Memory and quality (game memory paging, compact GPU memory, video decoding, and the textures' detail, sharpness and filtering) and Developer (debug layer, detailed log, memory report, GPU crash diagnostics, keeping and removing compiled shaders). Each setting explains itself next to it. Game settings apply to the next game you start. A few settings for debugging exist only in the file (`src/uwp/src/settings.h`).
+The settings page (the gear at the top right) keeps its choices in `LocalState\kyty-uwp.json`, in categories, as the Xbox's own Settings: Display (TV resolution, V-Sync, the overlay: what it shows, how many log lines or none, its controllers, its size), User (name, console language), Controller (Impulse Triggers, haptics, the headset's speaker and microphone), Game folders, User Data Path, Memory and quality (game memory paging, compact GPU memory, video decoding, and the textures' detail, sharpness and filtering) and Developer (debug layer, detailed log, memory report, GPU crash diagnostics, keeping and removing compiled shaders). Each setting explains itself next to it. Game settings apply to the next game you start. A few settings for debugging exist only in the file (`src/uwp/src/settings.h`).
 
 ## Building
 
