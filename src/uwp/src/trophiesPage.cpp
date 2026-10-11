@@ -3,6 +3,7 @@
 #include "gameImages.h"
 #include "gameLibrary.h"
 #include "gameSource.h"
+#include "log.h"
 #include "settings.h"
 #include "xboxLook.h"
 
@@ -29,7 +30,10 @@
 #include <array>
 #include <ctime>
 #include <cwchar>
+#include <filesystem>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -140,42 +144,72 @@ winrt::Windows::UI::Color GradeColor(int grade) {
 	}
 }
 
-// The games of the last library scan that have trophy packages, by name (a background thread: it reads the games and the user data folder).
+// A game's trophy packages and unlocks, or nothing when it has none (a background thread: it reads the game and the user data folder).
+std::optional<GameTrophies> LoadGameTrophies(GameEntry game, int language, const std::filesystem::path& user_data) {
+	GameTrophies entry;
+	entry.game = std::move(game);
+	for (uint32_t label = 0; label < SERVICE_LABELS; label++) {
+		const auto inner = Trophies::PackagePath(label);
+		if (!GameFileExists(entry.game.folder / inner)) {
+			continue;
+		}
+		// Common::File reads a member of an archive by its virtual path.
+		const auto  path = IsArchivePath(entry.game.folder) ? Common::MakeArchivePath(entry.game.folder, inner) : entry.game.folder / inner;
+		GamePackage package;
+		package.label   = label;
+		package.package = Trophies::LoadPackage(path, language);
+		if (package.package.trophies.empty()) {
+			continue;
+		}
+		package.unlocks  = Trophies::LoadUnlockData(Trophies::UnlocksPath(user_data, entry.game.title_id, USER_ID, label));
+		package.progress = Trophies::GetProgress(package.package, package.unlocks);
+		for (size_t grade = 0; grade < entry.progress.total_grade.size(); grade++) {
+			entry.progress.total_grade[grade] += package.progress.total_grade[grade];
+			entry.progress.earned_grade[grade] += package.progress.earned_grade[grade];
+		}
+		entry.progress.total += package.progress.total;
+		entry.progress.earned += package.progress.earned;
+		entry.packages.push_back(std::move(package));
+	}
+	if (entry.packages.empty()) {
+		return std::nullopt;
+	}
+	return entry;
+}
+
+// The games of the last library scan that have trophy packages, by name (a background thread).
 std::vector<GameTrophies> LoadAllTrophies(int language) {
 	std::vector<GameTrophies> games;
 	const auto                user_data = UserDataFolder(LoadSettings());
 	for (auto& game: LoadGameLibrary()) {
-		GameTrophies entry;
-		entry.game = std::move(game);
-		for (uint32_t label = 0; label < SERVICE_LABELS; label++) {
-			const auto inner = Trophies::PackagePath(label);
-			if (!GameFileExists(entry.game.folder / inner)) {
-				continue;
-			}
-			// Common::File reads a member of an archive by its virtual path.
-			const auto  path = IsArchivePath(entry.game.folder) ? Common::MakeArchivePath(entry.game.folder, inner) : entry.game.folder / inner;
-			GamePackage package;
-			package.label   = label;
-			package.package = Trophies::LoadPackage(path, language);
-			if (package.package.trophies.empty()) {
-				continue;
-			}
-			package.unlocks  = Trophies::LoadUnlockData(Trophies::UnlocksPath(user_data, entry.game.title_id, USER_ID, label));
-			package.progress = Trophies::GetProgress(package.package, package.unlocks);
-			for (size_t grade = 0; grade < entry.progress.total_grade.size(); grade++) {
-				entry.progress.total_grade[grade] += package.progress.total_grade[grade];
-				entry.progress.earned_grade[grade] += package.progress.earned_grade[grade];
-			}
-			entry.progress.total += package.progress.total;
-			entry.progress.earned += package.progress.earned;
-			entry.packages.push_back(std::move(package));
-		}
-		if (!entry.packages.empty()) {
-			games.push_back(std::move(entry));
+		if (auto entry = LoadGameTrophies(std::move(game), language, user_data)) {
+			games.push_back(std::move(*entry));
 		}
 	}
 	std::sort(games.begin(), games.end(), [](const GameTrophies& a, const GameTrophies& b) { return a.game.name < b.game.name; });
 	return games;
+}
+
+// The trophies of the game with this title ID in the last library scan, reading only that game (a background thread).
+std::optional<GameTrophies> LoadTitleTrophies(const std::string& title_id, int language) {
+	for (auto& game: LoadGameLibrary()) {
+		if (game.title_id == title_id) {
+			return LoadGameTrophies(std::move(game), language, UserDataFolder(LoadSettings()));
+		}
+	}
+	return std::nullopt;
+}
+
+// The package and the id of the trophy with this name.
+std::optional<std::pair<size_t, int>> FindTrophy(const GameTrophies& entry, const std::string& name) {
+	for (size_t p = 0; p < entry.packages.size(); p++) {
+		for (const auto& [id, trophy]: entry.packages[p].package.trophies) {
+			if (trophy.name == name) {
+				return std::make_pair(p, id);
+			}
+		}
+	}
+	return std::nullopt;
 }
 
 xaml::Style TextStyle(const wchar_t* name) {
@@ -325,6 +359,10 @@ struct Page {
 	std::vector<GameTrophies>    games;
 	size_t                       open_game = 0;
 	Trophies::Progress           all; // of all games
+	// A trophy notification's link: the game's title ID and the trophy's name. `linked` while only that game is shown.
+	std::string                  link_title;
+	std::string                  link_trophy;
+	bool                         linked = false;
 	// The Unloaded handler holds the page while it is shown and lets it go then.
 	winrt::event_token          unloaded;
 
@@ -332,6 +370,7 @@ struct Page {
 	void ShowOverviewHeader();
 	void ShowGame(size_t index);
 	void FocusGame(size_t index) const;
+	void FocusTrophy(size_t package, int id) const;
 	void Back();
 };
 
@@ -423,8 +462,8 @@ void Page::FocusGame(size_t index) const {
 	}
 }
 
-// The details of a trophy (A on it); a hidden one that is not earned is masked until "Show hidden trophy".
-winrt::fire_and_forget ShowDetails(Trophies::Trophy trophy, bool earned, std::wstring earned_text) {
+// The details of a trophy (A on it); a hidden one that is not earned is masked until "Show hidden trophy". `closed` runs when they close.
+winrt::fire_and_forget ShowDetails(Trophies::Trophy trophy, bool earned, std::wstring earned_text, std::function<void()> closed = {}) {
 	xaml::Controls::ContentDialog dialog;
 	auto                          content = std::make_shared<xaml::Controls::StackPanel>();
 	content->Spacing(16);
@@ -500,7 +539,22 @@ winrt::fire_and_forget ShowDetails(Trophies::Trophy trophy, bool earned, std::ws
 			}
 		});
 	}
-	co_await dialog.ShowAsync();
+	// Only one dialog shows at a time: another one open (details already shown) makes this one fail.
+	try {
+		co_await dialog.ShowAsync();
+	} catch (const winrt::hresult_error& error) {
+		Log("trophy details: %ls\n", error.message().c_str());
+	}
+	if (closed) {
+		closed();
+	}
+}
+
+// The details of the trophy `id` of the game's package `package`.
+void ShowTrophyOf(const GameTrophies& entry, size_t package, int id, std::function<void()> closed = {}) {
+	const auto& unlocks = entry.packages[package].unlocks;
+	const bool  earned  = unlocks.unlocked.contains(id);
+	ShowDetails(entry.packages[package].package.trophies.at(id), earned, earned ? EarnedText(unlocks, id) : std::wstring(), std::move(closed));
 }
 
 void Page::ShowGame(size_t index) {
@@ -605,8 +659,26 @@ void Page::ShowGame(size_t index) {
 	trophy_list.Focus(xaml::FocusState::Keyboard);
 }
 
+// The trophy's row in the open game's list, scrolled to with the focus.
+void Page::FocusTrophy(size_t package, int id) const {
+	const uint32_t tag = (static_cast<uint32_t>(package) << 16u) | static_cast<uint32_t>(id);
+	for (uint32_t index = 0; index < trophy_list.Items().Size(); index++) {
+		const auto row = trophy_list.Items().GetAt(index).try_as<xaml::FrameworkElement>();
+		if (row == nullptr || row.Tag() == nullptr || winrt::unbox_value<uint32_t>(row.Tag()) != tag) {
+			continue;
+		}
+		trophy_list.ScrollIntoView(row);
+		trophy_list.UpdateLayout();
+		if (auto item = trophy_list.ContainerFromIndex(static_cast<int32_t>(index)).try_as<xaml::Controls::Control>()) {
+			item.Focus(xaml::FocusState::Keyboard);
+		}
+		return;
+	}
+}
+
 void Page::Back() {
-	if (trophy_list.Visibility() == xaml::Visibility::Visible) {
+	// A link shows only its game: from its list straight back.
+	if (trophy_list.Visibility() == xaml::Visibility::Visible && !linked) {
 		trophy_list.Visibility(xaml::Visibility::Collapsed);
 		trophy_list.Items().Clear();
 		games_list.Visibility(xaml::Visibility::Visible);
@@ -625,6 +697,27 @@ winrt::fire_and_forget LoadTrophies(std::shared_ptr<Page> page) {
 	const auto dispatcher = page->root.Dispatcher();
 	const int  language   = static_cast<int>(LoadSettings().console_language);
 	co_await winrt::resume_background();
+	// A link reads only its game: its list with the trophy's details open. Without that game, the whole page.
+	if (!page->link_title.empty()) {
+		auto entry = LoadTitleTrophies(page->link_title, language);
+		co_await winrt::resume_foreground(dispatcher);
+		if (page->left) {
+			co_return;
+		}
+		if (entry) {
+			page->linked = true;
+			page->games.push_back(std::move(*entry));
+			page->status.Visibility(xaml::Visibility::Collapsed);
+			page->ShowGame(0);
+			if (const auto found = FindTrophy(page->games[0], page->link_trophy)) {
+				page->FocusTrophy(found->first, found->second);
+				ShowTrophyOf(page->games[0], found->first, found->second);
+			}
+			co_return;
+		}
+		Log("trophy link: no trophies for %s in the library\n", page->link_title.c_str());
+		co_await winrt::resume_background();
+	}
 	auto games = LoadAllTrophies(language);
 	co_await winrt::resume_foreground(dispatcher);
 	if (page->left) {
@@ -636,9 +729,30 @@ winrt::fire_and_forget LoadTrophies(std::shared_ptr<Page> page) {
 
 } // namespace
 
-xaml::UIElement CreateTrophiesPage(std::function<void()> back) {
+void ShowTrophyDetails(std::string title_id, std::string trophy_name, std::function<void()> closed) {
+	[](std::string title_id, std::string trophy_name, std::function<void()> closed) -> winrt::fire_and_forget {
+		const auto dispatcher = xaml::Window::Current().Dispatcher();
+		const int  language   = static_cast<int>(LoadSettings().console_language);
+		co_await winrt::resume_background();
+		auto entry = LoadTitleTrophies(title_id, language);
+		co_await winrt::resume_foreground(dispatcher);
+		const auto found = entry ? FindTrophy(*entry, trophy_name) : std::nullopt;
+		if (!found) {
+			Log("trophy details: no trophy \"%s\" for %s\n", trophy_name.c_str(), title_id.c_str());
+			if (closed) {
+				closed();
+			}
+			co_return;
+		}
+		ShowTrophyOf(*entry, found->first, found->second, std::move(closed));
+	}(std::move(title_id), std::move(trophy_name), std::move(closed));
+}
+
+xaml::UIElement CreateTrophiesPage(std::function<void()> back, std::string title_id, std::string trophy_name) {
 	auto page  = std::make_shared<Page>();
 	page->back = std::move(back);
+	page->link_title  = std::move(title_id);
+	page->link_trophy = std::move(trophy_name);
 	page->root = xaml::Markup::XamlReader::Load(PageMarkup).as<xaml::Controls::Grid>();
 	const auto find   = [&page](const wchar_t* name) { return page->root.FindName(name); };
 	page->header_cover   = find(L"HeaderCover").as<xaml::Controls::Border>();
