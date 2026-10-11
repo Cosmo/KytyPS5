@@ -8,11 +8,14 @@
 
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <thread>
 #include <vector>
 
 struct ID3D12CommandAllocator;
+struct ID3D12QueryHeap;
+struct ID3D12Resource;
 
 namespace Libs::Graphics {
 
@@ -80,9 +83,20 @@ private:
 		uint64_t                     tick = 0;
 	};
 
+	// The GPU's time for each command list (WorkCounters::gpu_ns): a timestamp at its start and one at its end, read once its tick completed.
+	// A list submitted while all slots wait for their ticks goes untimed.
+	struct TimedList {
+		uint64_t tick = 0;
+		uint32_t slot = 0;
+	};
+	static constexpr uint32_t TimingSlots = 256;
+
 	void BeginNext();
 	void PriorityOperationsThread(std::stop_token stop);
 	void RunOperation(Common::UniqueFunction<void>&& operation);
+	void StartTiming();
+	void EndTiming();
+	void ReadTimings();
 
 	MasterSemaphore              m_master;
 	RenderContext&               m_context;
@@ -102,6 +116,13 @@ private:
 	bool                         m_priority_active      = false;
 	uint64_t                     m_priority_active_tick = 0;
 	OperationState               m_operation_state      = OperationState::Open;
+	ID3D12QueryHeap*             m_timestamps           = nullptr;
+	ID3D12Resource*              m_timestamp_results    = nullptr;
+	const uint64_t*              m_timestamp_values     = nullptr;
+	double                       m_ns_per_timestamp     = 0.0;
+	std::queue<TimedList>        m_timed_lists;
+	uint32_t                     m_next_timing_slot     = 0;
+	std::optional<uint32_t>      m_timing_slot; // the current list's
 };
 
 } // namespace Libs::Graphics
