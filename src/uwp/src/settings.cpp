@@ -77,6 +77,9 @@ AppSettings LoadSettings() {
 	read("guest_commit_limit_mb", settings.guest_commit_limit_mb);
 	read("texture_mip_skip", settings.texture_mip_skip);
 	read("texture_mip_skip_min_size", settings.texture_mip_skip_min_size);
+	read("texture_mip_skip_uncompressed", settings.texture_mip_skip_uncompressed);
+	read("texture_lod_bias", settings.texture_lod_bias);
+	read("anisotropic_filtering", settings.anisotropic_filtering);
 	read("frame_dump_after_s", settings.frame_dump_after_s);
 	read("frame_dump_snapshots", settings.frame_dump_snapshots);
 	read("gpu_memory_savings", settings.gpu_memory_savings);
@@ -119,6 +122,9 @@ void SaveSettings(const AppSettings& settings) {
 	json["guest_ram_budget_mb"]        = settings.guest_ram_budget_mb;
 	json["texture_mip_skip"]           = settings.texture_mip_skip;
 	json["texture_mip_skip_min_size"]  = settings.texture_mip_skip_min_size;
+	json["texture_mip_skip_uncompressed"] = settings.texture_mip_skip_uncompressed;
+	json["texture_lod_bias"]           = settings.texture_lod_bias;
+	json["anisotropic_filtering"]      = settings.anisotropic_filtering;
 	json["gpu_memory_savings"]         = settings.gpu_memory_savings;
 	json["video_decode_threads"]       = settings.video_decode_threads;
 	json["gpu_memory_log"]             = settings.gpu_memory_log;
