@@ -98,6 +98,8 @@ struct ConfigOptions {
 	bool                   skip_notice_screen          = false;
 	// Where the host keeps the fonts that stand in for the console's system fonts (Roboto); empty: the font library looks in the source tree.
 	std::filesystem::path font_folder;
+	// Where the user's data is kept: saves (_SaveData) and trophy unlocks (_Trophies); empty: the working directory.
+	std::filesystem::path user_data_folder;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	bool red_zone_protection_enabled = false;
 	// Debugging (D3D12 build): the shader limits of the Xbox's UWP games on any device (shader
@@ -220,6 +222,7 @@ uint32_t GetTrophyDurationSeconds();
 bool PlayGoHackEnabled();
 bool SkipNoticeScreen();
 std::filesystem::path FontFolder();
+std::filesystem::path UserDataFolder();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
 bool XboxGpuLimitsEnabled();
