@@ -355,17 +355,17 @@ bool File::CreateDirectories(const std::filesystem::path& path) {
     const auto normalized_path =
         WithoutTrailingSeparator(path);
 
-    auto current_path = normalized_path.root_path();
+    // From the end: a UWP app may not look at the folders above its own (C:\Users).
+    std::vector<std::filesystem::path> missing;
+    for (auto current_path = normalized_path;
+         current_path.has_relative_path() && !IsDirectoryExisting(current_path);
+         current_path = current_path.parent_path()) {
+        missing.push_back(current_path);
+    }
 
-    for (const auto& component:
-         normalized_path.relative_path()) {
-        current_path /= component;
-
-        if (IsDirectoryExisting(current_path)) {
-            continue;
-        }
-
-        if (!CreateDirectory(current_path)) {
+    for (auto it = missing.rbegin();
+         it != missing.rend(); ++it) {
+        if (!CreateDirectory(*it)) {
             return false;
         }
     }
