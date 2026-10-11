@@ -242,6 +242,18 @@ uint32_t TextureMipSkipMinSize() {
 	return g_config != nullptr ? g_config->texture_mip_skip_min_size : 2048;
 }
 
+bool TextureMipSkipUncompressed() {
+	return g_config != nullptr && g_config->texture_mip_skip_uncompressed;
+}
+
+uint32_t TextureLodBias() {
+	return g_config != nullptr ? g_config->texture_lod_bias : 0;
+}
+
+bool AnisotropicFiltering() {
+	return g_config == nullptr || g_config->anisotropic_filtering;
+}
+
 bool GpuMemorySavings() {
 	return g_config == nullptr || g_config->gpu_memory_savings;
 }
