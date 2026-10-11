@@ -14,6 +14,7 @@
 #include "trophiesPage.h"
 #include "controlsPage.h"
 #include "settings.h"
+#include "xboxLook.h"
 
 #include <windows.h>
 #include <fileapifromapp.h>
@@ -50,27 +51,6 @@ constexpr wchar_t GameMarkup[] = LR"xaml(
 <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Background="Black">
-  <Grid.Resources>
-    <!-- Controller hints, as in the launcher. -->
-    <Style x:Key="HintRingStyle" TargetType="Ellipse">
-      <Setter Property="Width" Value="20" />
-      <Setter Property="Height" Value="20" />
-      <Setter Property="Stroke" Value="#E6EAF0" />
-      <Setter Property="StrokeThickness" Value="1.5" />
-    </Style>
-    <Style x:Key="HintLetterStyle" TargetType="TextBlock">
-      <Setter Property="FontSize" Value="11" />
-      <Setter Property="FontWeight" Value="Bold" />
-      <Setter Property="TextLineBounds" Value="Tight" />
-      <Setter Property="HorizontalAlignment" Value="Center" />
-      <Setter Property="VerticalAlignment" Value="Center" />
-    </Style>
-    <Style x:Key="HintTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextBlockStyle}">
-      <Setter Property="VerticalAlignment" Value="Center" />
-      <Setter Property="Margin" Value="8,0,0,0" />
-    </Style>
-  </Grid.Resources>
-
   <SwapChainPanel x:Name="Panel" HorizontalAlignment="Center" VerticalAlignment="Center" />
   <Grid x:Name="Launch" Background="#0B0E14" IsHitTestVisible="False">
     <Grid.OpacityTransition><ScalarTransition Duration="0:0:0.5" /></Grid.OpacityTransition>
@@ -101,7 +81,7 @@ constexpr wchar_t GameMarkup[] = LR"xaml(
        it. -->
   <Grid x:Name="Menu" Visibility="Collapsed">
     <Rectangle Fill="{ThemeResource SystemControlPageBackgroundMediumAltMediumBrush}" />
-    <Grid Width="320" HorizontalAlignment="Left" Padding="24,32,24,24"
+    <Grid Width="320" HorizontalAlignment="Left" Padding="24,32,24,32"
           Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />
@@ -125,22 +105,7 @@ constexpr wchar_t GameMarkup[] = LR"xaml(
                    Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" Visibility="Collapsed"
                    Text="Saving, then back to the library..." />
       </StackPanel>
-      <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="24">
-        <StackPanel Orientation="Horizontal">
-          <Grid>
-            <Ellipse Style="{StaticResource HintRingStyle}" />
-            <TextBlock Text="A" Foreground="#7CC24D" Style="{StaticResource HintLetterStyle}" />
-          </Grid>
-          <TextBlock Text="Select" Style="{StaticResource HintTextStyle}" />
-        </StackPanel>
-        <StackPanel Orientation="Horizontal">
-          <Grid>
-            <Ellipse Style="{StaticResource HintRingStyle}" />
-            <TextBlock Text="B" Foreground="#E5553F" Style="{StaticResource HintLetterStyle}" />
-          </Grid>
-          <TextBlock Text="Back" Style="{StaticResource HintTextStyle}" />
-        </StackPanel>
-      </StackPanel>
+      <Border x:Name="MenuHints" Grid.Row="3" Style="{StaticResource HintBarStyle}" />
     </Grid>
   </Grid>
 </Grid>)xaml";
@@ -250,7 +215,7 @@ std::optional<GameProblem> CheckGame(const std::filesystem::path& game) {
 		return GameProblem {L"No game in this folder", L"The folder has no eboot.bin."};
 	}
 	return GameProblem {L"The game can't be read",
-	                    winrt::hstring(L"Windows error ") +
+	                    winrt::hstring(L"Error code ") +
 	                        winrt::to_hstring(static_cast<uint32_t>(error))};
 }
 
@@ -297,6 +262,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, winrt::hstring const& title
 	auto menu   = page.FindName(L"Menu").as<xaml::UIElement>();
 	auto items  = page.FindName(L"MenuItems").as<xaml::Controls::ListView>();
 	auto status = page.FindName(L"MenuStatus").as<xaml::UIElement>();
+	SetHints(page.FindName(L"MenuHints").as<xaml::Controls::Border>(), {{XboxButton::A, L"Select"}, {XboxButton::B, L"Back"}});
 
 	// The overlay goes under the menu, over the launch screen: its log shows the start too.
 	uint32_t menu_index = 0;
@@ -545,6 +511,7 @@ void App::Show(winrt::hstring const& activation_arguments) {
 	StartInput();
 	if (!m_resources_loaded) {
 		Resources().MergedDictionaries().Append(winrt::Microsoft::UI::Xaml::Controls::XamlControlsResources());
+		Resources().MergedDictionaries().Append(XboxLookResources());
 		m_resources_loaded = true;
 	}
 	auto window = xaml::Window::Current();
