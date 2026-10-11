@@ -32,6 +32,16 @@ LIB_NAME("libkernel", "libkernel");
 constexpr int      DESCRIPTOR_MIN = 3;
 constexpr uint64_t DIR_BLOCK_SIZE = 512;
 
+static std::atomic<uint64_t> g_bytes_read {0};
+
+uint64_t BytesRead() {
+	return g_bytes_read.load(std::memory_order_relaxed);
+}
+
+void AddBytesRead(uint64_t bytes) {
+	g_bytes_read.fetch_add(bytes, std::memory_order_relaxed);
+}
+
 enum class SpecialFile {
 	None,
 	Random,
@@ -664,6 +674,7 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	                         std::min<uint64_t>(nbytes, remaining));
 	uint32_t bytes_read = 0;
 	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
+	AddBytesRead(bytes_read);
 
 	file->mutex.Unlock();
 
@@ -795,6 +806,7 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	uint32_t bytes_read = 0;
 	file->f.Seek(offset);
 	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
+	AddBytesRead(bytes_read);
 	file->f.Seek(pos);
 
 	file->mutex.Unlock();
@@ -897,6 +909,7 @@ int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, in
 		Memory::InvalidateMemory(reinterpret_cast<uint64_t>(buffer.iov_base), count);
 		uint32_t bytes = 0;
 		file->f.Read(buffer.iov_base, count, &bytes);
+		AddBytesRead(bytes);
 		bytes_read += bytes;
 		remaining -= bytes;
 		if (bytes < count) {
