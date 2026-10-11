@@ -1311,17 +1311,22 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 }
 
 // Low quality: how many of its finest mip levels the host image of a texture leaves out. Only sampled, block-compressed 2D textures with a long mip chain qualify: they
-// cannot be render targets or storage images, and nothing but samplers reads them (a guest that fetches or measures them by texel sees the smaller host image).
+// cannot be render targets or storage images, and nothing but samplers reads them (a guest that fetches or measures them by texel sees the smaller host image). With
+// texture_mip_skip_uncompressed uncompressed ones too: render targets have no such mip chain.
 static uint8_t HostMipSkip(const TextureCache::ImageDesc& desc) {
-	const uint32_t skip = Config::TextureMipSkip();
-	const auto&    info = desc.info;
-	if (skip == 0 || skip > 3 || desc.type != TextureCache::BindingType::Texture || !info.IsBlock() || info.samples != 1 || info.IsVolume() || info.HasMetadata() ||
-	    info.IsDepth() || info.type != Prospero::ImageType::kColor2D || info.resources.levels < skip + 4 || info.extent.depth != 1) {
+	const uint32_t skip  = Config::TextureMipSkip();
+	const auto&    info  = desc.info;
+	const bool     block = info.IsBlock();
+	if (skip == 0 || skip > 4 || desc.type != TextureCache::BindingType::Texture || (!block && !Config::TextureMipSkipUncompressed()) || info.samples != 1 ||
+	    info.IsVolume() || info.HasMetadata() || info.IsDepth() || info.type != Prospero::ImageType::kColor2D || info.resources.levels < skip + 4 ||
+	    info.extent.depth != 1) {
 		return 0;
 	}
-	const uint32_t size = std::max(info.extent.width, info.extent.height);
-	if (size < Config::TextureMipSkipMinSize() || ((info.extent.width >> skip) & 3u) != 0 || ((info.extent.height >> skip) & 3u) != 0 || (info.extent.width >> skip) == 0 ||
-	    (info.extent.height >> skip) == 0) {
+	// Block-compressed levels stay whole blocks.
+	const uint32_t align = block ? 3u : 0u;
+	const uint32_t size  = std::max(info.extent.width, info.extent.height);
+	if (size < Config::TextureMipSkipMinSize() || ((info.extent.width >> skip) & align) != 0 || ((info.extent.height >> skip) & align) != 0 ||
+	    (info.extent.width >> skip) == 0 || (info.extent.height >> skip) == 0) {
 		return 0;
 	}
 	return static_cast<uint8_t>(skip);
