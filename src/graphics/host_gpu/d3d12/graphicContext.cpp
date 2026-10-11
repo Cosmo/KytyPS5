@@ -474,9 +474,21 @@ void GraphicContext::LogAllocatorMemory() const {
 		                   s.Stats.AllocationCount != 0 ? s.AllocationSizeMax >> 20u : 0);
 	};
 	const auto info = LocalMemory(adapter);
-	Log::WriteToConsoleAndLog(fmt::format(
-	    "GPU memory: usage {} MB, budget {} MB; default {}; upload {}; readback {}; custom {}\n",
-	    info.CurrentUsage >> 20u, info.Budget >> 20u, heap(0), heap(1), heap(2), heap(3)));
+	// What a person reads, when the usage moved by 50 MB or more since it was last written.
+	static std::atomic<uint64_t> last_written {0};
+	const uint64_t               written = last_written.load();
+	if ((info.CurrentUsage > written ? info.CurrentUsage - written : written - info.CurrentUsage) >= (uint64_t {50} << 20u)) {
+		last_written.store(info.CurrentUsage);
+		const auto& images = stats.HeapType[0].Stats;
+		Log::WriteToConsoleAndLog(fmt::format("GPU: {} MB of {} MB; {} MB in {} textures and buffers\n", info.CurrentUsage >> 20u, info.Budget >> 20u,
+		                                      images.AllocationBytes >> 20u, images.AllocationCount));
+	}
+	// Everything, with the developer setting's memory report.
+	if (Config::GpuMemoryLog()) {
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "GPU memory: usage {} MB, budget {} MB; default {}; upload {}; readback {}; custom {}\n",
+		    info.CurrentUsage >> 20u, info.Budget >> 20u, heap(0), heap(1), heap(2), heap(3)));
+	}
 }
 
 uint64_t GraphicContext::GetDeviceMemoryUsage() const {
