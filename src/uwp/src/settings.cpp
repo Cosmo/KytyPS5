@@ -66,6 +66,9 @@ AppSettings LoadSettings() {
 	read("d3d12_selftest", settings.d3d12_selftest);
 	read("overlay_size", settings.overlay_size);
 	read("overlay_log_lines", settings.overlay_log_lines);
+	read("overlay_detail", settings.overlay_detail);
+	read("overlay_log", settings.overlay_log);
+	read("overlay_controllers", settings.overlay_controllers);
 	read("xbox_gpu_limits", settings.xbox_gpu_limits);
 	read("xbox_limits_dxil_parts", settings.xbox_limits_dxil_parts);
 	read("dump_pipeline", settings.dump_pipeline);
@@ -119,6 +122,9 @@ void SaveSettings(const AppSettings& settings) {
 	json["d3d12_selftest"]   = settings.d3d12_selftest;
 	json["overlay_size"]     = settings.overlay_size;
 	json["overlay_log_lines"] = settings.overlay_log_lines;
+	json["overlay_detail"]      = settings.overlay_detail;
+	json["overlay_log"]         = settings.overlay_log;
+	json["overlay_controllers"] = settings.overlay_controllers;
 	json["guest_ram_budget_mb"]        = settings.guest_ram_budget_mb;
 	json["texture_mip_skip"]           = settings.texture_mip_skip;
 	json["texture_mip_skip_min_size"]  = settings.texture_mip_skip_min_size;
