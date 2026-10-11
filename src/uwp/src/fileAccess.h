@@ -18,15 +18,19 @@ namespace Kyty::Uwp {
 // Why the app may not list `folder` (a Windows error, also logged), or 0 when it may: it exists
 // and grants the app read access.
 [[nodiscard]] uint32_t ListError(const std::filesystem::path& folder);
-// Waits (up to 2 seconds) while game folders deny access: the Xbox gives a starting app access
-// to its USB drives a few hundred milliseconds late. The log says when it waits and for how long,
-// and names a folder that still cannot be opened.
+// Why the app may not write in `folder` (a Windows error), or 0 when it may: a test file is made
+// there and deleted again.
+[[nodiscard]] uint32_t WriteError(const std::filesystem::path& folder);
+// Waits (up to 2 seconds) while game folders and the user data folder deny access: the Xbox gives
+// a starting app access to its USB drives a few hundred milliseconds late. The log says when it
+// waits and for how long, and names a folder that still cannot be opened.
 void WaitForGameFolders();
 // Whether the app runs on an Xbox, where game folders are on a drive set up on a PC.
 [[nodiscard]] bool IsXbox();
-// The command that gives UWP apps (ALL APPLICATION PACKAGES) read access to `folder`. On the
-// Xbox it is for a PC with the drive plugged in, where the drive's letter is unknown: X:.
-[[nodiscard]] std::wstring GrantCommand(std::filesystem::path folder);
+// The command that gives UWP apps (ALL APPLICATION PACKAGES) read access to `folder`, or write
+// access too. On the Xbox it is for a PC with the drive plugged in, where the drive's letter is
+// unknown: X:.
+[[nodiscard]] std::wstring GrantCommand(std::filesystem::path folder, bool write = false);
 // The subfolders of `folder`; empty when it can't be listed.
 [[nodiscard]] std::vector<std::filesystem::path> Subfolders(const std::filesystem::path& folder);
 
