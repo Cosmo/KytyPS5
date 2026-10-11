@@ -63,8 +63,8 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 	m_dispatcher = core::CoreWindow::GetForCurrentThread().Dispatcher();
 	Log("starting %ls\n", game_dir.c_str());
 
-	// The emulator writes its data folders (_SaveData, ...) relative to the working directory, and its messages to stdout and stderr: both go to
-	// LocalState.
+	// The emulator writes its own data folders (_PipelineCache, ...) relative to the working directory, and its messages to stdout and stderr:
+	// both go to LocalState. The user's data (saves, patches, trophies) goes to the user data folder.
 	const std::wstring local_state(winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path());
 	if (!SetCurrentDirectoryW(local_state.c_str())) {
 		Log("could not change to LocalState: %lu\n", GetLastError());
@@ -75,18 +75,29 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 	}
 	m_log_generation++;
 
-	// The game's patches, as with the desktop launcher's _Patches folder: LocalState\_Patches\<title ID>.json.
+	// The settings page's choices (LocalState\kyty-uwp.json).
+	const auto settings = LoadSettings();
+
+	// The user data folder; LocalState when the chosen one cannot be opened (a USB drive that is not plugged in).
+	auto user_data = UserDataFolder(settings);
+	if (!settings.user_data_path.empty()) {
+		if (ListError(user_data) != 0) {
+			Log("the user data folder %ls cannot be opened: saves, patches and trophies are in LocalState this time\n", user_data.c_str());
+			user_data = local_state;
+		} else {
+			Log("user data: %ls\n", user_data.c_str());
+		}
+	}
+
+	// The game's patches, as with the desktop launcher's _Patches folder: <user data>\_Patches\<title ID>.json.
 	std::filesystem::path game_patch;
 	if (const auto title_id = ReadGame(game_dir).title_id; !title_id.empty()) {
-		const auto patch = std::filesystem::path(local_state) / L"_Patches" / (winrt::to_hstring(title_id) + L".json").c_str();
+		const auto patch = user_data / L"_Patches" / (winrt::to_hstring(title_id) + L".json").c_str();
 		if (IsFile(patch)) {
 			game_patch = patch;
 			Log("patches: %ls\n", patch.c_str());
 		}
 	}
-
-	// The settings page's choices (LocalState\kyty-uwp.json).
-	const auto settings = LoadSettings();
 	SetControllerOptions({settings.impulse_triggers, settings.haptic_rumble, settings.headset_speaker, settings.headset_mic});
 	if (settings.headset_mic) {
 		RequestMicrophoneAccess();
@@ -96,7 +107,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 	Libs::LibKernel::Memory::SetAddressCollisionHandler(
 	    [](uint64_t start, uint64_t size) { EmulatorHost::Get().RestartForAddressCollision(start, size); });
 
-	m_thread = std::thread([this, game_dir = std::move(game_dir), game_patch, settings] {
+	m_thread = std::thread([this, game_dir = std::move(game_dir), game_patch, settings, user_data] {
 		// The emulator's main thread: the window logic runs here, not on the UI thread.
 		Common::VirtualMemory::Init();
 		Common::InitializeThreads();
@@ -121,6 +132,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.printf_direction          = settings.game_output ? Config::LogDirection::Console : Config::LogDirection::Silent;
 		// The fonts that stand in for the console's system fonts come with the package (uwp.cmake).
 		config.font_folder = std::filesystem::path(std::wstring(winrt::Windows::ApplicationModel::Package::Current().InstalledLocation().Path())) / L"fonts";
+		config.user_data_folder = user_data;
 		// The guest uses instructions only AMD CPUs have: on another CPU the emulator patches them (its --amd-cpu option).
 		config.amd_cpu_enabled = !IsAmdCpu();
 		// Guest memory is committed on first touch, so a fault can come inside any guest function, and its exception frame must not land on the
