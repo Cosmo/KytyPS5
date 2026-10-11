@@ -16,6 +16,9 @@ namespace Kyty::Uwp {
 struct AppSettings {
 	// Searched for games besides LocalState\Games, which needs no setup.
 	std::vector<std::filesystem::path> game_folders;
+	// The settings page, User Data Path: where saves (_SaveData), patches (_Patches) and trophies (_Trophies) are kept, for one on a USB
+	// drive. Empty: LocalState.
+	std::filesystem::path user_data_path;
 	uint32_t                           screen_width  = 1280; // the games' output resolution
 	uint32_t                           screen_height = 720;
 	bool                               vsync         = false;
@@ -83,6 +86,9 @@ struct AppSettings {
 };
 [[nodiscard]] AppSettings LoadSettings();
 void                      SaveSettings(const AppSettings& settings);
+
+// The folder of the user's data: AppSettings::user_data_path, or LocalState when none is set.
+[[nodiscard]] std::filesystem::path UserDataFolder(const AppSettings& settings);
 
 // The folders games are searched in: LocalState\Games, then AppSettings::game_folders.
 [[nodiscard]] std::vector<std::filesystem::path> GameFolders();
