@@ -154,6 +154,9 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.guest_commit_limit_mb       = settings.guest_commit_limit_mb;
 		config.texture_mip_skip            = settings.texture_mip_skip;
 		config.texture_mip_skip_min_size   = settings.texture_mip_skip_min_size;
+		config.texture_mip_skip_uncompressed = settings.texture_mip_skip_uncompressed;
+		config.texture_lod_bias            = settings.texture_lod_bias;
+		config.anisotropic_filtering       = settings.anisotropic_filtering;
 		config.gpu_memory_savings          = settings.gpu_memory_savings;
 		config.video_decode_threads        = settings.video_decode_threads;
 		config.gpu_memory_log              = settings.gpu_memory_log;
