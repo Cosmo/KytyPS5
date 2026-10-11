@@ -109,13 +109,9 @@ To install next to another build of the app, give this one other names: `$env:KY
 
 `uwp.ps1 package` makes an installable package of the build: the signed `<name>_<version>_x64.msix` and, in `Dependencies`, the framework packages it needs (VCLibs from the Windows SDK, WinUI 2.8). Every package gets a newer version, so it installs over the previous one.
 
-Packages are signed with a certificate for `CN=KytyPS5` (the manifest's publisher) from your user certificate store. Create one once, in PowerShell:
+Packages are signed with `src/uwp/KytyPS5-signing.pfx`, a self-signed test key for `CN=KytyPS5` (the manifest's publisher) that is public on purpose, as in other Dev Mode projects: a self-signed certificate vouches for nobody, and with one shared key every build, from any machine or from GitHub, installs over the previous one and keeps the app's data. The Xbox in Dev Mode installs such packages without the certificate. The version is the time of packaging in UTC.
 
-```
-New-SelfSignedCertificate -Type Custom -Subject "CN=KytyPS5" -KeyUsage DigitalSignature `
-  -FriendlyName "KytyPS5 package signing" -CertStoreLocation "Cert:\CurrentUser\My" `
-  -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
-```
+**Builds on GitHub.** The workflow `.github/workflows/xbox.yml` (Actions > Xbox build > Run workflow) builds the package of a branch on GitHub's Windows runner, with every dependency above, and publishes it as a pre-release with the install steps: `KytyPS5-Xbox-<version>.zip`, the `.msix` and its `Dependencies`. It builds Mesa's `spirv_to_dxil` on its first run and keeps it until `3rdparty/spirv_to_dxil` changes.
 
 To install the first time, open the Xbox Device Portal (the address Dev Home shows), then **Add**: choose the `.msix`, add both packages from `Dependencies`, and start. After that, `uwp.ps1` works with the Xbox through the Device Portal's REST API:
 
