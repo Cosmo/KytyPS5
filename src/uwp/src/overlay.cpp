@@ -22,7 +22,9 @@
 #include <cmath>
 #include <cstdio>
 #include <deque>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -38,6 +40,11 @@ constexpr size_t GRAPH_FRAMES    = 120;
 constexpr double GRAPH_MAX_MS = 50.0;
 // The log lines kept; the settings choose how many of them show (overlay_log_lines, at least 2).
 constexpr size_t LOG_LINES    = 20;
+// The rates and the values per frame are over at least this many seconds.
+constexpr double RATE_SECONDS = 1.0;
+// The rows of the swap file in the statistics (OverlayMarkup): its group and its row in Waiting, and the gap above the group.
+constexpr std::array<int32_t, 4> SWAP_ROWS {15, 16, 17, 28};
+constexpr uint32_t               SWAP_GAP_ROW = 14;
 
 constexpr wchar_t OverlayMarkup[] = LR"xaml(
 <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -72,10 +79,13 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
         <Line x:Name="Budget" Stroke="#40FFFFFF" StrokeThickness="1" StrokeDashArray="3,3" />
         <Polyline x:Name="Frames" Stroke="#7CC24D" StrokeThickness="1.5" />
       </Grid>
-      <!-- Groups, labels, values; a gap between the groups. -->
-      <Grid ColumnSpacing="12">
+      <!-- Groups, labels, values; a gap between the groups. The rates and the values per frame are over the last second. -->
+      <Grid x:Name="Statistics" ColumnSpacing="12">
         <Grid.Resources>
-          <Style TargetType="TextBlock" BasedOn="{StaticResource CaptionTextBlockStyle}" />
+          <Style TargetType="TextBlock" BasedOn="{StaticResource CaptionTextBlockStyle}">
+            <Setter Property="TextWrapping" Value="NoWrap" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+          </Style>
         </Grid.Resources>
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="Auto" />
@@ -85,54 +95,94 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
         <Grid.RowDefinitions>
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
-          <RowDefinition Height="8" />
-          <RowDefinition Height="Auto" />
-          <RowDefinition Height="Auto" />
-          <RowDefinition Height="Auto" />
-          <RowDefinition Height="Auto" />
-          <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
           <RowDefinition Height="8" />
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
           <RowDefinition Height="8" />
           <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="8" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="8" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="8" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="8" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="8" />
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
+        <TextBlock Grid.Row="0" Text="Frame" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="4" Text="Resolution" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="7" Text="System" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="10" Text="RAM" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="15" Text="Swap file" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="19" Text="Shaders" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="23" Text="Pipelines" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="27" Text="Waiting" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <!-- Draws made per frame; draws skipped per frame as not supported here (with the last reason); the GPU's time per frame. -->
+        <TextBlock Grid.Row="0" Grid.Column="1" Text="Draws" />
+        <TextBlock Grid.Row="1" Grid.Column="1" Text="Skipped" />
+        <TextBlock Grid.Row="2" Grid.Column="1" Text="GPU time" />
         <!-- Output: the picture the game hands over each frame; Render: the largest viewport it draws its scene into. -->
-        <TextBlock Grid.Row="0" Text="Resolution" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="3" Text="System" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="10" Text="Shaders" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="13" Text="Pipelines" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="0" Grid.Column="1" Text="Output" />
-        <TextBlock Grid.Row="1" Grid.Column="1" Text="Render" />
-        <TextBlock Grid.Row="3" Grid.Column="1" Text="CPU" />
-        <TextBlock Grid.Row="4" Grid.Column="1" Text="RAM" />
-        <!-- The parts of RAM: the game's memory in RAM, the part of it in the swap file, the GPU's memory (in RAM on the Xbox, on the graphics card on a
-             PC) and the rest (the emulator and the app). -->
-        <TextBlock Grid.Row="5" Grid.Column="1" Text="  Game" />
-        <TextBlock Grid.Row="6" Grid.Column="1" Text="  Swapped" />
-        <TextBlock Grid.Row="7" Grid.Column="1" Text="  GPU" />
-        <TextBlock Grid.Row="8" Grid.Column="1" Text="  Other" />
-        <TextBlock Grid.Row="10" Grid.Column="1" Text="Drawing" />
-        <TextBlock Grid.Row="11" Grid.Column="1" Text="Compute" />
-        <TextBlock Grid.Row="13" Grid.Column="1" Text="Built" />
-        <TextBlock Grid.Row="14" Grid.Column="1" Text="From cache" />
-        <TextBlock Grid.Row="15" Grid.Column="1" Text="In cache" />
-        <TextBlock x:Name="OutputResolution" Grid.Row="0" Grid.Column="2" Typography.NumeralAlignment="Tabular" />
-        <TextBlock x:Name="RenderResolution" Grid.Row="1" Grid.Column="2" Typography.NumeralAlignment="Tabular" />
-        <TextBlock x:Name="Cpu" Grid.Row="3" Grid.Column="2" />
-        <TextBlock x:Name="Memory" Grid.Row="4" Grid.Column="2" />
-        <TextBlock x:Name="GameMemory" Grid.Row="5" Grid.Column="2" />
-        <TextBlock x:Name="SwappedMemory" Grid.Row="6" Grid.Column="2" />
-        <TextBlock x:Name="GpuMemory" Grid.Row="7" Grid.Column="2" />
-        <TextBlock x:Name="OtherMemory" Grid.Row="8" Grid.Column="2" />
-        <TextBlock x:Name="DrawingShaders" Grid.Row="10" Grid.Column="2" />
-        <TextBlock x:Name="ComputeShaders" Grid.Row="11" Grid.Column="2" />
-        <TextBlock x:Name="Pipelines" Grid.Row="13" Grid.Column="2" />
-        <TextBlock x:Name="CachedPipelines" Grid.Row="14" Grid.Column="2" />
-        <TextBlock x:Name="SavedPipelines" Grid.Row="15" Grid.Column="2" />
+        <TextBlock Grid.Row="4" Grid.Column="1" Text="Output" />
+        <TextBlock Grid.Row="5" Grid.Column="1" Text="Render" />
+        <TextBlock Grid.Row="7" Grid.Column="1" Text="CPU" />
+        <TextBlock Grid.Row="8" Grid.Column="1" Text="Disk" />
+        <!-- RAM in use and its parts: the game's memory in RAM, the GPU's memory (in RAM on the Xbox, on the graphics card on a PC) and the rest (the
+             emulator and the app). -->
+        <TextBlock Grid.Row="10" Grid.Column="1" Text="Used" />
+        <TextBlock Grid.Row="11" Grid.Column="1" Text="Game" />
+        <TextBlock Grid.Row="12" Grid.Column="1" Text="GPU" />
+        <TextBlock Grid.Row="13" Grid.Column="1" Text="Other" />
+        <!-- The game's memory in the swap file (not in RAM), written to it and read back from it. -->
+        <TextBlock Grid.Row="15" Grid.Column="1" Text="Size" />
+        <TextBlock Grid.Row="16" Grid.Column="1" Text="Out" />
+        <TextBlock Grid.Row="17" Grid.Column="1" Text="In" />
+        <!-- The game's shaders so far, and the shaders translated in this run (not taken from the cache an earlier run saved). -->
+        <TextBlock Grid.Row="19" Grid.Column="1" Text="Drawing" />
+        <TextBlock Grid.Row="20" Grid.Column="1" Text="Compute" />
+        <TextBlock Grid.Row="21" Grid.Column="1" Text="New" />
+        <!-- The pipelines this run made, those of them not made from the cache, and the cache file's. -->
+        <TextBlock Grid.Row="23" Grid.Column="1" Text="This run" />
+        <TextBlock Grid.Row="24" Grid.Column="1" Text="New" />
+        <TextBlock Grid.Row="25" Grid.Column="1" Text="In cache" />
+        <!-- The time per second the work stood still for compiling shaders and making pipelines, and for the swap file. -->
+        <TextBlock Grid.Row="27" Grid.Column="1" Text="Compiling" />
+        <TextBlock Grid.Row="28" Grid.Column="1" Text="Swap file" />
+        <TextBlock x:Name="Draws" Grid.Row="0" Grid.Column="2" />
+        <TextBlock x:Name="Skipped" Grid.Row="1" Grid.Column="2" />
+        <TextBlock x:Name="GpuTime" Grid.Row="2" Grid.Column="2" />
+        <TextBlock x:Name="OutputResolution" Grid.Row="4" Grid.Column="2" Typography.NumeralAlignment="Tabular" />
+        <TextBlock x:Name="RenderResolution" Grid.Row="5" Grid.Column="2" Typography.NumeralAlignment="Tabular" />
+        <TextBlock x:Name="Cpu" Grid.Row="7" Grid.Column="2" />
+        <TextBlock x:Name="Disk" Grid.Row="8" Grid.Column="2" />
+        <TextBlock x:Name="Memory" Grid.Row="10" Grid.Column="2" />
+        <TextBlock x:Name="GameMemory" Grid.Row="11" Grid.Column="2" />
+        <TextBlock x:Name="GpuMemory" Grid.Row="12" Grid.Column="2" />
+        <TextBlock x:Name="OtherMemory" Grid.Row="13" Grid.Column="2" />
+        <TextBlock x:Name="SwappedMemory" Grid.Row="15" Grid.Column="2" />
+        <TextBlock x:Name="SwapOut" Grid.Row="16" Grid.Column="2" />
+        <TextBlock x:Name="SwapIn" Grid.Row="17" Grid.Column="2" />
+        <TextBlock x:Name="DrawingShaders" Grid.Row="19" Grid.Column="2" />
+        <TextBlock x:Name="ComputeShaders" Grid.Row="20" Grid.Column="2" />
+        <TextBlock x:Name="NewShaders" Grid.Row="21" Grid.Column="2" />
+        <TextBlock x:Name="Pipelines" Grid.Row="23" Grid.Column="2" />
+        <TextBlock x:Name="NewPipelines" Grid.Row="24" Grid.Column="2" />
+        <TextBlock x:Name="SavedPipelines" Grid.Row="25" Grid.Column="2" />
+        <TextBlock x:Name="CompileWait" Grid.Row="27" Grid.Column="2" />
+        <TextBlock x:Name="SwapWait" Grid.Row="28" Grid.Column="2" />
       </Grid>
     </StackPanel>
   </Border>
@@ -302,19 +352,29 @@ struct GameOverlay::State {
 	xaml::Controls::Grid       graph {nullptr};
 	xaml::Shapes::Line         budget {nullptr};
 	xaml::Shapes::Polyline     frames {nullptr};
+	xaml::Controls::Grid       statistics {nullptr};
+	xaml::Controls::TextBlock  draws {nullptr};
+	xaml::Controls::TextBlock  skipped {nullptr};
+	xaml::Controls::TextBlock  gpu_time {nullptr};
 	xaml::Controls::TextBlock  output_resolution {nullptr};
 	xaml::Controls::TextBlock  render_resolution {nullptr};
+	xaml::Controls::TextBlock  cpu {nullptr};
+	xaml::Controls::TextBlock  disk {nullptr};
 	xaml::Controls::TextBlock  memory {nullptr};
 	xaml::Controls::TextBlock  game_memory {nullptr};
-	xaml::Controls::TextBlock  swapped_memory {nullptr};
 	xaml::Controls::TextBlock  gpu_memory {nullptr};
 	xaml::Controls::TextBlock  other_memory {nullptr};
-	xaml::Controls::TextBlock  cpu {nullptr};
+	xaml::Controls::TextBlock  swapped_memory {nullptr};
+	xaml::Controls::TextBlock  swap_out {nullptr};
+	xaml::Controls::TextBlock  swap_in {nullptr};
 	xaml::Controls::TextBlock  drawing_shaders {nullptr};
 	xaml::Controls::TextBlock  compute_shaders {nullptr};
+	xaml::Controls::TextBlock  new_shaders {nullptr};
 	xaml::Controls::TextBlock  pipelines {nullptr};
-	xaml::Controls::TextBlock  cached_pipelines {nullptr};
+	xaml::Controls::TextBlock  new_pipelines {nullptr};
 	xaml::Controls::TextBlock  saved_pipelines {nullptr};
+	xaml::Controls::TextBlock  compile_wait {nullptr};
+	xaml::Controls::TextBlock  swap_wait {nullptr};
 	xaml::Controls::Grid       controllers {nullptr};
 	xaml::Controls::TextBlock  log {nullptr};
 	size_t                     log_lines = LOG_LINES;
@@ -324,12 +384,19 @@ struct GameOverlay::State {
 	// The process's CPU time (100 ns units) and the time, at the last update.
 	uint64_t                              cpu_time = 0;
 	std::chrono::steady_clock::time_point cpu_time_at;
-	// The swap file's bytes written and read back since the start, and the time, at the last update.
-	uint64_t                              swapped_out = 0;
-	uint64_t                              swapped_in  = 0;
-	std::chrono::steady_clock::time_point swapped_at;
+	// The totals at the start of the second the rates and the values per frame are over.
+	struct Sample {
+		std::chrono::steady_clock::time_point time;
+		uint64_t                              frames = 0;
+		WorkTotals                            work;
+		MemoryTotals                          memory;
+	};
+	std::optional<Sample> sample;
+	bool                  swap_shown = true;
 
 	void Update();
+	void UpdateRates(const MemoryTotals& totals);
+	void ShowSwapFile(bool shown);
 };
 
 void GameOverlay::State::Update() {
@@ -380,21 +447,14 @@ void GameOverlay::State::Update() {
 
 	// Its parts. The GPU's memory is part of RAM on the Xbox; on a PC it is on the graphics card, so the rest is RAM minus the game's memory there.
 	const auto totals = CurrentMemoryTotals();
-	const auto now    = std::chrono::steady_clock::now();
 	game_memory.Text(Megabytes(totals.game));
-	std::wstring swapped = Megabytes(totals.swapped);
-	if (swapped_at != std::chrono::steady_clock::time_point {} && totals.swapped_out >= swapped_out && totals.swapped_in >= swapped_in) {
-		const double seconds = std::chrono::duration<double>(now - swapped_at).count();
-		const auto   rate    = [seconds](uint64_t bytes) { return std::to_wstring(std::lround(static_cast<double>(bytes) / 1048576.0 / std::max(seconds, 0.001))); };
-		swapped += L"  (out " + rate(totals.swapped_out - swapped_out) + L", in " + rate(totals.swapped_in - swapped_in) + L" MB/s)";
-	}
-	swapped_memory.Text(swapped);
-	swapped_out = totals.swapped_out;
-	swapped_in  = totals.swapped_in;
-	swapped_at  = now;
 	gpu_memory.Text(Megabytes(totals.gpu) + (IsXbox() ? std::wstring() : std::wstring(L" (graphics card)")));
 	const uint64_t parts = totals.game + (IsXbox() ? totals.gpu : 0);
 	other_memory.Text(Megabytes(used > parts ? used - parts : 0));
+	// The swap file, where there is one (the pager: by default on the Xbox only).
+	ShowSwapFile(totals.pager);
+	swapped_memory.Text(Megabytes(totals.swapped));
+	UpdateRates(totals);
 
 	// CPU: the process's share of all processor cores since the last update.
 	FILETIME created {}, exited {}, kernel {}, user {};
@@ -418,8 +478,9 @@ void GameOverlay::State::Update() {
 	if (const auto statistics = CurrentShaderStatistics()) {
 		drawing_shaders.Text(std::to_wstring(statistics->drawing_shaders));
 		compute_shaders.Text(std::to_wstring(statistics->compute_shaders));
+		new_shaders.Text(std::to_wstring(statistics->new_shaders));
 		pipelines.Text(std::to_wstring(statistics->pipelines));
-		cached_pipelines.Text(std::to_wstring(statistics->cached_pipelines));
+		new_pipelines.Text(std::to_wstring(statistics->pipelines - std::min(statistics->cached_pipelines, statistics->pipelines)));
 		saved_pipelines.Text(std::to_wstring(statistics->saved_pipelines));
 	}
 
@@ -476,6 +537,68 @@ void GameOverlay::State::Update() {
 	log.Text(text);
 }
 
+// The rates and the values per frame, over the last second (they stay until the next second is over).
+void GameOverlay::State::UpdateRates(const MemoryTotals& totals) {
+	const Sample current {std::chrono::steady_clock::now(), EmulatorHost::Get().FramesPresented(), CurrentWorkTotals(), totals};
+	if (!sample) {
+		sample = current;
+		return;
+	}
+	const double seconds = std::chrono::duration<double>(current.time - sample->time).count();
+	if (seconds < RATE_SECONDS) {
+		return;
+	}
+	const auto& before        = *sample;
+	const auto  delta         = [](uint64_t now, uint64_t then) { return now > then ? now - then : 0; };
+	const auto  mb_per_second = [seconds](uint64_t bytes) {
+		return std::to_wstring(std::lround(static_cast<double>(bytes) / 1048576.0 / seconds)) + L" MB/s";
+	};
+	const auto ms_per_second = [seconds](uint64_t ns) { return std::to_wstring(std::lround(static_cast<double>(ns) / 1e6 / seconds)) + L" ms/s"; };
+
+	// Per frame: none when no frame came in that second (the game loads, or waits).
+	const uint64_t frames = delta(current.frames, before.frames);
+	if (frames == 0) {
+		draws.Text(L"–");
+		skipped.Text(L"–");
+		gpu_time.Text(L"–");
+	} else {
+		const auto per_frame = [frames](uint64_t value) { return static_cast<double>(value) / static_cast<double>(frames); };
+		draws.Text(std::to_wstring(std::lround(per_frame(delta(current.work.draws, before.work.draws)))));
+		const uint64_t skips = delta(current.work.skipped_draws, before.work.skipped_draws);
+		std::wstring   skip_text = skips == 0 ? L"0" : per_frame(skips) < 0.5 ? L"<1" : std::to_wstring(std::lround(per_frame(skips)));
+		if (skips != 0 && current.work.skip_reason != nullptr) {
+			const std::string_view reason = current.work.skip_reason;
+			skip_text += L"  (" + std::wstring(reason.begin(), reason.end()) + L")";
+		}
+		skipped.Text(skip_text);
+		wchar_t text[32];
+		swprintf_s(text, L"%.1f ms", per_frame(delta(current.work.gpu_ns, before.work.gpu_ns)) / 1e6);
+		gpu_time.Text(text);
+	}
+	disk.Text(mb_per_second(delta(current.work.bytes_read, before.work.bytes_read)) + L" read");
+	swap_out.Text(mb_per_second(delta(totals.swapped_out, before.memory.swapped_out)));
+	swap_in.Text(mb_per_second(delta(totals.swapped_in, before.memory.swapped_in)));
+	compile_wait.Text(ms_per_second(delta(current.work.compile_ns, before.work.compile_ns)));
+	swap_wait.Text(ms_per_second(delta(totals.swap_wait_ns, before.memory.swap_wait_ns)));
+	sample = current;
+}
+
+// The swap file's group and its row in Waiting, shown only where there is a swap file.
+void GameOverlay::State::ShowSwapFile(bool shown) {
+	if (shown == swap_shown) {
+		return;
+	}
+	swap_shown            = shown;
+	const auto visibility = shown ? xaml::Visibility::Visible : xaml::Visibility::Collapsed;
+	for (const auto& child: statistics.Children()) {
+		const auto row = xaml::Controls::Grid::GetRow(child.as<xaml::FrameworkElement>());
+		if (std::find(SWAP_ROWS.begin(), SWAP_ROWS.end(), row) != SWAP_ROWS.end()) {
+			child.Visibility(visibility);
+		}
+	}
+	statistics.RowDefinitions().GetAt(SWAP_GAP_ROW).Height(xaml::GridLengthHelper::FromPixels(shown ? 8.0 : 0.0));
+}
+
 GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
                          winrt::hstring const& game_name)
     : m_state(std::make_shared<State>()) {
@@ -489,19 +612,29 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.graph            = find(L"Graph").as<xaml::Controls::Grid>();
 	state.budget           = find(L"Budget").as<xaml::Shapes::Line>();
 	state.frames           = find(L"Frames").as<xaml::Shapes::Polyline>();
+	state.statistics        = find(L"Statistics").as<xaml::Controls::Grid>();
+	state.draws             = find(L"Draws").as<xaml::Controls::TextBlock>();
+	state.skipped           = find(L"Skipped").as<xaml::Controls::TextBlock>();
+	state.gpu_time          = find(L"GpuTime").as<xaml::Controls::TextBlock>();
 	state.output_resolution = find(L"OutputResolution").as<xaml::Controls::TextBlock>();
 	state.render_resolution = find(L"RenderResolution").as<xaml::Controls::TextBlock>();
-	state.memory           = find(L"Memory").as<xaml::Controls::TextBlock>();
-	state.game_memory      = find(L"GameMemory").as<xaml::Controls::TextBlock>();
-	state.swapped_memory   = find(L"SwappedMemory").as<xaml::Controls::TextBlock>();
-	state.gpu_memory       = find(L"GpuMemory").as<xaml::Controls::TextBlock>();
-	state.other_memory     = find(L"OtherMemory").as<xaml::Controls::TextBlock>();
-	state.cpu              = find(L"Cpu").as<xaml::Controls::TextBlock>();
-	state.drawing_shaders  = find(L"DrawingShaders").as<xaml::Controls::TextBlock>();
-	state.compute_shaders  = find(L"ComputeShaders").as<xaml::Controls::TextBlock>();
-	state.pipelines        = find(L"Pipelines").as<xaml::Controls::TextBlock>();
-	state.cached_pipelines = find(L"CachedPipelines").as<xaml::Controls::TextBlock>();
-	state.saved_pipelines  = find(L"SavedPipelines").as<xaml::Controls::TextBlock>();
+	state.cpu               = find(L"Cpu").as<xaml::Controls::TextBlock>();
+	state.disk              = find(L"Disk").as<xaml::Controls::TextBlock>();
+	state.memory            = find(L"Memory").as<xaml::Controls::TextBlock>();
+	state.game_memory       = find(L"GameMemory").as<xaml::Controls::TextBlock>();
+	state.gpu_memory        = find(L"GpuMemory").as<xaml::Controls::TextBlock>();
+	state.other_memory      = find(L"OtherMemory").as<xaml::Controls::TextBlock>();
+	state.swapped_memory    = find(L"SwappedMemory").as<xaml::Controls::TextBlock>();
+	state.swap_out          = find(L"SwapOut").as<xaml::Controls::TextBlock>();
+	state.swap_in           = find(L"SwapIn").as<xaml::Controls::TextBlock>();
+	state.drawing_shaders   = find(L"DrawingShaders").as<xaml::Controls::TextBlock>();
+	state.compute_shaders   = find(L"ComputeShaders").as<xaml::Controls::TextBlock>();
+	state.new_shaders       = find(L"NewShaders").as<xaml::Controls::TextBlock>();
+	state.pipelines         = find(L"Pipelines").as<xaml::Controls::TextBlock>();
+	state.new_pipelines     = find(L"NewPipelines").as<xaml::Controls::TextBlock>();
+	state.saved_pipelines   = find(L"SavedPipelines").as<xaml::Controls::TextBlock>();
+	state.compile_wait      = find(L"CompileWait").as<xaml::Controls::TextBlock>();
+	state.swap_wait         = find(L"SwapWait").as<xaml::Controls::TextBlock>();
 	state.controllers      = find(L"Controllers").as<xaml::Controls::Grid>();
 	state.log              = find(L"Log").as<xaml::Controls::TextBlock>();
 	page.Children().InsertAt(index, state.root);
