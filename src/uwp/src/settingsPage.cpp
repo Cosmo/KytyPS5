@@ -122,6 +122,17 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
       <StackPanel x:Name="Folders" Spacing="8" />
       <Button x:Name="AddFolder" Content="Add folder" />
 
+      <TextBlock Text="User Data Path" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,0" />
+      <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Where saves, patches and trophies are kept (the folders _SaveData, _Patches and _Trophies), for example on a USB drive. What is in the app's folder already is not moved: copy those folders over yourself." />
+      <TextBlock x:Name="UserDataPath" TextWrapping="Wrap" />
+      <TextBlock x:Name="UserDataStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button x:Name="ChooseUserData" Content="Choose folder" />
+        <Button x:Name="ResetUserData" Content="Use the app's folder" />
+      </StackPanel>
+
       <TextBlock Text="Memory and quality" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,24,0,0" />
       <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
@@ -178,9 +189,38 @@ struct SettingsState {
 	bool                                      left            = false;
 	std::function<void(bool)>                 back;
 	xaml::Controls::StackPanel                folders {nullptr};
+	xaml::Controls::TextBlock                 user_data_path {nullptr};
+	xaml::Controls::TextBlock                 user_data_status {nullptr};
 };
 
 void ListFolders(const std::shared_ptr<SettingsState>& state);
+
+// The user data folder, and whether the app may write in it (with the command that allows it where it may not).
+void ShowUserData(const std::shared_ptr<SettingsState>& state) {
+	auto path = state->settings.user_data_path;
+	if (path.empty()) {
+		state->user_data_path.Text(L"The app's own folder");
+		state->user_data_status.Text(L"");
+		return;
+	}
+	state->user_data_path.Text(path.make_preferred().wstring());
+	const auto error = WriteError(path);
+	state->user_data_status.Text(error == 0 ? std::wstring(L"Writable")
+	                                        : L"Can't be written (Windows error " + std::to_wstring(error) +
+	                                              L"). On a PC with the drive plugged in, run as administrator: " + GrantCommand(path, true));
+}
+
+winrt::fire_and_forget ChooseUserData(std::shared_ptr<SettingsState> state) {
+	winrt::Windows::Storage::Pickers::FolderPicker picker;
+	picker.FileTypeFilter().Append(L"*");
+	const auto folder = co_await picker.PickSingleFolderAsync();
+	if (folder == nullptr || folder.Path().empty()) {
+		co_return;
+	}
+	state->settings.user_data_path = std::wstring(folder.Path());
+	SaveSettings(state->settings);
+	ShowUserData(state);
+}
 
 winrt::fire_and_forget AddFolder(std::shared_ptr<SettingsState> state) {
 	winrt::Windows::Storage::Pickers::FolderPicker picker;
@@ -426,6 +466,16 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	page.FindName(L"AddFolder")
 .as<xaml::Controls::Button>().Click(
 	    [state](auto const&, auto const&) { AddFolder(state); });
+
+	state->user_data_path   = page.FindName(L"UserDataPath").as<xaml::Controls::TextBlock>();
+	state->user_data_status = page.FindName(L"UserDataStatus").as<xaml::Controls::TextBlock>();
+	ShowUserData(state);
+	page.FindName(L"ChooseUserData").as<xaml::Controls::Button>().Click([state](auto const&, auto const&) { ChooseUserData(state); });
+	page.FindName(L"ResetUserData").as<xaml::Controls::Button>().Click([state](auto const&, auto const&) {
+		state->settings.user_data_path.clear();
+		SaveSettings(state->settings);
+		ShowUserData(state);
+	});
 
 	auto debug_layer = page.FindName(L"DebugLayer").as<xaml::Controls::ToggleSwitch>();
 	debug_layer.IsOn(settings.debug_layer);
