@@ -1,0 +1,165 @@
+name: Xbox build
+
+# Builds the UWP app's package for the Xbox Series X|S in Developer Mode (src/uwp/README.md) and publishes it as a pre-release
+# with the install steps. It runs only when started: Actions > Xbox build > Run workflow, on a branch.
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish the package as a pre-release (otherwise it is only a download of this run)
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  xbox:
+    name: Xbox package
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      # The patches are applied to files exactly as they are in the repository.
+      - name: Git settings
+        run: git config --global core.autocrlf false
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Everything the build downloads or makes lives outside the checkout, which stays clean (a build from a changed tree keeps no
+      # pipeline cache).
+      - name: Folders
+        run: |
+          $deps = "$env:RUNNER_TEMP\deps"
+          New-Item -ItemType Directory "$deps\nuget" -Force | Out-Null
+          "KYTY_DEPS=$deps" >> $env:GITHUB_ENV
+          "KYTY_UWP_BUILD=$env:RUNNER_TEMP\uwp" >> $env:GITHUB_ENV
+          "KYTY_SPIRV_TO_DXIL_ROOT=$deps\spirv_to_dxil" >> $env:GITHUB_ENV
+          "KYTY_WINPTHREAD_DLL=C:\msys64\ucrt64\bin\libwinpthread-1.dll" >> $env:GITHUB_ENV
+
+      - name: Cache spirv_to_dxil
+        id: spirv-to-dxil-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\deps\spirv_to_dxil
+          key: spirv_to_dxil-windows-2025-vs2026-${{ hashFiles('3rdparty/spirv_to_dxil/*') }}
+
+      # Mesa's spirv_to_dxil with Kyty's patch, as 3rdparty/spirv_to_dxil/README.md describes (the commit is taken from there).
+      - name: Build spirv_to_dxil
+        if: steps.spirv-to-dxil-cache.outputs.cache-hit != 'true'
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $commit = [regex]::Match((Get-Content 3rdparty\spirv_to_dxil\README.md -Raw), 'commit `([0-9a-f]{40})`').Groups[1].Value
+          if (-not $commit) { throw 'no Mesa commit in 3rdparty/spirv_to_dxil/README.md' }
+          $mesa = "$env:RUNNER_TEMP\mesa"
+          git init -q $mesa
+          git -C $mesa fetch -q --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git $commit
+          git -C $mesa checkout -q FETCH_HEAD
+          git -C $mesa apply "$env:GITHUB_WORKSPACE\3rdparty\spirv_to_dxil\spirv_to_dxil.patch"
+          python -m pip install --quiet meson==1.12.1 mako pyyaml packaging
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          & "$vs\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation | Out-Null
+          meson setup "$mesa\build" $mesa --backend=ninja -Dbuildtype=release `
+            -Db_ndebug=true -Db_vscrt=mt -Dplatforms=windows -Dgallium-drivers= -Dvulkan-drivers=microsoft-experimental `
+            -Dspirv-to-dxil=true -Dllvm=disabled -Dglx=disabled -Degl=disabled -Dgbm=disabled `
+            -Dopengl=false -Dgles1=disabled -Dgles2=disabled -Dspirv-tools=disabled -Dbuild-tests=false `
+            -Dvideo-codecs= -Dmin-windows-version=10 -Dzlib=disabled -Dzstd=disabled
+          ninja -C "$mesa\build" src/microsoft/spirv_to_dxil/spirv_to_dxil.dll
+          $root = $env:KYTY_SPIRV_TO_DXIL_ROOT
+          New-Item -ItemType Directory "$root\include", "$root\lib", "$root\bin" -Force | Out-Null
+          Copy-Item "$mesa\src\microsoft\spirv_to_dxil\spirv_to_dxil.h", "$mesa\src\microsoft\compiler\dxil_versions.h" "$root\include"
+          Copy-Item "$mesa\build\src\microsoft\spirv_to_dxil\spirv_to_dxil.lib" "$root\lib"
+          Copy-Item "$mesa\build\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll" "$root\bin"
+
+      - name: WinUI 2 packages
+        run: |
+          foreach ($package in @(@('Microsoft.UI.Xaml', '2.8.7'), @('Microsoft.Web.WebView2', '1.0.2849.39'))) {
+            $name, $version = $package
+            $zip = "$env:RUNNER_TEMP\$name.$version.zip"
+            Invoke-WebRequest "https://www.nuget.org/api/v2/package/$name/$version" -OutFile $zip
+            Expand-Archive $zip "$env:KYTY_DEPS\nuget\$($name.ToLower()).$version"
+          }
+
+      # The UCRT build of libwinpthread-1.dll, from the MSYS2 that the runner has.
+      - name: libwinpthread
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          C:\msys64\usr\bin\bash.exe -lc 'pacman -Sy --noconfirm --needed mingw-w64-ucrt-x86_64-libwinpthread'
+          if (-not (Test-Path $env:KYTY_WINPTHREAD_DLL)) { throw "missing $env:KYTY_WINPTHREAD_DLL" }
+
+      - name: Locate vcpkg
+        id: vcpkg
+        run: |
+          $port = Get-FileHash "$env:VCPKG_INSTALLATION_ROOT\ports\glslang\vcpkg.json" -Algorithm SHA256
+          "port_hash=$($port.Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Cache glslang
+        id: glslang-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed\x64-windows
+          key: glslang-windows-2025-vs2026-${{ steps.vcpkg.outputs.port_hash }}-tools-opt
+
+      - name: glslang
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ('${{ steps.glslang-cache.outputs.cache-hit }}' -ne 'true') { vcpkg install glslang[tools,opt]:x64-windows }
+          "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\tools\glslang" >> $env:GITHUB_PATH
+
+      - name: Configure
+        run: .\src\uwp\uwp.ps1 configure
+
+      - name: Build
+        run: .\src\uwp\uwp.ps1 build
+
+      - name: Package
+        id: package
+        run: |
+          .\src\uwp\uwp.ps1 package
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $out = "$env:KYTY_UWP_BUILD\uwp-package"
+          $msix = Get-Item "$out\*.msix"
+          $version = [regex]::Match($msix.Name, '_(\d+\.\d+\.\d+\.\d+)_x64\.msix$').Groups[1].Value
+          $zip = "$env:RUNNER_TEMP\KytyPS5-Xbox-$version.zip"
+          Compress-Archive -Path $msix.FullName, "$out\Dependencies" -DestinationPath $zip
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: KytyPS5-Xbox-${{ steps.package.outputs.version }}
+          path: ${{ runner.temp }}\uwp\uwp-package\
+          if-no-files-found: error
+
+      - name: Release
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.package.outputs.version }}
+          ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $source = "https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA"
+          $notes = @"
+          An experimental build of KytyPS5 for the Xbox Series X|S in Developer Mode, from ``$env:GITHUB_REF_NAME`` at $env:GITHUB_SHA. What it changes and what does not work yet: [XBOX_CHANGES.md]($source/XBOX_CHANGES.md).
+
+          It needs a Series X or S. The Xbox One can't run it: the app needs AVX2.
+
+          **Install**
+          1. Unzip ``KytyPS5-Xbox-$env:VERSION.zip`` on a PC.
+          2. Open the Xbox Device Portal (the address Dev Home shows) and choose **Add**.
+          3. Pick the ``.msix``, add both files from ``Dependencies``, and start the install.
+          4. In Dev Home, set the app's type to **Game** for the larger memory budget.
+          5. Put your games on a USB drive: [Setting up your games folder]($source/src/uwp/README.md#setting-up-your-games-folder).
+
+          Each build installs over the previous one and keeps the app's data. The package is signed with ``src/uwp/KytyPS5-signing.pfx``, a test key that is public on purpose.
+          "@
+          Set-Content "$env:RUNNER_TEMP\notes.md" $notes -Encoding utf8NoBOM
+          gh release create "xbox-$env:VERSION" $env:ZIP --target $env:GITHUB_SHA --prerelease --title "KytyPS5 for Xbox $env:VERSION" --notes-file "$env:RUNNER_TEMP\notes.md"
