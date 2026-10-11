@@ -2,6 +2,8 @@
 
 #include "fileAccess.h"
 #include "input.h"
+#include "overlay.h"
+#include "settingTiles.h"
 #include "settings.h"
 #include "xboxLook.h"
 
@@ -133,7 +135,11 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
       </Grid.ColumnDefinitions>
       <ScrollViewer x:Name="Panels" VerticalScrollBarVisibility="Hidden" Padding="0,0,0,16">
         <Grid>
-          <StackPanel x:Name="Display" Width="219" Spacing="8" />
+          <!-- In two groups, as the Xbox groups a page's settings in columns. -->
+          <StackPanel x:Name="Display" Orientation="Horizontal" Spacing="36">
+            <StackPanel x:Name="PictureGroup" Width="219" Spacing="8" />
+            <StackPanel x:Name="OverlayGroup" Width="219" Spacing="8" />
+          </StackPanel>
 
           <StackPanel x:Name="User" Width="219" Spacing="8" Visibility="Collapsed">
             <TextBox x:Name="UserName" Header="User name" MaxLength="16" />
@@ -175,164 +181,6 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
   </Grid>
   <Border x:Name="Hints" Grid.Row="2" Style="{StaticResource HintBarStyle}" Margin="48,16,48,0" />
 </Grid>)xaml";
-
-// The tiles of the Xbox's Settings, in effective pixels (measured at 1920x1080): 219 wide, at least 48 high, #303030 (#444444 with the focus),
-// the text 11 from the left edge, 8 between tiles. A check box is 16.
-constexpr double TILE_MIN_HEIGHT = 48;
-constexpr double CHECK_BOX_SIZE  = 16;
-// In Segoe MDL2 Assets.
-constexpr wchar_t CHEVRON_DOWN[] = {0xE70D, 0};
-constexpr wchar_t CHECK_MARK[]   = {0xE73E, 0};
-
-// A setting as a tile of the Xbox's Settings: its name, and its current value under it with a chevron (A opens the choices) or a check box at
-// its right (A turns it over).
-struct SettingTile {
-	xaml::Controls::Button    button {nullptr};
-	xaml::Controls::TextBlock value {nullptr};
-	xaml::UIElement           check {nullptr};
-};
-
-enum class TileKind { Choice, Switch };
-
-xaml::Style AppStyle(const wchar_t* key) {
-	return xaml::Application::Current().Resources().Lookup(winrt::box_value(key)).as<xaml::Style>();
-}
-
-// An explanation: short paragraphs, what the setting does first, then what it costs or when to change it.
-using Paragraphs = std::vector<std::wstring>;
-
-// Shows the paragraphs as the page's explanation, next to the tiles.
-void ShowExplanation(xaml::Controls::StackPanel const& explanation, const Paragraphs& paragraphs) {
-	explanation.Children().Clear();
-	for (const auto& paragraph: paragraphs) {
-		xaml::Controls::TextBlock text;
-		text.Style(xaml::Application::Current().Resources().Lookup(winrt::box_value(L"BodyTextBlockStyle")).as<xaml::Style>());
-		text.TextWrapping(xaml::TextWrapping::Wrap);
-		text.Text(paragraph);
-		explanation.Children().Append(text);
-	}
-}
-
-// Shows the explanation while `control` has the focus.
-void Explain(xaml::Controls::Control const& control, xaml::Controls::StackPanel const& explanation, Paragraphs paragraphs) {
-	control.GotFocus([explanation, paragraphs = std::move(paragraphs)](auto const&, auto const&) { ShowExplanation(explanation, paragraphs); });
-}
-
-SettingTile MakeTile(const wchar_t* name, TileKind kind) {
-	const xaml::Media::SolidColorBrush normal(winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x30, 0x30, 0x30));
-	const xaml::Media::SolidColorBrush focused(winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x44, 0x44, 0x44));
-	SettingTile                        tile;
-	tile.button = xaml::Controls::Button();
-	tile.button.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
-	tile.button.HorizontalContentAlignment(xaml::HorizontalAlignment::Stretch);
-	tile.button.VerticalContentAlignment(xaml::VerticalAlignment::Center);
-	tile.button.MinHeight(TILE_MIN_HEIGHT);
-	tile.button.Padding(xaml::ThicknessHelper::FromLengths(11, 8, 11, 8));
-	tile.button.CornerRadius(xaml::CornerRadiusHelper::FromUniformRadius(0));
-	tile.button.BorderThickness(xaml::ThicknessHelper::FromUniformLength(0));
-	tile.button.Background(normal);
-	tile.button.GotFocus([button = tile.button, focused](auto const&, auto const&) { button.Background(focused); });
-	tile.button.LostFocus([button = tile.button, normal](auto const&, auto const&) { button.Background(normal); });
-
-	xaml::Controls::Grid content;
-	content.ColumnSpacing(12);
-	content.ColumnDefinitions().Append(xaml::Controls::ColumnDefinition());
-	xaml::Controls::ColumnDefinition right_column;
-	right_column.Width(xaml::GridLengthHelper::Auto());
-	content.ColumnDefinitions().Append(right_column);
-	xaml::Controls::StackPanel text;
-	text.VerticalAlignment(xaml::VerticalAlignment::Center);
-	xaml::Controls::TextBlock title;
-	title.Style(AppStyle(L"BodyTextBlockStyle"));
-	title.Text(name);
-	title.TextWrapping(xaml::TextWrapping::Wrap);
-	text.Children().Append(title);
-	if (kind == TileKind::Choice) {
-		tile.value = xaml::Controls::TextBlock();
-		tile.value.Style(AppStyle(L"BodyTextBlockStyle"));
-		tile.value.TextWrapping(xaml::TextWrapping::Wrap);
-		tile.value.Foreground(
-		    xaml::Application::Current().Resources().Lookup(winrt::box_value(L"SystemControlForegroundBaseMediumBrush")).as<xaml::Media::Brush>());
-		text.Children().Append(tile.value);
-	}
-	content.Children().Append(text);
-
-	xaml::Controls::FontIcon icon;
-	icon.FontFamily(xaml::Media::FontFamily(L"Segoe MDL2 Assets"));
-	icon.VerticalAlignment(xaml::VerticalAlignment::Center);
-	if (kind == TileKind::Choice) {
-		icon.Glyph(CHEVRON_DOWN);
-		icon.FontSize(12);
-		xaml::Controls::Grid::SetColumn(icon, 1);
-		content.Children().Append(icon);
-	} else {
-		// A check box: a white square, with a check mark while the setting is on.
-		xaml::Controls::Border box;
-		box.Width(CHECK_BOX_SIZE);
-		box.Height(CHECK_BOX_SIZE);
-		box.BorderThickness(xaml::ThicknessHelper::FromUniformLength(1));
-		box.BorderBrush(xaml::Media::SolidColorBrush(winrt::Windows::UI::Colors::White()));
-		box.VerticalAlignment(xaml::VerticalAlignment::Center);
-		icon.Glyph(CHECK_MARK);
-		icon.FontSize(11);
-		icon.HorizontalAlignment(xaml::HorizontalAlignment::Center);
-		box.Child(icon);
-		tile.check = icon;
-		xaml::Controls::Grid::SetColumn(box, 1);
-		content.Children().Append(box);
-	}
-	tile.button.Content(content);
-	return tile;
-}
-
-// A heading over a group of tiles.
-void AddHeading(xaml::Controls::Panel const& panel, const wchar_t* text) {
-	xaml::Controls::TextBlock heading;
-	heading.Style(AppStyle(L"BodyTextBlockStyle"));
-	heading.Text(text);
-	heading.Margin(xaml::ThicknessHelper::FromLengths(0, 0, 0, 4));
-	panel.Children().Append(heading);
-}
-
-// A setting with choices: A opens them, the current one checked; `chosen` gets the new one's index.
-void AddChoice(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, const wchar_t* name, std::vector<std::wstring> choices,
-               size_t selected, std::function<void(size_t)> chosen, Paragraphs help = {}) {
-	auto tile = MakeTile(name, TileKind::Choice);
-	tile.value.Text(selected < choices.size() ? winrt::hstring(choices[selected]) : winrt::hstring());
-	auto current = std::make_shared<size_t>(selected);
-	tile.button.Click([button = tile.button, value = tile.value, choices = std::move(choices), current, chosen = std::move(chosen)](auto const&, auto const&) {
-		xaml::Controls::MenuFlyout flyout;
-		for (size_t index = 0; index < choices.size(); index++) {
-			xaml::Controls::ToggleMenuFlyoutItem item;
-			item.Text(choices[index]);
-			item.IsChecked(index == *current);
-			item.Click([index, value, current, chosen, text = choices[index]](auto const&, auto const&) {
-				*current = index;
-				value.Text(text);
-				chosen(index);
-			});
-			flyout.Items().Append(item);
-		}
-		flyout.ShowAt(button);
-	});
-	Explain(tile.button, explanation, help);
-	panel.Children().Append(tile.button);
-}
-
-// A setting that is on or off: A turns it over; `changed` gets the new state.
-void AddSwitch(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, const wchar_t* name, bool on,
-               std::function<void(bool)> changed, Paragraphs help = {}) {
-	auto tile = MakeTile(name, TileKind::Switch);
-	tile.check.Opacity(on ? 1.0 : 0.0);
-	auto state = std::make_shared<bool>(on);
-	tile.button.Click([check = tile.check, state, changed = std::move(changed)](auto const&, auto const&) {
-		*state = !*state;
-		check.Opacity(*state ? 1.0 : 0.0);
-		changed(*state);
-	});
-	Explain(tile.button, explanation, help);
-	panel.Children().Append(tile.button);
-}
 
 struct SettingsState {
 	AppSettings                               settings = LoadSettings();
@@ -463,7 +311,10 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	const auto explanation = page.FindName(L"Explanation").as<xaml::Controls::StackPanel>();
 
 	// Display.
-	const auto display = panel(L"Display");
+	const auto display       = panel(L"PictureGroup");
+	const auto overlay_group = panel(L"OverlayGroup");
+	AddHeading(display, L"Picture");
+	AddHeading(overlay_group, L"Overlay");
 	{
 		std::vector<std::wstring> names;
 		for (const auto& resolution: RESOLUTIONS) {
@@ -490,14 +341,8 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    {L"On: each frame waits for the display's next refresh. Smooth, with a little more delay.",
 	     L"Off: the newest frame shows at the next refresh and older ones are skipped. Less delay.",
 	     L"Games run at up to 60 frames a second either way."});
-	AddChoice(
-	    display, explanation, L"Overlay size", {L"Small", L"Medium", L"Large"}, std::min<uint32_t>(settings.overlay_size, 2),
-	    [state, save](size_t index) {
-		    state->settings.overlay_size = static_cast<uint32_t>(index);
-		    save();
-	    },
-	    {L"The size of the statistics overlay over games.",
-	     L"To show or hide it, pull both triggers while pressing View and Menu together. The game menu, opened with View and Menu, can do it too."});
+	// The same tiles as in the game menu's Settings.
+	AddOverlaySettings(overlay_group, explanation, std::shared_ptr<AppSettings>(state, &state->settings), save);
 	// 2 to 20 lines (the overlay keeps the last 20).
 	{
 		std::vector<std::wstring> lines;
@@ -505,7 +350,7 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 			lines.push_back(std::to_wstring(count) + L" lines");
 		}
 		AddChoice(
-		    display, explanation, L"Log lines in the overlay", std::move(lines), std::clamp<uint32_t>(settings.overlay_log_lines, 2, 20) - 2,
+		    overlay_group, explanation, L"Log lines in the overlay", std::move(lines), std::clamp<uint32_t>(settings.overlay_log_lines, 2, 20) - 2,
 		    [state, save](size_t index) {
 			    state->settings.overlay_log_lines = static_cast<uint32_t>(index) + 2;
 			    save();
