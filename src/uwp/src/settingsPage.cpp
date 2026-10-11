@@ -343,20 +343,6 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	     L"Games run at up to 60 frames a second either way."});
 	// The same tiles as in the game menu's Settings.
 	AddOverlaySettings(overlay_group, explanation, std::shared_ptr<AppSettings>(state, &state->settings), save);
-	// 2 to 20 lines (the overlay keeps the last 20).
-	{
-		std::vector<std::wstring> lines;
-		for (uint32_t count = 2; count <= 20; count++) {
-			lines.push_back(std::to_wstring(count) + L" lines");
-		}
-		AddChoice(
-		    overlay_group, explanation, L"Log lines in the overlay", std::move(lines), std::clamp<uint32_t>(settings.overlay_log_lines, 2, 20) - 2,
-		    [state, save](size_t index) {
-			    state->settings.overlay_log_lines = static_cast<uint32_t>(index) + 2;
-			    save();
-		    },
-		    {L"How many of the latest log lines the overlay shows, from 2 to 20."});
-	}
 
 	// Controller.
 	const auto controller = panel(L"Controller");
