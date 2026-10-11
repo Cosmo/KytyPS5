@@ -1,6 +1,7 @@
 #include "loader/gamePatch.h"
 
 #include "common/assert.h"
+#include "common/file.h"
 #include "common/stringUtils.h"
 #include "common/virtualMemory.h"
 #include "kernel/memory.h"
@@ -11,7 +12,6 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -63,12 +63,15 @@ bool ParseBytes(const std::string& text, std::vector<uint8_t>* bytes) {
 }
 
 bool LoadPlan(const std::filesystem::path& path, Plan* plan, std::string* error) {
-	std::ifstream file(path, std::ios::binary);
-	if (!file) {
+	// Through Common::File, which also reaches folders the UWP app may only use through the file broker (the Xbox's USB drives).
+	Common::File file(path, Common::File::Mode::Read);
+	if (file.IsInvalid()) {
 		return Fail(error, "could not read cheat file");
 	}
+	const auto  bytes = file.ReadWholeBuffer();
+	const auto* text  = reinterpret_cast<const char*>(bytes.data());
 
-	const auto root = Json::parse(file, nullptr, false);
+	const auto root = Json::parse(text, text + bytes.size(), nullptr, false);
 	if (!root.is_object() || !root.contains("id") || !root.contains("version") ||
 	    !root.contains("process") || !root.contains("mods")) {
 		return Fail(error, "expected a GoldHEN-style mods JSON file");
