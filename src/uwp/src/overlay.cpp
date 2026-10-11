@@ -222,7 +222,12 @@ public:
 				}
 				if (c == '\n') {
 					if (!m_skip_partial_line && !m_partial.empty()) {
-						m_lines.push_back(std::move(m_partial));
+						// The game's running time when the line was read, so that one can tell how recent it is.
+						const auto seconds = EmulatorHost::Get().RunTimeMs() / 1000;
+						char       stamp[24];
+						std::snprintf(stamp, sizeof(stamp), "%llu:%02llu  ", static_cast<unsigned long long>(seconds / 60),
+						              static_cast<unsigned long long>(seconds % 60));
+						m_lines.push_back(stamp + std::move(m_partial));
 						if (m_lines.size() > LOG_LINES) {
 							m_lines.pop_front();
 						}
