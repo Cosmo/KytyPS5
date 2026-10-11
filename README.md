@@ -21,6 +21,7 @@ What the Xbox version adds:
 
 The Xbox version is experimental. Not every game that runs on a PC runs on the Xbox, and draws that the Series X cannot do, such as tessellation, are skipped.
 
+- [Releases](https://github.com/Cosmo/KytyPS5/releases) has builds for the Xbox Series X|S in Developer Mode, with the install steps.
 - [XBOX_CHANGES.md](XBOX_CHANGES.md) lists every change against upstream, one commit per topic, and the known limits on the Series X.
 - [src/uwp/README.md](src/uwp/README.md) explains how to build and install the app and how to set up your games.
 
