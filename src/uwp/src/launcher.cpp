@@ -4,6 +4,7 @@
 #include "gameImages.h"
 #include "input.h"
 #include "settings.h"
+#include "xboxLook.h"
 
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -32,8 +33,8 @@ namespace {
 
 namespace xaml = winrt::Windows::UI::Xaml;
 
-// Covers are 512x512 and shown up to about that size on large screens.
-constexpr int COVER_WIDTH = 512;
+// Covers are 512x512 and shown at 88 effective pixels (176 pixels on the Xbox): decoded at 256, they stay sharp.
+constexpr int COVER_WIDTH = 256;
 // Backgrounds are 3840x2160; decoded smaller, they stay sharp enough under the shading.
 constexpr int BACKDROP_WIDTH = 1920;
 
@@ -46,8 +47,8 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
     <!-- A cover: with focus it grows a little and gets a ring. -->
     <Style x:Key="CoverStyle" TargetType="Button">
       <Setter Property="UseSystemFocusVisuals" Value="False" />
-      <Setter Property="Width" Value="128" />
-      <Setter Property="Height" Value="128" />
+      <Setter Property="Width" Value="88" />
+      <Setter Property="Height" Value="88" />
       <Setter Property="Padding" Value="0" />
       <Setter Property="Template">
         <Setter.Value>
@@ -89,24 +90,6 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
         </Setter.Value>
       </Setter>
     </Style>
-    <!-- Controller hints, as on the Xbox: an outlined button with its letter in the button's color. -->
-    <Style x:Key="HintRingStyle" TargetType="Ellipse">
-      <Setter Property="Width" Value="20" />
-      <Setter Property="Height" Value="20" />
-      <Setter Property="Stroke" Value="{ThemeResource SystemControlForegroundBaseHighBrush}" />
-      <Setter Property="StrokeThickness" Value="1.5" />
-    </Style>
-    <Style x:Key="HintLetterStyle" TargetType="TextBlock">
-      <Setter Property="FontSize" Value="11" />
-      <Setter Property="FontWeight" Value="Bold" />
-      <Setter Property="TextLineBounds" Value="Tight" />
-      <Setter Property="HorizontalAlignment" Value="Center" />
-      <Setter Property="VerticalAlignment" Value="Center" />
-    </Style>
-    <Style x:Key="HintTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextBlockStyle}">
-      <Setter Property="VerticalAlignment" Value="Center" />
-      <Setter Property="Margin" Value="8,0,0,0" />
-    </Style>
   </Grid.Resources>
 
   <!-- The selected game's background, cross-faded, shaded toward the text. -->
@@ -136,7 +119,7 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
 
   <!-- In effective pixels, which the system scales per device (a TV gets the "10-foot" size); a
        larger window gives more room, not larger text. -->
-    <Grid x:Name="Layout" Padding="0,40,0,48" XYFocusKeyboardNavigation="Enabled">
+    <Grid x:Name="Layout" Padding="0,40,0,32" XYFocusKeyboardNavigation="Enabled">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />
         <RowDefinition Height="Auto" />
@@ -148,7 +131,7 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
 
       <Grid Margin="48,0">
         <StackPanel Spacing="2">
-          <TextBlock Text="Library" Style="{StaticResource SubtitleTextBlockStyle}" />
+          <TextBlock Text="Library" Style="{StaticResource PageTitleTextBlockStyle}" />
           <TextBlock x:Name="Count" Style="{StaticResource BodyTextBlockStyle}"
                      Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
         </StackPanel>
@@ -214,44 +197,17 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
 
       <ScrollViewer Grid.Row="4" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Hidden"
                     VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled" IsTabStop="False">
-        <StackPanel x:Name="Covers" Orientation="Horizontal" Spacing="12" Padding="48,16,48,16"
+        <StackPanel x:Name="Covers" Orientation="Horizontal" Spacing="8" Padding="48,16,48,16"
                     XYFocusKeyboardNavigation="Enabled" />
       </ScrollViewer>
 
-      <Border x:Name="Hints" Grid.Row="5" HorizontalAlignment="Right" Margin="48,16,48,0" Padding="12,8"
-              Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}" CornerRadius="4">
-        <StackPanel Orientation="Horizontal" Spacing="24">
-          <StackPanel Orientation="Horizontal">
-            <Grid>
-              <Ellipse Style="{StaticResource HintRingStyle}" />
-              <TextBlock Text="A" Foreground="#7CC24D" Style="{StaticResource HintLetterStyle}" />
-            </Grid>
-            <TextBlock Text="Play" Style="{StaticResource HintTextStyle}" />
-          </StackPanel>
-          <StackPanel Orientation="Horizontal">
-            <Grid>
-              <Ellipse Style="{StaticResource HintRingStyle}" />
-              <TextBlock Text="Y" Foreground="#F2C230" Style="{StaticResource HintLetterStyle}" />
-            </Grid>
-            <TextBlock Text="Scan again" Style="{StaticResource HintTextStyle}" />
-          </StackPanel>
-          <StackPanel Orientation="Horizontal">
-            <Grid>
-              <Ellipse Style="{StaticResource HintRingStyle}" />
-              <!-- A FontIcon centers the symbol's own box; tight text bounds would use the cap height. -->
-              <FontIcon Glyph="&#xE700;" FontFamily="Segoe MDL2 Assets" FontSize="10"
-                        HorizontalAlignment="Center" VerticalAlignment="Center" />
-            </Grid>
-            <TextBlock Text="Options" Style="{StaticResource HintTextStyle}" />
-          </StackPanel>
-        </StackPanel>
-      </Border>
+      <Border x:Name="Hints" Grid.Row="5" Style="{StaticResource HintBarStyle}" Margin="48,16,48,0" />
     </Grid>
 
   <!-- A game's options (Menu button, right click), in the system's look: its details, play, hide. -->
   <Grid x:Name="Options" Visibility="Collapsed">
     <Rectangle Fill="{ThemeResource SystemControlPageBackgroundMediumAltMediumBrush}" />
-    <Grid Width="360" HorizontalAlignment="Right" Padding="24,32,24,24"
+    <Grid Width="360" HorizontalAlignment="Right" Padding="24,32,24,32"
           Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />
@@ -289,22 +245,7 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
           </Style>
         </ListView.ItemContainerStyle>
       </ListView>
-      <StackPanel Grid.Row="4" Orientation="Horizontal" Spacing="24">
-        <StackPanel Orientation="Horizontal">
-          <Grid>
-            <Ellipse Style="{StaticResource HintRingStyle}" Width="20" Height="20" />
-            <TextBlock Text="A" Foreground="#7CC24D" Style="{StaticResource HintLetterStyle}" FontSize="11" />
-          </Grid>
-          <TextBlock Text="Select" Style="{StaticResource BodyTextBlockStyle}" VerticalAlignment="Center" Margin="8,0,0,0" />
-        </StackPanel>
-        <StackPanel Orientation="Horizontal">
-          <Grid>
-            <Ellipse Style="{StaticResource HintRingStyle}" Width="20" Height="20" />
-            <TextBlock Text="B" Foreground="#E5553F" Style="{StaticResource HintLetterStyle}" FontSize="11" />
-          </Grid>
-          <TextBlock Text="Back" Style="{StaticResource BodyTextBlockStyle}" VerticalAlignment="Center" Margin="8,0,0,0" />
-        </StackPanel>
-      </StackPanel>
+      <Border x:Name="OptionsHints" Grid.Row="4" Style="{StaticResource HintBarStyle}" />
     </Grid>
   </Grid>
 </Grid>)xaml";
@@ -418,8 +359,10 @@ xaml::Controls::Button CreateCover(const std::shared_ptr<Launcher>& launcher, si
 	name.TextWrapping(xaml::TextWrapping::WrapWholeWords);
 	name.TextAlignment(xaml::TextAlignment::Center);
 	name.VerticalAlignment(xaml::VerticalAlignment::Center);
-	name.Margin({10, 10, 10, 10});
-	name.FontSize(13);
+	name.Margin({6, 6, 6, 6});
+	name.FontSize(12);
+	name.MaxLines(4);
+	name.TextTrimming(xaml::TextTrimming::CharacterEllipsis);
 
 	xaml::Controls::Border cover;
 	cover.CornerRadius({4, 4, 4, 4});
@@ -611,6 +554,9 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	launcher->title        = find(L"Title").as<xaml::Controls::TextBlock>();
 	launcher->options      = find(L"Options").as<xaml::FrameworkElement>();
 	launcher->options_items = find(L"OptionsItems").as<xaml::Controls::ListView>();
+	SetHints(find(L"Hints").as<xaml::Controls::Border>(),
+	         {{XboxButton::A, L"Play"}, {XboxButton::Y, L"Scan again"}, {XboxButton::Menu, L"Options"}});
+	SetHints(find(L"OptionsHints").as<xaml::Controls::Border>(), {{XboxButton::A, L"Select"}, {XboxButton::B, L"Back"}});
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_PLAY));
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_HIDE));
 	launcher->options_items.ItemClick([launcher](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
