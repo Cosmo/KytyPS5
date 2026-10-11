@@ -1,6 +1,9 @@
 #include "xboxLook.h"
 
+#include "fileAccess.h"
+
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.UI.Xaml.Interop.h>
 #include <winrt/Windows.UI.Xaml.Markup.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
 
@@ -34,11 +37,23 @@ constexpr wchar_t ResourcesMarkup[] = LR"xaml(
 
 constexpr double HINT_SYMBOL_SIZE = 16;
 constexpr double HINT_TEXT_SIZE   = 13;
+constexpr double XBOX_TEXT_SIZE   = 13;
 
 } // namespace
 
 xaml::ResourceDictionary XboxLookResources() {
-	return xaml::Markup::XamlReader::Load(ResourcesMarkup).as<xaml::ResourceDictionary>();
+	auto resources = xaml::Markup::XamlReader::Load(ResourcesMarkup).as<xaml::ResourceDictionary>();
+	// The Xbox's text is 13 (its capitals are 18 pixels high at 1920x1080, Windows' 14 makes 20): the body text style and the controls' text
+	// at that size there. A PC keeps Windows' 14. App merges this after the controls' resources, so these win.
+	if (IsXbox()) {
+		const auto     current = xaml::Application::Current().Resources();
+		xaml::Style    body(winrt::xaml_typename<xaml::Controls::TextBlock>());
+		body.BasedOn(current.Lookup(winrt::box_value(L"BodyTextBlockStyle")).as<xaml::Style>());
+		body.Setters().Append(xaml::Setter(xaml::Controls::TextBlock::FontSizeProperty(), winrt::box_value(XBOX_TEXT_SIZE)));
+		resources.Insert(winrt::box_value(L"BodyTextBlockStyle"), body);
+		resources.Insert(winrt::box_value(L"ControlContentThemeFontSize"), winrt::box_value(XBOX_TEXT_SIZE));
+	}
+	return resources;
 }
 
 std::optional<winrt::Windows::UI::Color> GetButtonColor(XboxButton button) {
