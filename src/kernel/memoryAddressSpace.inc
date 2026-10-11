@@ -988,6 +988,27 @@ public:
 	}
 
 
+	// The guest memory totals the overlay shows (GuestMemoryTotals in memory.h).
+	GuestMemoryTotals GetTotals() {
+		GuestMemoryTotals totals;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (!m_lazy_enabled) {
+			return totals;
+		}
+		constexpr uint64_t kWindow = Xbox::Lazy::Regions::kWindow;
+		totals.resident            = Xbox::Lazy::GetCounters().committed.load(std::memory_order_relaxed);
+		if (m_pager_store != nullptr) {
+			{
+				std::shared_lock lock(m_lazy_mutex);
+				totals.swapped = m_lazy.EvictedCount() * kWindow;
+			}
+			totals.swapped_out = m_pager_store->counters.evicted.load(std::memory_order_relaxed) * kWindow;
+			totals.swapped_in  = m_pager_store->counters.page_ins.load(std::memory_order_relaxed) * kWindow;
+		}
+#endif
+		return totals;
+	}
+
 	// Debugging the pager: for each value (the registers of a crash) that points into guest memory, what happened to its window.
 	void DumpPagerContext(const uint64_t* values, size_t count) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
