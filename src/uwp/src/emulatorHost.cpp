@@ -78,11 +78,12 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 	// The settings page's choices (LocalState\kyty-uwp.json).
 	const auto settings = LoadSettings();
 
-	// The user data folder; LocalState when the chosen one cannot be opened (a USB drive that is not plugged in).
+	// The user data folder; LocalState when the chosen one cannot be written (a USB drive that is not plugged in, or one that only grants reading):
+	// saves and trophies are written there. The settings page checks the same.
 	auto user_data = UserDataFolder(settings);
 	if (!settings.user_data_path.empty()) {
-		if (ListError(user_data) != 0) {
-			Log("the user data folder %ls cannot be opened: saves, patches and trophies are in LocalState this time\n", user_data.c_str());
+		if (WriteError(user_data) != 0) {
+			Log("the user data folder %ls cannot be written: saves, patches and trophies are in LocalState this time\n", user_data.c_str());
 			user_data = local_state;
 		} else {
 			Log("user data: %ls\n", user_data.c_str());
