@@ -1,6 +1,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
@@ -301,9 +302,32 @@ static std::string memory_dir_name(uint32_t slot_id) {
 	return "sce_sdmemory" + (slot_id == 0 ? std::string() : std::to_string(slot_id));
 }
 
+// Saves are kept in the user data folder (Config::UserDataFolder; the working directory when none is set). They go through
+// Common::File, which also reaches folders the UWP app may only use through the file broker (the Xbox's USB drives).
+static std::filesystem::path save_data_root(std::string_view title_id) {
+	return Config::UserDataFolder() / SAVE_DATA_DIR / title_id;
+}
+
+// Deletes a folder and everything in it; returns whether it is gone.
+static bool remove_tree(const std::filesystem::path& directory) {
+	if (!Common::File::IsDirectoryExisting(directory)) {
+		return true;
+	}
+	for (const auto& entry: Common::File::GetDirEntries(directory)) {
+		if (entry.name == "." || entry.name == "..") {
+			continue;
+		}
+		const auto path = directory / entry.name;
+		if (entry.is_file ? !Common::File::DeleteFile(path) : !remove_tree(path)) {
+			return false;
+		}
+	}
+	return Common::File::DeleteDirectory(directory);
+}
+
 static std::filesystem::path save_directory(std::string_view title_id, std::string_view dir_name,
                                             int32_t user_id) {
-	const auto directory = std::filesystem::path(SAVE_DATA_DIR) / title_id / dir_name;
+	const auto directory = save_data_root(title_id) / dir_name;
 	for (uint32_t slot = 0; slot < 4; slot++) {
 		if (dir_name == memory_dir_name(slot)) {
 			return directory / std::to_string(user_id);
@@ -336,13 +360,13 @@ static int write_save_file(const std::filesystem::path& path, const void* data, 
 	file.Close();
 	std::error_code error;
 	if (written == size && flushed) {
-		// Common::File::RenameFile deliberately refuses to replace an existing file.
+		// An atomic replace where the C++ library reaches the folder; through the file broker the old file goes first.
 		std::filesystem::rename(temporary, path, error);
-		if (!error) {
+		if (!error || Common::File::RenameFile(temporary, path)) {
 			return OK;
 		}
 	}
-	std::filesystem::remove(temporary, error);
+	Common::File::DeleteFile(temporary);
 	return SAVE_DATA_ERROR_INTERNAL;
 }
 
@@ -362,12 +386,7 @@ static int read_save_blocks(const std::filesystem::path& directory, uint64_t* bl
 }
 
 static int read_save_param(const std::filesystem::path& path, SaveDataParam* param) {
-	std::error_code error;
-	const bool exists = std::filesystem::exists(path, error);
-	if (error) {
-		return SAVE_DATA_ERROR_INTERNAL;
-	}
-	if (!exists) {
+	if (!Common::File::IsFileExisting(path)) {
 		return SAVE_DATA_ERROR_NOT_FOUND;
 	}
 	Common::File file(path, Common::File::Mode::Read);
@@ -388,22 +407,19 @@ static std::filesystem::path save_param_path(const std::filesystem::path& direct
 
 static int64_t newest_save_time(const std::filesystem::path& directory) {
 	int64_t mtime = 0;
-	std::error_code error;
-	for (std::filesystem::recursive_directory_iterator it(
-	         directory, std::filesystem::directory_options::skip_permission_denied, error),
-	     end;
-	     it != end; it.increment(error)) {
-		if (error) {
-			error.clear();
+	for (const auto& entry: Common::File::GetDirEntries(directory)) {
+		if (entry.name == "." || entry.name == "..") {
 			continue;
 		}
-		if (it->is_regular_file(error) && !error) {
-			const auto time = Common::File::GetLastWriteTimeUTC(it->path());
-			if (!time.IsInvalid()) {
-				mtime = std::max(mtime, static_cast<int64_t>(time.ToUnix()));
-			}
+		const auto path = directory / entry.name;
+		if (!entry.is_file) {
+			mtime = std::max(mtime, newest_save_time(path));
+			continue;
 		}
-		error.clear();
+		const auto time = Common::File::GetLastWriteTimeUTC(path);
+		if (!time.IsInvalid()) {
+			mtime = std::max(mtime, static_cast<int64_t>(time.ToUnix()));
+		}
 	}
 	return mtime;
 }
@@ -418,9 +434,7 @@ static int load_save_param(const std::filesystem::path& directory, SaveDataParam
 }
 
 static int save_memory(const std::filesystem::path& directory, const SaveDataMemory& memory) {
-	std::error_code error;
-	std::filesystem::create_directories(directory, error);
-	if (error) {
+	if (!Common::File::CreateDirectories(directory)) {
 		return SAVE_DATA_ERROR_INTERNAL;
 	}
 	// Display metadata is a separate host sidecar, leaving memory.dat as raw guest bytes.
@@ -434,12 +448,7 @@ static int save_memory(const std::filesystem::path& directory, const SaveDataMem
 
 static int load_memory(const std::filesystem::path& directory, SaveDataMemory* memory,
                        size_t* existed_size) {
-	std::error_code error;
-	const bool      exists = std::filesystem::exists(directory / "memory.dat", error);
-	if (error) {
-		return SAVE_DATA_ERROR_INTERNAL;
-	}
-	if (!exists) {
+	if (!Common::File::IsFileExisting(directory / "memory.dat")) {
 		return OK;
 	}
 	Common::File file(directory / "memory.dat", Common::File::Mode::Read);
@@ -592,7 +601,7 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond,
 
 	Common::LockGuard lock(g_mount_mutex);
 	const std::string title_id = cond->title_id != nullptr ? cond->title_id->data : get_title_id();
-	const auto        root     = std::filesystem::path(SAVE_DATA_DIR) / title_id;
+	const auto        root     = save_data_root(title_id);
 	std::vector<std::string> dir_list;
 
 	if (Common::File::IsDirectoryExisting(root)) {
@@ -706,22 +715,20 @@ int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResul
 			return SAVE_DATA_ERROR_PARAMETER;
 		}
 		const auto metadata = mount_dir / "sce_sys";
-		std::error_code error;
-		std::filesystem::create_directories(metadata, error);
-		if (error) {
+		if (!Common::File::CreateDirectories(metadata)) {
 			return SAVE_DATA_ERROR_INTERNAL;
 		}
 		const int status = write_save_file(metadata / "blocks.bin", &mount->blocks,
 		                                   sizeof(mount->blocks));
 		if (status != OK) {
-			std::filesystem::remove_all(mount_dir, error);
+			remove_tree(mount_dir);
 			return status;
 		}
 		const SaveDataParam initial {};
 		const int param_status = write_save_file(save_param_path(mount_dir), &initial,
 		                                         sizeof(initial));
 		if (param_status != OK) {
-			std::filesystem::remove_all(mount_dir, error);
+			remove_tree(mount_dir);
 			return param_status;
 		}
 		created = true;
@@ -1017,10 +1024,7 @@ int KYTY_SYSV_ABI SaveDataDelete(const SaveDataDelete* del) {
 	    g_save_data_memory.contains(dir)) {
 		return SAVE_DATA_ERROR_BUSY;
 	}
-	std::error_code error;
-	std::filesystem::remove_all(dir, error);
-
-	return error ? SAVE_DATA_ERROR_INTERNAL : OK;
+	return remove_tree(dir) ? OK : SAVE_DATA_ERROR_INTERNAL;
 }
 
 int KYTY_SYSV_ABI SaveDataGetParam(const SaveDataMountPoint* mount_point, uint32_t param_type,
