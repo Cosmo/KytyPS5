@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
+#include "graphics/host_gpu/workCounters.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
@@ -276,6 +277,7 @@ struct ShaderProgramCache::Impl {
 				return permutation->handle;
 			}
 		}
+		const CompileTimer compile_timer;
 
 		ShaderStageInputInfo stage_input {};
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {

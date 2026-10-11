@@ -165,6 +165,8 @@ public:
 		// the drawing stages (vertex, pixel and the others).
 		uint64_t compute_shaders    = 0;
 		uint64_t drawing_shaders    = 0;
+		// The DXIL shaders translated since the start that were not in the saved cache.
+		uint64_t new_shaders        = 0;
 	};
 	[[nodiscard]] Statistics GetStatistics() const;
 
@@ -257,8 +259,9 @@ private:
 	// GetStatistics' last numbers, for while m_mutex is held.
 	mutable std::mutex                    m_statistics_mutex;
 	mutable Statistics                    m_statistics;
-	// Pipelines made since the start that came from the saved cache (Statistics).
+	// Pipelines made since the start that came from the saved cache, and shaders translated since the start that did not (Statistics).
 	uint64_t                              m_cached_pipelines = 0;
+	uint64_t                              m_new_shaders      = 0;
 	// The cache file's pipelines, at the start and after the last save (Statistics).
 	uint64_t                              m_file_pipelines  = 0;
 	uint64_t                              m_saved_pipelines = 0;

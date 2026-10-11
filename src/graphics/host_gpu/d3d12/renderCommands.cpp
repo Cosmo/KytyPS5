@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
+#include "graphics/host_gpu/workCounters.h"
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
@@ -146,6 +147,7 @@ uint32_t MeshGroupCount(CommandBuffer& buffer, const DrawCallInfo& draw,
 	if (mesh.primitives_per_group == 0) {
 		static std::atomic_bool unsupported = false;
 		WarnOnce(unsupported, "a mesh draw of this primitive type is not supported; it is skipped");
+		CountSkippedDraw("mesh primitive type");
 		return 0;
 	}
 	const auto primitives = mesh.InputPrimitiveCount(draw.index_count);
@@ -160,6 +162,7 @@ uint32_t MeshGroupCount(CommandBuffer& buffer, const DrawCallInfo& draw,
 	     uint64_t {groups} * draw.instance_count > MaxGroupsPerGrid)) {
 		static std::atomic_bool warned = false;
 		WarnOnce(warned, "mesh draws beyond the host dispatch limits are skipped");
+		CountSkippedDraw("mesh draw size");
 		return 0;
 	}
 	return groups;
@@ -450,6 +453,7 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 	    group_indices > IndexBytes) {
 		static std::atomic_bool warned = false;
 		WarnOnce(warned, "a mesh group is too big for the compute emulation; its draws are skipped");
+		CountSkippedDraw("mesh group size");
 		return;
 	}
 	EXIT_IF(draw_data.size() != IR::PushData::MeshDrawDwordCount);
@@ -519,6 +523,7 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 			trace.End(list, slot);
 		}
 	}
+	GetWorkCounters().draws.fetch_add(1, std::memory_order_relaxed);
 }
 
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
@@ -539,6 +544,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		static std::atomic_bool warned = false;
 		WarnOnce(warned, "tessellation is not supported; its draws are skipped");
 		log_skip("tessellation is not supported");
+		CountSkippedDraw("tessellation");
 		return;
 	}
 	const bool mesh = vs_input_info.stage.program->stage == ShaderType::Mesh;
@@ -574,6 +580,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			static std::atomic_bool warned = false;
 			WarnOnce(warned, "a quad list draw with a partial quad is skipped");
 			log_skip("a quad list with a partial quad");
+			CountSkippedDraw("partial quads");
 			return;
 		}
 		const bool restart_16 = index_source.host_data != nullptr ||
@@ -666,6 +673,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	if (pipeline.pipeline == nullptr) {
 		// Could not be made (reported where it failed): this draw is skipped.
+		CountSkippedDraw("pipeline failed");
 		m_read_only_depth = {};
 		return;
 	}
@@ -675,6 +683,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                                                                    state.programs.vertex[0]);
 		if (mesh_compute->pipeline == nullptr) {
 			log_skip("the compute pipeline of the mesh program could not be made");
+			CountSkippedDraw("pipeline failed");
 			m_read_only_depth = {};
 			return;
 		}
@@ -683,6 +692,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	                                          state.depth_info, read_only_depth);
 	if (targets.unrenderable) {
 		log_skip("a color target's format cannot be rendered to on this device");
+		CountSkippedDraw("target format");
 		m_read_only_depth = {};
 		return;
 	}
@@ -786,6 +796,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 	}
 	trace.End(list, slot);
+	GetWorkCounters().draws.fetch_add(1, std::memory_order_relaxed);
 
 	if (WritesMemory(vs_input_info.stage) ||
 	    (state.ps_active && WritesMemory(state.ps_input_info.stage))) {
