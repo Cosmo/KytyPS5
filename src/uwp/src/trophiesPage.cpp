@@ -4,6 +4,7 @@
 #include "gameLibrary.h"
 #include "gameSource.h"
 #include "settings.h"
+#include "xboxLook.h"
 
 #include "common/archive.h"
 #include "common/trophies.h"
@@ -51,7 +52,7 @@ constexpr wchar_t CUP[] = L"M7,3 H17 V9 C17,12.3 14.8,14.5 12,14.5 C9.2,14.5 7,1
                           L"M17,4.5 H20 V6.5 C20,8.7 18.7,10.3 16.8,10.7 L16.6,9.2 C17.8,8.9 18.5,7.9 18.5,6.5 V6 H17 Z "
                           L"M11,14 H13 V18 H11 Z M8,18 H16 V20.5 H8 Z";
 
-// Sizes in effective pixels, as the library's home screen: its margins, its header (Subtitle over Body) and its controller
+// Sizes in effective pixels, as the library's home screen: its margins, its header (the page title over Body) and its controller
 // hints; the lists use Body text only.
 constexpr double COVER_SIZE = 56;
 constexpr double ICON_SIZE  = 56;
@@ -63,49 +64,28 @@ constexpr wchar_t PageMarkup[] = LR"xaml(
 <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
-  <Grid.Resources>
-    <!-- The home screen's controller hints. -->
-    <Style x:Key="HintRingStyle" TargetType="Ellipse">
-      <Setter Property="Width" Value="20" />
-      <Setter Property="Height" Value="20" />
-      <Setter Property="Stroke" Value="{ThemeResource SystemControlForegroundBaseHighBrush}" />
-      <Setter Property="StrokeThickness" Value="1.5" />
-    </Style>
-    <Style x:Key="HintLetterStyle" TargetType="TextBlock">
-      <Setter Property="FontSize" Value="11" />
-      <Setter Property="FontWeight" Value="Bold" />
-      <Setter Property="TextLineBounds" Value="Tight" />
-      <Setter Property="HorizontalAlignment" Value="Center" />
-      <Setter Property="VerticalAlignment" Value="Center" />
-    </Style>
-    <Style x:Key="HintTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextBlockStyle}">
-      <Setter Property="VerticalAlignment" Value="Center" />
-      <Setter Property="Margin" Value="8,0,0,0" />
-    </Style>
-  </Grid.Resources>
-
-  <Grid Padding="0,40,0,48">
+  <Grid Padding="0,40,0,32">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
       <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
 
-    <!-- The header: "Trophies" or the open game, a line under it, and the grade counts at the right. -->
-    <Grid Margin="48,0" ColumnSpacing="16">
+    <!-- The header: "Trophies" or the open game, a line under it, and the grade counts at the right. The gaps are margins, so that "Trophies"
+         starts at the page's edge while there is no cover. -->
+    <Grid Margin="48,0">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="Auto" />
         <ColumnDefinition Width="*" />
         <ColumnDefinition Width="Auto" />
       </Grid.ColumnDefinitions>
-      <Border x:Name="HeaderCover" Width="48" Height="48" CornerRadius="4" Background="#1C2330" Visibility="Collapsed" />
+      <Border x:Name="HeaderCover" Width="48" Height="48" Margin="0,0,16,0" CornerRadius="4" Background="#1C2330" Visibility="Collapsed" />
       <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
-        <TextBlock x:Name="HeaderTitle" Text="Trophies" Style="{StaticResource SubtitleTextBlockStyle}"
-                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+        <TextBlock x:Name="HeaderTitle" Text="Trophies" Style="{StaticResource PageTitleTextBlockStyle}" />
         <TextBlock x:Name="HeaderSummary" Style="{StaticResource BodyTextBlockStyle}"
                    Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
       </StackPanel>
-      <StackPanel x:Name="HeaderGrades" Grid.Column="2" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center" />
+      <StackPanel x:Name="HeaderGrades" Grid.Column="2" Margin="16,0,0,0" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center" />
     </Grid>
 
     <StackPanel x:Name="Status" Grid.Row="1" Margin="48,32,48,0" Orientation="Horizontal" Spacing="12" VerticalAlignment="Top">
@@ -119,25 +99,7 @@ constexpr wchar_t PageMarkup[] = LR"xaml(
     <ListView x:Name="TrophyList" Grid.Row="1" Margin="0,24,0,0" Padding="36,0,36,16" SelectionMode="None" IsItemClickEnabled="True"
               XYFocusKeyboardNavigation="Enabled" Visibility="Collapsed" />
 
-    <Border Grid.Row="2" HorizontalAlignment="Right" Margin="48,16,48,0" Padding="12,8"
-            Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}" CornerRadius="4">
-      <StackPanel Orientation="Horizontal" Spacing="24">
-        <StackPanel Orientation="Horizontal">
-          <Grid>
-            <Ellipse Style="{StaticResource HintRingStyle}" />
-            <TextBlock Text="A" Foreground="#7CC24D" Style="{StaticResource HintLetterStyle}" />
-          </Grid>
-          <TextBlock x:Name="SelectHint" Text="Open" Style="{StaticResource HintTextStyle}" />
-        </StackPanel>
-        <StackPanel Orientation="Horizontal">
-          <Grid>
-            <Ellipse Style="{StaticResource HintRingStyle}" />
-            <TextBlock Text="B" Foreground="#E5553F" Style="{StaticResource HintLetterStyle}" />
-          </Grid>
-          <TextBlock Text="Back" Style="{StaticResource HintTextStyle}" />
-        </StackPanel>
-      </StackPanel>
-    </Border>
+    <Border x:Name="Hints" Grid.Row="2" Style="{StaticResource HintBarStyle}" Margin="48,16,48,0" />
   </Grid>
 </Grid>)xaml";
 
@@ -688,7 +650,7 @@ xaml::UIElement CreateTrophiesPage(std::function<void()> back) {
 	page->status_text    = find(L"StatusText").as<xaml::Controls::TextBlock>();
 	page->games_list     = find(L"Games").as<xaml::Controls::ListView>();
 	page->trophy_list    = find(L"TrophyList").as<xaml::Controls::ListView>();
-	page->select_hint    = find(L"SelectHint").as<xaml::Controls::TextBlock>();
+	page->select_hint    = SetHints(find(L"Hints").as<xaml::Controls::Border>(), {{XboxButton::A, L"Open"}, {XboxButton::B, L"Back"}}).front();
 
 	page->games_list.ItemClick([weak = std::weak_ptr<Page>(page)](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
 		if (auto shared = weak.lock()) {
