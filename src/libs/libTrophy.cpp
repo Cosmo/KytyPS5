@@ -153,7 +153,7 @@ static TrophyState* LoadTrophyState(TrophyKey key) {
 			     package.event_rules.size(), uds_filename.c_str());
 		}
 	}
-	auto path    = Trophies::UnlocksPath({}, title_id, key.first, key.second);
+	auto path    = Trophies::UnlocksPath(Config::UserDataFolder(), title_id, key.first, key.second);
 	auto unlocks = Trophies::LoadUnlockData(path);
 	return &g_states.emplace(key, TrophyState {&package, std::move(unlocks), std::move(path)})
 	            .first->second;
