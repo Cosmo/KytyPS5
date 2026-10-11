@@ -19,6 +19,44 @@ What the Xbox version adds:
 - **Up to four players.** The DualSense's touchpad, motion sensors, adaptive triggers, haptic feedback, speaker and microphone are mapped to the Xbox controller and its headset.
 - **Games on a USB drive.** Game folders and `.zar` archives play from a drive, and saves, patches and trophies can live there too.
 
+<p align="center">
+  <strong>Library</strong><br>
+  <img src="docs/screenshots/xbox-01-home.png" width="608" alt="The game library of KytyPS5 on the Xbox Series X">
+</p>
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <strong>Controller guide</strong><br>
+      <img src="docs/screenshots/xbox-02-controller.png" width="300" alt="How the Xbox controller's buttons work as the DualSense's">
+    </td>
+    <td align="center">
+      <strong>Trophies</strong><br>
+      <img src="docs/screenshots/xbox-03-trophies.png" width="300" alt="A game's trophies with the details of one">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>Settings</strong><br>
+      <img src="docs/screenshots/xbox-04-settings.png" width="300" alt="The memory and texture settings with their explanation">
+    </td>
+    <td align="center">
+      <strong>Local co-op</strong><br>
+      <img src="docs/screenshots/xbox-05-local-coop.png" width="300" alt="A game with four Xbox controllers as four players">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>Light game</strong><br>
+      <img src="docs/screenshots/xbox-06-overlay.png" width="300" alt="A light game at 4K and 60 fps with the statistics overlay and the log">
+    </td>
+    <td align="center">
+      <strong>Heavy game</strong><br>
+      <img src="docs/screenshots/xbox-07-astros-playroom.png" width="300" alt="A heavy 3D game with most of its memory in the swap file">
+    </td>
+  </tr>
+</table>
+
 The Xbox version is experimental. Not every game that runs on a PC runs on the Xbox, and draws that the Series X cannot do, such as tessellation, are skipped.
 
 - [Releases](https://github.com/Cosmo/KytyPS5/releases) has builds for the Xbox Series X|S in Developer Mode, with the install steps.
