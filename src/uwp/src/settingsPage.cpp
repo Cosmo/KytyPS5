@@ -175,6 +175,10 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
       <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
                  Text="Games start without compiling their shaders again after an update of the app. Can lead to a crash or wrong pictures when the update changed how shaders are translated: then start the game once with this off, which compiles them afresh." />
+      <StackPanel Orientation="Horizontal" Spacing="12">
+        <Button x:Name="RemoveShaders" Content="Remove compiled shaders" />
+        <TextBlock x:Name="RemoveShadersStatus" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center" TextWrapping="Wrap" />
+      </StackPanel>
 
       <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Margin="0,24,0,0"
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
@@ -506,6 +510,23 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	shader_cache_any_build.Toggled([state, shader_cache_any_build, save](auto const&, auto const&) {
 		state->settings.shader_cache_any_build = shader_cache_any_build.IsOn();
 		save();
+	});
+	// The games' compiled shaders (LocalState\_PipelineCache, a file per game): each game compiles them afresh on its next start.
+	auto remove_shaders_status = page.FindName(L"RemoveShadersStatus").as<xaml::Controls::TextBlock>();
+	page.FindName(L"RemoveShaders").as<xaml::Controls::Button>().Click([remove_shaders_status](auto const&, auto const&) {
+		std::error_code error;
+		uint64_t        files = 0;
+		uint64_t        bytes = 0;
+		for (const auto& entry: std::filesystem::directory_iterator(LocalStateFolder() / L"_PipelineCache", error)) {
+			const auto size = entry.is_regular_file(error) ? entry.file_size(error) : 0;
+			if (std::filesystem::remove(entry.path(), error)) {
+				files++;
+				bytes += size;
+			}
+		}
+		remove_shaders_status.Text(files == 0 ? std::wstring(L"No compiled shaders to remove")
+		                                      : L"Removed " + std::to_wstring(files) + (files == 1 ? L" file (" : L" files (") +
+		                                            std::to_wstring((bytes + (1u << 20u) - 1) >> 20u) + L" MB)");
 	});
 
 	// Back: B, Escape or the window's back button (shown while the page is open).
