@@ -37,6 +37,8 @@ struct GraphicContext {
 	[[nodiscard]] bool     CanReportMemoryUsage() const noexcept { return adapter != nullptr; }
 	// GPU memory used by this process.
 	[[nodiscard]] uint64_t GetDeviceMemoryUsage() const;
+	// The same without the allocator's log line (the overlay asks for it every second, from its thread).
+	[[nodiscard]] uint64_t GetLocalMemoryUsage() const;
 	// GPU memory the caches may fill before they start evicting.
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
 	[[nodiscard]] uint64_t UniformBufferAlignment() const noexcept { return 256; }
