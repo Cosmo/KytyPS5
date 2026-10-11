@@ -8,6 +8,11 @@
 
 namespace Kyty::Uwp {
 
+// AppSettings::overlay_detail: the frame rate alone; with the frame graph, GPU time, RAM and the swap file; everything.
+constexpr uint32_t OVERLAY_FRAME_RATE = 0;
+constexpr uint32_t OVERLAY_COMPACT    = 1;
+constexpr uint32_t OVERLAY_FULL       = 2;
+
 // The app's own data folder (LocalState); it is always readable and writable, on any drive.
 [[nodiscard]] std::filesystem::path LocalStateFolder();
 
@@ -31,6 +36,11 @@ struct AppSettings {
 	uint32_t overlay_size = 1;
 	// How many of the log's last lines the overlay shows: 2 to 20 (OverlayLogLines in overlay.cpp).
 	uint32_t overlay_log_lines = 20;
+	// What the overlay shows while it is on (OverlayShown): OVERLAY_FRAME_RATE, OVERLAY_COMPACT or OVERLAY_FULL.
+	uint32_t overlay_detail = 2;
+	// Whether the overlay shows the end of the emulator's log, and the connected controllers.
+	bool overlay_log         = true;
+	bool overlay_controllers = true;
 	// The settings page, Controller (ControllerOptions in input.h): the games' adaptive trigger effects rumble the triggers' motors. On.
 	bool impulse_triggers = true;
 	// The settings page, Controller: the DualSense's haptic feedback as gentle rumble. On.
