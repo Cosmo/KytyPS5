@@ -485,6 +485,10 @@ uint64_t GraphicContext::GetDeviceMemoryUsage() const {
 	return LocalMemory(adapter).CurrentUsage;
 }
 
+uint64_t GraphicContext::GetLocalMemoryUsage() const {
+	return LocalMemory(adapter).CurrentUsage;
+}
+
 uint64_t GraphicContext::GetTotalMemoryBudget() const {
 	// Leave headroom for the rest of the system, like the Vulkan backend.
 	const auto budget = LocalMemory(adapter).Budget;
