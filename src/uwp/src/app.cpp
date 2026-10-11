@@ -8,10 +8,12 @@
 #include "input.h"
 #include "launcher.h"
 #include "log.h"
+#include "graphics/host_gpu/d3d12/presentationStubs.h"
 #include "graphics/host_gpu/frameDump.h"
 #include "overlay.h"
 #include "settingsPage.h"
 #include "trophiesPage.h"
+#include "trophyToast.h"
 #include "controlsPage.h"
 #include "settings.h"
 #include "xboxLook.h"
@@ -37,6 +39,9 @@
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace Kyty::Uwp {
@@ -151,19 +156,69 @@ struct RunRequest {
 	uint32_t retry = 0;
 };
 
-std::optional<RunRequest> RunRequestFromArguments(winrt::hstring const& arguments) {
+// The arguments as a kyty:// link to `host`, or nothing. The scheme is KYTY_UWP_PROTOCOL of the build ("kyty", or another name for a build
+// installed next to it).
+std::optional<winrt::Windows::Foundation::Uri> KytyLink(winrt::hstring const& arguments, std::wstring_view host) {
 	if (arguments.empty()) {
 		return std::nullopt;
 	}
 	try {
-		const winrt::Windows::Foundation::Uri uri(arguments);
-		// the scheme is KYTY_UWP_PROTOCOL of the build ("kyty", or another name for a build installed next to it)
-		if (std::wstring_view(uri.SchemeName()).substr(0, 4) != L"kyty" || uri.Host() != L"run") {
+		winrt::Windows::Foundation::Uri uri(arguments);
+		if (std::wstring_view(uri.SchemeName()).substr(0, 4) != L"kyty" || uri.Host() != host) {
 			return std::nullopt;
 		}
+		return uri;
+	} catch (const winrt::hresult_error&) {
+	}
+	return std::nullopt;
+}
+
+// A trophy notification's link: kyty://trophy?title=<title ID>&name=<the trophy's name>. It comes back as the notification's activation
+// argument, so the scheme is never resolved and any build's name works.
+struct TrophyLink {
+	std::string title_id;
+	std::string name;
+};
+
+winrt::hstring TrophyLinkArguments(const std::string& title_id, const std::string& name) {
+	using winrt::Windows::Foundation::Uri;
+	return L"kyty://trophy?title=" + Uri::EscapeComponent(winrt::to_hstring(title_id)) + L"&name=" + Uri::EscapeComponent(winrt::to_hstring(name));
+}
+
+std::optional<TrophyLink> TrophyLinkFromArguments(winrt::hstring const& arguments) {
+	const auto uri = KytyLink(arguments, L"trophy");
+	if (!uri) {
+		return std::nullopt;
+	}
+	try {
+		TrophyLink link;
+		for (const auto& entry: uri->QueryParsed()) {
+			if (entry.Name() == L"title") {
+				link.title_id = winrt::to_string(entry.Value());
+			} else if (entry.Name() == L"name") {
+				link.name = winrt::to_string(entry.Value());
+			}
+		}
+		if (!link.title_id.empty()) {
+			return link;
+		}
+	} catch (const winrt::hresult_error&) {
+	}
+	return std::nullopt;
+}
+
+// While a game runs: shows a trophy's details over it (SetUpGameMenu).
+std::function<void(const TrophyLink&)> g_trophy_over_game;
+
+std::optional<RunRequest> RunRequestFromArguments(winrt::hstring const& arguments) {
+	const auto uri = KytyLink(arguments, L"run");
+	if (!uri) {
+		return std::nullopt;
+	}
+	try {
 		RunRequest request;
 		bool       found = false;
-		for (const auto& entry: uri.QueryParsed()) {
+		for (const auto& entry: uri->QueryParsed()) {
 			if (entry.Name() == L"game") {
 				request.folder = std::filesystem::path(std::wstring(entry.Value()));
 				found          = true;
@@ -373,6 +428,17 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, winrt::hstring const& title
 	};
 	const auto is_open = [menu] { return menu.Visibility() == xaml::Visibility::Visible; };
 
+	// A trophy notification selected during the game: the trophy's details over it, the game's input paused while they show (and after them
+	// while the menu is open).
+	g_trophy_over_game = [is_open](const TrophyLink& link) {
+		PauseGameInput(true);
+		ShowTrophyDetails(link.title_id, link.name, [is_open] {
+			if (!is_open()) {
+				PauseGameInput(false);
+			}
+		});
+	};
+
 	items.ItemClick([show, open_settings, status, items, resume, settings, dump, quit](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
 		// The entry, or its content: an entry is its own container, and the list may report either.
 		const auto clicked = args.ClickedItem();
@@ -453,8 +519,16 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, winrt::hstring const& title
 // launch screen until the game runs, and the game menu.
 xaml::UIElement CreateEmulatorPage(std::filesystem::path game) {
 	auto page = xaml::Markup::XamlReader::Load(GameMarkup).as<xaml::Controls::Grid>();
-	const auto title = winrt::to_hstring(ReadGame(game).name);
+	const auto entry = ReadGame(game);
+	const auto title = winrt::to_hstring(entry.name);
 	SetUpGameMenu(page, title);
+	// Trophies the game unlocks show as system notifications, made on the UI thread from a copy of the name; selecting one opens the trophy.
+	Libs::Graphics::SetTrophyUnlockHandler(
+	    [dispatcher = page.Dispatcher(), title_id = entry.title_id](std::string_view name, int32_t /*grade*/, std::span<const std::byte> /*icon_png*/) {
+		    (void)dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [title_id, name = std::string(name)] {
+			    ShowTrophyToast(name, std::wstring(TrophyLinkArguments(title_id, name)));
+		    });
+	    });
 	EmulatorHost::Get().OnGameVisible(
 	    [launch = page.FindName(L"Launch").as<xaml::UIElement>()] { launch.Opacity(0.0); });
 	page.FindName(L"Title").as<xaml::Controls::TextBlock>().Text(title);
@@ -563,6 +637,9 @@ void App::OnLaunched(activation::LaunchActivatedEventArgs const& args) {
 void App::OnActivated(activation::IActivatedEventArgs const& args) {
 	if (args.Kind() == activation::ActivationKind::Protocol) {
 		Show(args.as<activation::ProtocolActivatedEventArgs>().Uri().AbsoluteUri());
+	} else if (args.Kind() == activation::ActivationKind::ToastNotification) {
+		// A trophy notification selected: its link (TrophyLinkArguments).
+		Show(args.as<activation::ToastNotificationActivatedEventArgs>().Argument());
 	} else {
 		Show(L"");
 	}
@@ -596,18 +673,31 @@ void App::Show(winrt::hstring const& activation_arguments) {
 		m_resources_loaded = true;
 	}
 	auto window = xaml::Window::Current();
+	// A trophy notification's link opens the trophy: over the game while one runs, else on the trophies page (back to the library).
+	const auto trophy_link    = TrophyLinkFromArguments(arguments);
+	const auto open_trophies = [](const TrophyLink& link) {
+		return CreateTrophiesPage([] { xaml::Window::Current().Content(CreateLibraryPage()); }, link.title_id, link.name);
+	};
 	if (window.Content() == nullptr) {
 		WaitForGameFolders();
 		const auto run_request = RunRequestFromArguments(arguments);
 		if (run_request) {
 			EmulatorHost::Get().SetRestartAttempts(run_request->retry);
 		}
-		if (auto request = run_request; !request) {
+		if (trophy_link) {
+			window.Content(open_trophies(*trophy_link));
+		} else if (auto request = run_request; !request) {
 			window.Content(CreateLibraryPage());
 		} else if (!request->title_id.empty()) {
 			window.Content(CreateTitlePage(request->title_id));
 		} else {
 			window.Content(CreateGamePage(request->folder));
+		}
+	} else if (trophy_link) {
+		if (g_trophy_over_game) {
+			g_trophy_over_game(*trophy_link);
+		} else {
+			window.Content(open_trophies(*trophy_link));
 		}
 	}
 	// On a PC the window opens 16:9 (the games' picture is); a console is always full screen. The preferred size applies from the next start of the app,
