@@ -7,8 +7,8 @@
 ## The app
 
 - **Home screen.** The games of the game folders as a row of covers over the selected game's background. A starts a game, Menu opens its options (its details, Play, Hide game), Y scans the folders again. The icons at the top right open the controller page, the trophies and the settings.
-- **Game menu.** View + Menu in a game: resume, show or hide the overlay, save a frame dump, quit to the library.
-- **Overlay.** Over a game: the run time, the frame rate and frame times, draws, skipped draws and GPU time per frame, the resolutions, CPU and disk reads, the app's RAM in parts, the swap file, the shaders and pipelines with the ones new in this run, the time spent waiting for compiles and for the swap file, the controllers, and the end of the emulator's log.
+- **Game menu.** View + Menu in a game: resume, the overlay's settings, save a frame dump, quit to the library. Its Settings change the overlay at once.
+- **Overlay.** Over a game, as much as the settings choose: the frame rate alone; Compact, with a graph of the frame times, GPU time, RAM and the swap file; or Full, with the run time, the frame rate and frame times, draws, skipped draws and GPU time per frame, the resolutions, CPU and disk reads, the app's RAM in parts, the swap file, the shaders and pipelines with the ones new in this run, the time spent waiting for compiles and for the swap file. The connected controllers and the end of the emulator's log show or hide on their own.
 - **Trophies.** Each game's trophies, how many of each grade are earned, and when.
 - **Look.** Laid out and sized like the Xbox's own screens (`src/uwp/src/xboxLook.*`): one bar of controller hints, one title size, the same margins everywhere, and on the Xbox, the Xbox's text size.
 
@@ -64,7 +64,7 @@ Saves, patches and trophies can live on the USB drive too: choose a folder under
 
 ## Settings
 
-The settings page (the gear at the top right) keeps its choices in `LocalState\kyty-uwp.json`, in categories, as the Xbox's own Settings: Display (TV resolution, V-Sync, the overlay's size and log lines), User (name, console language), Controller (Impulse Triggers, haptics, the headset's speaker and microphone), Game folders, User Data Path, Memory and quality (game memory paging, compact GPU memory, video decoding, and the textures' detail, sharpness and filtering) and Developer (debug layer, detailed log, memory report, GPU crash diagnostics, keeping and removing compiled shaders). Each setting explains itself next to it. Game settings apply to the next game you start. A few settings for debugging exist only in the file (`src/uwp/src/settings.h`).
+The settings page (the gear at the top right) keeps its choices in `LocalState\kyty-uwp.json`, in categories, as the Xbox's own Settings: Display (TV resolution, V-Sync, the overlay: what it shows, its log and controllers, its size and log lines), User (name, console language), Controller (Impulse Triggers, haptics, the headset's speaker and microphone), Game folders, User Data Path, Memory and quality (game memory paging, compact GPU memory, video decoding, and the textures' detail, sharpness and filtering) and Developer (debug layer, detailed log, memory report, GPU crash diagnostics, keeping and removing compiled shaders). Each setting explains itself next to it. Game settings apply to the next game you start. A few settings for debugging exist only in the file (`src/uwp/src/settings.h`).
 
 ## Building
 
