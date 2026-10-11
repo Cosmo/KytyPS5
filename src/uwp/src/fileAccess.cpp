@@ -73,9 +73,23 @@ uint32_t ListError(const std::filesystem::path& folder) {
 	return error;
 }
 
+uint32_t WriteError(const std::filesystem::path& folder) {
+	const auto test = folder / L"kyty-write-test.tmp";
+	HANDLE     file = CreateFile2FromAppW(test.c_str(), GENERIC_WRITE, 0, CREATE_ALWAYS, nullptr);
+	if (file == INVALID_HANDLE_VALUE) {
+		const auto error = GetLastError();
+		Log("cannot write in %ls (error %lu)\n", folder.c_str(), error);
+		return error;
+	}
+	CloseHandle(file);
+	DeleteFileFromAppW(test.c_str());
+	return 0;
+}
+
 void WaitForGameFolders() {
 	const auto start = GetTickCount64();
-	for (const auto& folder: GameFolders()) {
+	// The folder's error once it gives access or the 2 seconds are over.
+	const auto wait = [start](const std::filesystem::path& folder) {
 		auto error = AccessError(folder);
 		if (error == ERROR_ACCESS_DENIED && GetTickCount64() - start < 2000) {
 			const auto waiting = GetTickCount64();
@@ -88,8 +102,16 @@ void WaitForGameFolders() {
 				Log("access to %ls after %llu ms\n", folder.c_str(), GetTickCount64() - waiting);
 			}
 		}
-		if (error != 0) {
+		return error;
+	};
+	for (const auto& folder: GameFolders()) {
+		if (const auto error = wait(folder); error != 0) {
 			Log("cannot open game folder %ls (error %lu): its games cannot be started\n", folder.c_str(), error);
+		}
+	}
+	if (const auto settings = LoadSettings(); !settings.user_data_path.empty()) {
+		if (const auto error = wait(settings.user_data_path); error != 0) {
+			Log("cannot open the user data folder %ls (error %lu)\n", settings.user_data_path.c_str(), error);
 		}
 	}
 	Log("game folders checked after %llu ms\n", GetTickCount64() - start);
@@ -101,13 +123,13 @@ bool IsXbox() {
 	return xbox;
 }
 
-std::wstring GrantCommand(std::filesystem::path folder) {
+std::wstring GrantCommand(std::filesystem::path folder, bool write) {
 	folder.make_preferred();
 	if (IsXbox() && folder.has_root_name()) {
 		folder = std::filesystem::path(L"X:\\") / folder.relative_path();
 	}
-	// S-1-15-2-1 is ALL APPLICATION PACKAGES, on every Windows language.
-	return L"icacls \"" + folder.wstring() + L"\" /grant \"*S-1-15-2-1:(OI)(CI)RX\"";
+	// S-1-15-2-1 is ALL APPLICATION PACKAGES, on every Windows language; M is modify (read, write and delete).
+	return L"icacls \"" + folder.wstring() + L"\" /grant \"*S-1-15-2-1:(OI)(CI)" + (write ? L"M" : L"RX") + L"\"";
 }
 
 std::vector<std::filesystem::path> Subfolders(const std::filesystem::path& folder) {
