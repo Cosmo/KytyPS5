@@ -157,7 +157,7 @@ static TrophyState* LoadTrophyState(TrophyKey key) {
 	}
 	const bool guest = Config::IsGuestUserId(key.first);
 	auto       path  = guest ? std::filesystem::path {}
-	                         : Trophies::UnlocksPath({}, title_id, key.first, key.second);
+	                         : Trophies::UnlocksPath(Config::UserDataFolder(), title_id, key.first, key.second);
 	auto unlocks = guest ? Trophies::UnlockData {} : Trophies::LoadUnlockData(path);
 	return &g_states
 	            .emplace(key, TrophyState {&package, std::move(unlocks), std::move(path), guest})
