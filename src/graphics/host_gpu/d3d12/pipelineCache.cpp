@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/d3d12/render.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/workCounters.h"
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/rectListShader.h"
 #include "kytyGitVersion.h"
@@ -686,6 +687,7 @@ static std::string RequiredFeatures(const std::vector<uint8_t>& dxil) {
 ID3D12PipelineState* PipelineCache::LoadOrCreate(const std::wstring&                    name,
                                                  const D3D12_PIPELINE_STATE_STREAM_DESC& desc,
                                                  std::initializer_list<const D3D12::DxilShader*> shaders) {
+	const CompileTimer   compile_timer;
 	ID3D12PipelineState* pipeline = nullptr;
 	if (m_library != nullptr &&
 	    SUCCEEDED(m_library->LoadPipeline(name.c_str(), &desc, IID_PPV_ARGS(&pipeline)))) {
@@ -750,11 +752,13 @@ const PipelineCache::Shader* PipelineCache::Translate(const CompiledProgram& pro
 	auto [found, inserted] = m_shaders.try_emplace(program.id);
 	if (inserted) {
 		KYTY_PROFILER_BLOCK("D3D12 translate shader");
+		const CompileTimer compile_timer;
 		auto shader   = std::make_unique<Shader>();
 		shader->id    = program.id;
 		shader->stage = stage;
 		shader->dxil  = m_compiler.Compile(*program.spirv, stage, program.id, false, {},
 		                                   &shader->from_cache);
+		m_new_shaders += shader->from_cache ? 0 : 1;
 		Log::WriteToConsoleAndLog(fmt::format(
 		    "D3D12 shader {}: stage={} SPIR-V={} bytes DXIL={} bytes\n", program.id,
 		    static_cast<int>(stage), program.spirv->size() * sizeof(uint32_t),
@@ -1032,6 +1036,7 @@ const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms&
 		return found->second;
 	}
 	KYTY_PROFILER_BLOCK("D3D12 link shaders");
+	const CompileTimer compile_timer;
 	using Kind = D3D12::LinkedStage::Kind;
 	const bool mesh = vertex_info.stage.program->stage == ShaderType::Mesh;
 	// A mesh program run as a compute shader is drawn by its vertex stage, which reads its records.
@@ -1052,6 +1057,7 @@ const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms&
 	}
 	auto& linked  = found->second;
 	auto  dxil    = m_compiler.CompileLinked(stages, vertex.id ^ (pixel.id * 31), &linked.from_cache);
+	m_new_shaders += linked.from_cache ? 0 : dxil.size();
 	linked.vertex = std::move(dxil[0]);
 	if (rect_list) {
 		linked.geometry = std::move(dxil[1]);
@@ -1329,6 +1335,7 @@ PipelineCache::Statistics PipelineCache::GetStatistics() const {
 		m_statistics = {m_shaders.size(), m_compute_pipelines.size(), m_graphics_pipelines.size(),
 		                m_root_signatures.size(), m_loaded_pipelines, m_cached_pipelines,
 		                m_saved_pipelines};
+		m_statistics.new_shaders = m_new_shaders;
 		const auto programs = m_programs.GetProgramCounts();
 		for (size_t stage = 0; stage < programs.size(); stage++) {
 			(stage == static_cast<size_t>(ShaderType::Compute) ? m_statistics.compute_shaders

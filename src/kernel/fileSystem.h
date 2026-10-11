@@ -78,6 +78,10 @@ int KYTY_SYSV_ABI     KernelMkdir(const char* path, uint16_t mode);
 int KYTY_SYSV_ABI     KernelRmdir(const char* path);
 int KYTY_SYSV_ABI     KernelCheckReachability(const char* path);
 
+// The bytes the game read from its files since the start (the UWP app's overlay shows the rate).
+[[nodiscard]] uint64_t BytesRead();
+void                   AddBytesRead(uint64_t bytes);
+
 } // namespace Libs::LibKernel::FileSystem
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_KERNEL_FILESYSTEM_H_ */

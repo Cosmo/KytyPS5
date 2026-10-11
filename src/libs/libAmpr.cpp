@@ -1428,6 +1428,7 @@ static int ReadHostFileToGuest(const std::filesystem::path& host_path, uint64_t 
 		if (read == 0) {
 			break;
 		}
+		LibKernel::FileSystem::AddBytesRead(read);
 		std::memcpy(reinterpret_cast<void*>(destination + *bytes_read), buffer.data(), read);
 		*bytes_read += read;
 	}

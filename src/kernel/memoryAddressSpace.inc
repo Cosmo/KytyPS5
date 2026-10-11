@@ -963,8 +963,10 @@ public:
 				std::shared_lock lock(m_lazy_mutex);
 				totals.swapped = m_lazy.EvictedCount() * kWindow;
 			}
-			totals.swapped_out = m_pager_store->counters.evicted.load(std::memory_order_relaxed) * kWindow;
-			totals.swapped_in  = m_pager_store->counters.page_ins.load(std::memory_order_relaxed) * kWindow;
+			totals.swapped_out  = m_pager_store->counters.evicted.load(std::memory_order_relaxed) * kWindow;
+			totals.swapped_in   = m_pager_store->counters.page_ins.load(std::memory_order_relaxed) * kWindow;
+			totals.swap_wait_ns = m_pager_store->counters.page_in_ns.load(std::memory_order_relaxed);
+			totals.pager        = true;
 		}
 #endif
 		return totals;

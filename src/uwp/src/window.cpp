@@ -12,7 +12,9 @@
 #include "input.h"
 #include "graphics/host_gpu/d3d12/renderContext.h"
 #include "graphics/host_gpu/d3d12/windowContext.h"
+#include "graphics/host_gpu/workCounters.h"
 #include "graphics/presentation/presenter.h"
+#include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "log.h"
 
@@ -120,7 +122,12 @@ FrameResolutions CurrentFrameResolutions() {
 
 MemoryTotals CurrentMemoryTotals() {
 	const auto   guest = Libs::LibKernel::Memory::GetGuestMemoryTotals();
-	MemoryTotals totals {.game = guest.resident, .swapped = guest.swapped, .swapped_out = guest.swapped_out, .swapped_in = guest.swapped_in};
+	MemoryTotals totals {.game         = guest.resident,
+	                     .swapped      = guest.swapped,
+	                     .swapped_out  = guest.swapped_out,
+	                     .swapped_in   = guest.swapped_in,
+	                     .swap_wait_ns = guest.swap_wait_ns,
+	                     .pager        = guest.pager};
 	if (const auto* window = Libs::Graphics::g_window.get(); window != nullptr && window->graphic_ctx.CanReportMemoryUsage()) {
 		totals.gpu = window->graphic_ctx.GetLocalMemoryUsage();
 	}
@@ -137,10 +144,21 @@ std::optional<ShaderStatistics> CurrentShaderStatistics() {
 	ShaderStatistics statistics;
 	statistics.drawing_shaders  = counts.drawing_shaders;
 	statistics.compute_shaders  = counts.compute_shaders;
+	statistics.new_shaders      = counts.new_shaders;
 	statistics.pipelines        = counts.graphics_pipelines + counts.compute_pipelines;
 	statistics.cached_pipelines = counts.cached_pipelines;
 	statistics.saved_pipelines  = counts.saved_pipelines;
 	return statistics;
+}
+
+WorkTotals CurrentWorkTotals() {
+	const auto& counters = Libs::Graphics::GetWorkCounters();
+	return {.draws         = counters.draws.load(std::memory_order_relaxed),
+	        .skipped_draws = counters.skipped_draws.load(std::memory_order_relaxed),
+	        .skip_reason   = counters.skip_reason.load(std::memory_order_relaxed),
+	        .gpu_ns        = counters.gpu_ns.load(std::memory_order_relaxed),
+	        .compile_ns    = counters.compile_ns.load(std::memory_order_relaxed),
+	        .bytes_read    = Libs::LibKernel::FileSystem::BytesRead()};
 }
 
 } // namespace Kyty::Uwp

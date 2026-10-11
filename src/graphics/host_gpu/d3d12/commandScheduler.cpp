@@ -4,6 +4,7 @@
 #include "common/profiler.h"
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
+#include "graphics/host_gpu/workCounters.h"
 
 #include <cstdlib>
 #include <optional>
@@ -111,6 +112,13 @@ CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graph
 
 CommandScheduler::~CommandScheduler() {
 	Shutdown();
+	if (m_timestamp_results != nullptr) {
+		m_timestamp_results->Unmap(0, nullptr);
+		m_timestamp_results->Release();
+	}
+	if (m_timestamps != nullptr) {
+		m_timestamps->Release();
+	}
 	if (m_mesh_list != nullptr) {
 		m_mesh_list->Release();
 	}
@@ -380,12 +388,65 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	m_command.m_list                  = m_list;
 	m_command.m_mesh_list             = m_mesh_list;
 	m_command.m_contains_encoded_draw = false;
+	StartTiming();
 	return m_command;
+}
+
+void CommandScheduler::StartTiming() {
+	ReadTimings();
+	if (m_timestamps == nullptr) {
+		const D3D12_QUERY_HEAP_DESC heap {D3D12_QUERY_HEAP_TYPE_TIMESTAMP, TimingSlots * 2, 0};
+		const D3D12_HEAP_PROPERTIES readback {D3D12_HEAP_TYPE_READBACK};
+		D3D12_RESOURCE_DESC         buffer {};
+		buffer.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+		buffer.Width            = uint64_t {TimingSlots} * 2 * sizeof(uint64_t);
+		buffer.Height           = 1;
+		buffer.DepthOrArraySize = 1;
+		buffer.MipLevels        = 1;
+		buffer.SampleDesc.Count = 1;
+		buffer.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		UINT64 frequency        = 0;
+		void*  values           = nullptr;
+		D3D12::Check(m_graphics.device->CreateQueryHeap(&heap, IID_PPV_ARGS(&m_timestamps)), "create timestamp query heap");
+		D3D12::Check(m_graphics.device->CreateCommittedResource(&readback, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+		                                                        IID_PPV_ARGS(&m_timestamp_results)),
+		             "create timestamp buffer");
+		D3D12::Check(m_timestamp_results->Map(0, nullptr, &values), "map timestamp buffer");
+		D3D12::Check(m_graphics.queue->GetTimestampFrequency(&frequency), "timestamp frequency");
+		m_timestamp_values = static_cast<const uint64_t*>(values);
+		m_ns_per_timestamp = frequency != 0 ? 1e9 / static_cast<double>(frequency) : 0.0;
+	}
+	if (m_timed_lists.size() < TimingSlots) {
+		m_timing_slot = m_next_timing_slot++ % TimingSlots;
+		m_list->EndQuery(m_timestamps, D3D12_QUERY_TYPE_TIMESTAMP, *m_timing_slot * 2);
+	}
+}
+
+void CommandScheduler::EndTiming() {
+	if (m_timing_slot) {
+		m_list->EndQuery(m_timestamps, D3D12_QUERY_TYPE_TIMESTAMP, *m_timing_slot * 2 + 1);
+		m_list->ResolveQueryData(m_timestamps, D3D12_QUERY_TYPE_TIMESTAMP, *m_timing_slot * 2, 2, m_timestamp_results,
+		                         uint64_t {*m_timing_slot} * 2 * sizeof(uint64_t));
+	}
+}
+
+void CommandScheduler::ReadTimings() {
+	auto& counters = GetWorkCounters();
+	while (!m_timed_lists.empty() && m_master.IsFree(m_timed_lists.front().tick)) {
+		const auto  slot  = m_timed_lists.front().slot;
+		const auto  start = m_timestamp_values[slot * 2];
+		const auto  end   = m_timestamp_values[slot * 2 + 1];
+		if (end > start) {
+			counters.gpu_ns.fetch_add(static_cast<uint64_t>(static_cast<double>(end - start) * m_ns_per_timestamp), std::memory_order_relaxed);
+		}
+		m_timed_lists.pop();
+	}
 }
 
 uint64_t CommandScheduler::Submit() {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(m_command.IsInvalid());
+	EndTiming();
 	D3D12::Check(m_list->Close(), "close command list");
 
 	uint64_t tick = 0;
@@ -395,6 +456,10 @@ uint64_t CommandScheduler::Submit() {
 		ID3D12CommandList* lists = m_list;
 		m_graphics.queue->ExecuteCommandLists(1, &lists);
 		D3D12::Check(m_graphics.queue->Signal(m_master.Handle(), tick), "signal GPU timeline");
+	}
+	if (m_timing_slot) {
+		m_timed_lists.push({tick, *m_timing_slot});
+		m_timing_slot.reset();
 	}
 
 	m_command.m_list                  = nullptr;
