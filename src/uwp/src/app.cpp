@@ -30,6 +30,7 @@
 #include <winrt/Windows.UI.ViewManagement.h>
 #include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
+#include <winrt/Windows.UI.Xaml.Media.h>
 
 #include <cctype>
 #include <chrono>
@@ -80,8 +81,9 @@ constexpr wchar_t GameMarkup[] = LR"xaml(
   <!-- The game menu (View + Menu, or Escape), in the system's look: the game keeps running behind
        it. -->
   <Grid x:Name="Menu" Visibility="Collapsed">
-    <Rectangle Fill="{ThemeResource SystemControlPageBackgroundMediumAltMediumBrush}" />
-    <Grid Width="320" HorizontalAlignment="Left" Padding="24,32,24,32"
+    <Rectangle x:Name="MenuDim" Fill="{ThemeResource SystemControlPageBackgroundMediumAltMediumBrush}" />
+    <!-- On the left; Settings on the right and without the dimming, so that the overlay at the top left shows each change. -->
+    <Grid x:Name="MenuPanel" Width="320" HorizontalAlignment="Left" Padding="24,32,24,32"
           Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />
@@ -89,11 +91,22 @@ constexpr wchar_t GameMarkup[] = LR"xaml(
         <RowDefinition Height="*" />
         <RowDefinition Height="Auto" />
       </Grid.RowDefinitions>
-      <TextBlock Text="Game menu" Style="{StaticResource CaptionTextBlockStyle}"
+      <TextBlock x:Name="MenuCaption" Text="Game menu" Style="{StaticResource CaptionTextBlockStyle}"
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
       <TextBlock x:Name="MenuTitle" Grid.Row="1" Style="{StaticResource SubtitleTextBlockStyle}"
                  MaxLines="3" TextTrimming="CharacterEllipsis" Margin="0,4,0,24" />
-      <StackPanel Grid.Row="2">
+      <!-- Game menu › Settings: tiles as on the settings page, and under them the explanation of the one with the focus. -->
+      <Grid x:Name="MenuSettings" Grid.Row="2" RowSpacing="16" Margin="0,0,0,16" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <ScrollViewer VerticalScrollBarVisibility="Hidden">
+          <StackPanel x:Name="MenuTiles" Spacing="8" />
+        </ScrollViewer>
+        <StackPanel x:Name="MenuExplanation" Grid.Row="1" Spacing="12" />
+      </Grid>
+      <StackPanel x:Name="MenuList" Grid.Row="2">
         <ListView x:Name="MenuItems" SelectionMode="None" IsItemClickEnabled="True" Margin="-12,0">
           <ListView.ItemContainerStyle>
             <Style TargetType="ListViewItem">
@@ -252,16 +265,53 @@ winrt::fire_and_forget ShowLaunchBackdrop(xaml::Controls::Image image, std::file
 	}
 }
 
-winrt::hstring OverlayItem(bool shown) {
-	return shown ? L"Hide overlay" : L"Show overlay";
+// In Segoe MDL2 Assets.
+constexpr wchar_t CHEVRON_RIGHT[] = {0xE76C, 0};
+
+// An entry of the game menu; `more` adds the chevron of an entry that opens a submenu.
+xaml::Controls::ListViewItem MenuEntry(const wchar_t* text, bool more = false) {
+	xaml::Controls::ListViewItem entry;
+	entry.HorizontalContentAlignment(xaml::HorizontalAlignment::Stretch);
+	xaml::Controls::Grid content;
+	content.ColumnDefinitions().Append(xaml::Controls::ColumnDefinition());
+	xaml::Controls::ColumnDefinition chevron_column;
+	chevron_column.Width(xaml::GridLengthHelper::Auto());
+	content.ColumnDefinitions().Append(chevron_column);
+	xaml::Controls::TextBlock label;
+	label.Text(text);
+	content.Children().Append(label);
+	if (more) {
+		xaml::Controls::FontIcon chevron;
+		chevron.FontFamily(xaml::Media::FontFamily(L"Segoe MDL2 Assets"));
+		chevron.Glyph(CHEVRON_RIGHT);
+		chevron.FontSize(12);
+		chevron.VerticalAlignment(xaml::VerticalAlignment::Center);
+		xaml::Controls::Grid::SetColumn(chevron, 1);
+		content.Children().Append(chevron);
+	}
+	entry.Content(content);
+	return entry;
+}
+
+void FocusControl(xaml::DependencyObject const& target) {
+	if (auto control = target.try_as<xaml::Controls::Control>()) {
+		control.Focus(xaml::FocusState::Keyboard);
+	}
 }
 
 // Sets up the game menu and the overlay of the game's `page`.
 void SetUpGameMenu(xaml::Controls::Grid const& page, winrt::hstring const& title) {
 	page.FindName(L"MenuTitle").as<xaml::Controls::TextBlock>().Text(title);
-	auto menu   = page.FindName(L"Menu").as<xaml::UIElement>();
-	auto items  = page.FindName(L"MenuItems").as<xaml::Controls::ListView>();
-	auto status = page.FindName(L"MenuStatus").as<xaml::UIElement>();
+	auto menu          = page.FindName(L"Menu").as<xaml::UIElement>();
+	auto dim           = page.FindName(L"MenuDim").as<xaml::UIElement>();
+	auto panel         = page.FindName(L"MenuPanel").as<xaml::FrameworkElement>();
+	auto caption       = page.FindName(L"MenuCaption").as<xaml::Controls::TextBlock>();
+	auto list          = page.FindName(L"MenuList").as<xaml::UIElement>();
+	auto items         = page.FindName(L"MenuItems").as<xaml::Controls::ListView>();
+	auto status        = page.FindName(L"MenuStatus").as<xaml::UIElement>();
+	auto settings_view = page.FindName(L"MenuSettings").as<xaml::UIElement>();
+	auto tiles         = page.FindName(L"MenuTiles").as<xaml::Controls::StackPanel>();
+	auto explanation   = page.FindName(L"MenuExplanation").as<xaml::Controls::StackPanel>();
 	SetHints(page.FindName(L"MenuHints").as<xaml::Controls::Border>(), {{XboxButton::A, L"Select"}, {XboxButton::B, L"Back"}});
 
 	// The overlay goes under the menu, over the launch screen: its log shows the start too.
@@ -269,41 +319,73 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, winrt::hstring const& title
 	page.Children().IndexOf(menu, menu_index);
 	auto overlay = std::make_shared<GameOverlay>(page, menu_index, title);
 	overlay->Show(OverlayShown());
-	const auto toggle_overlay = [overlay, items] {
+	const auto toggle_overlay = [overlay] {
 		const bool shown = !overlay->Shown();
 		overlay->Show(shown);
 		SetOverlayShown(shown);
-		items.Items().SetAt(1, winrt::box_value(OverlayItem(shown)));
 	};
 
-	const winrt::hstring resume = L"Resume";
-	const winrt::hstring dump   = L"Save frame dump";
-	const winrt::hstring quit   = L"Quit to library";
-	items.Items().Append(winrt::box_value(resume));
-	items.Items().Append(winrt::box_value(OverlayItem(overlay->Shown())));
-	items.Items().Append(winrt::box_value(dump));
-	items.Items().Append(winrt::box_value(quit));
+	const auto resume   = MenuEntry(L"Resume");
+	const auto settings = MenuEntry(L"Settings", true);
+	const auto dump     = MenuEntry(L"Save frame dump");
+	const auto quit     = MenuEntry(L"Quit to library");
+	for (const auto& entry: {resume, settings, dump, quit}) {
+		items.Items().Append(entry);
+	}
 
-	const auto show = [menu, items](bool open) {
+	// The menu's two views: its entries, and Game menu › Settings.
+	const auto set_view = [dim, panel, caption, list, settings_view](bool settings_shown) {
+		dim.Visibility(settings_shown ? xaml::Visibility::Collapsed : xaml::Visibility::Visible);
+		panel.HorizontalAlignment(settings_shown ? xaml::HorizontalAlignment::Right : xaml::HorizontalAlignment::Left);
+		list.Visibility(settings_shown ? xaml::Visibility::Collapsed : xaml::Visibility::Visible);
+		settings_view.Visibility(settings_shown ? xaml::Visibility::Visible : xaml::Visibility::Collapsed);
+		caption.Text(settings_shown ? std::wstring(L"Game menu ") + wchar_t {0x203A} + L" Settings" : std::wstring(L"Game menu"));
+	};
+	const auto in_settings = [settings_view] { return settings_view.Visibility() == xaml::Visibility::Visible; };
+	// The overlay's tiles, made anew each time so that they show the current values; a change shows at once.
+	const auto open_settings = [set_view, tiles, explanation, overlay] {
+		set_view(true);
+		tiles.Children().Clear();
+		explanation.Children().Clear();
+		auto values = std::make_shared<AppSettings>(LoadSettings());
+		AddOverlaySettings(tiles, explanation, values, [values, overlay] {
+			SaveSettings(*values);
+			overlay->Apply(*values);
+			overlay->Show(OverlayShown());
+		});
+		tiles.UpdateLayout();
+		FocusControl(tiles.Children().GetAt(0));
+	};
+	const auto close_settings = [set_view, items] {
+		set_view(false);
+		items.UpdateLayout();
+		FocusControl(items.ContainerFromIndex(1));
+	};
+
+	const auto show = [menu, items, set_view](bool open) {
 		menu.Visibility(open ? xaml::Visibility::Visible : xaml::Visibility::Collapsed);
 		PauseGameInput(open);
 		if (open) {
+			set_view(false);
 			menu.UpdateLayout();
-			if (auto first = items.ContainerFromIndex(0).try_as<xaml::Controls::Control>()) {
-				first.Focus(xaml::FocusState::Keyboard);
-			}
+			FocusControl(items.ContainerFromIndex(0));
 		}
 	};
 	const auto is_open = [menu] { return menu.Visibility() == xaml::Visibility::Visible; };
 
-	items.ItemClick([show, items, status, resume, dump, quit, toggle_overlay](
-	                    auto const&, xaml::Controls::ItemClickEventArgs const& args) {
-		const auto item = winrt::unbox_value<winrt::hstring>(args.ClickedItem());
-		if (item == resume) {
+	items.ItemClick([show, open_settings, status, items, resume, settings, dump, quit](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
+		// The entry, or its content: an entry is its own container, and the list may report either.
+		const auto clicked = args.ClickedItem();
+		const auto is      = [&clicked](xaml::Controls::ListViewItem const& entry) { return clicked == entry || clicked == entry.Content(); };
+		if (is(resume)) {
 			show(false);
 			return;
 		}
-		if (item == dump) {
+		if (is(settings)) {
+			open_settings();
+			return;
+		}
+		if (is(dump)) {
 			// The renderer takes the request at the next flip and writes the render targets as PNG files: the line under the menu follows it.
 			Libs::Graphics::FrameDump::Request();
 			auto text = status.try_as<xaml::Controls::TextBlock>();
@@ -324,12 +406,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, winrt::hstring const& title
 			timer.Start();
 			return;
 		}
-		if (item != quit) {
-			toggle_overlay();
-			items.UpdateLayout();
-			if (auto entry = items.ContainerFromIndex(1).try_as<xaml::Controls::Control>()) {
-				entry.Focus(xaml::FocusState::Keyboard);
-			}
+		if (!is(quit)) {
 			return;
 		}
 		items.IsEnabled(false);
@@ -337,13 +414,17 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, winrt::hstring const& title
 		EmulatorHost::Get().QuitToLibrary();
 	});
 
-	// B (or Escape) closes the menu; View + Menu (or Escape) opens it. View + Menu with both
-	// triggers pulled (or F3) shows or hides the overlay.
-	menu.KeyDown([show](auto const&, xaml::Input::KeyRoutedEventArgs const& args) {
+	// B (or Escape) goes back from Settings to the entries and closes the menu from there; View + Menu (or Escape) opens it. View + Menu
+	// with both triggers pulled (or F3) shows or hides the overlay.
+	menu.KeyDown([show, in_settings, close_settings](auto const&, xaml::Input::KeyRoutedEventArgs const& args) {
 		if (args.Key() == winrt::Windows::System::VirtualKey::GamepadB ||
 		    args.Key() == winrt::Windows::System::VirtualKey::Escape) {
 			args.Handled(true);
-			show(false);
+			if (in_settings()) {
+				close_settings();
+			} else {
+				show(false);
+			}
 		}
 	});
 	winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread().KeyDown(
