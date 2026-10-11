@@ -65,6 +65,12 @@ struct AppSettings {
 	// (Config::TextureMipSkip). 0: off.
 	uint32_t texture_mip_skip          = 1;
 	uint32_t texture_mip_skip_min_size = 2048;
+	// The settings page: uncompressed textures lose those levels too (Config::TextureMipSkipUncompressed). Off.
+	bool texture_mip_skip_uncompressed = false;
+	// The settings page, for speed: textures sampled this many mip levels coarser (Config::TextureLodBias; 0: off), and anisotropic filtering
+	// (Config::AnisotropicFiltering; on).
+	uint32_t texture_lod_bias      = 0;
+	bool     anisotropic_filtering = true;
 	// Debugging, only in the file: ask for a frame dump this many seconds after the game started (0: never; the game menu has Save frame dump).
 	uint32_t frame_dump_after_s = 0;
 	// Debugging, only in the file: 1 adds the average color of the large floating-point render targets after each draw to the frame dump's draw log (slow).

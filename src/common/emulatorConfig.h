@@ -122,6 +122,12 @@ struct ConfigOptions {
 	// without its texture_mip_skip finest mip levels: a quarter of the memory for one level. 0: off.
 	uint32_t texture_mip_skip          = 0;
 	uint32_t texture_mip_skip_min_size = 2048;
+	// ... and uncompressed sampled textures with such a mip chain too.
+	bool     texture_mip_skip_uncompressed = false;
+	// Low quality, for speed (the D3D12 samplers): textures are sampled this many mip levels coarser (a LOD bias), and without anisotropic
+	// filtering when it is off.
+	uint32_t texture_lod_bias      = 0;
+	bool     anisotropic_filtering = true;
 	// GPU memory savings (a scratch buffer made when needed, committed small pool buffers, 16 MB allocator blocks) and the video decoder's threads: on, unless a setting turns them
 	// off for testing.
 	bool gpu_memory_savings   = true;
@@ -210,6 +216,9 @@ uint32_t GuestRamPagerMode();
 uint32_t GuestCommitLimitMb();
 uint32_t TextureMipSkip();
 uint32_t TextureMipSkipMinSize();
+bool     TextureMipSkipUncompressed();
+uint32_t TextureLodBias();
+bool     AnisotropicFiltering();
 bool GpuMemorySavings();
 bool GpuMemoryLog();
 bool PipelineCacheAnyBuild();
