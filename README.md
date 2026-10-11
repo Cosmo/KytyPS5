@@ -7,6 +7,23 @@
 [![Status](https://img.shields.io/badge/status-active%20development-orange.svg)](#current-status)
 [![License](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
 
+## KytyPS5 for Xbox
+
+This fork runs KytyPS5 on the **Xbox Series X** in Developer Mode, as a UWP app that also runs on Windows. Everything after this section is upstream's README and applies to the desktop builds.
+
+What the Xbox version adds:
+
+- **An app made for the controller.** A game library with covers, game options, settings, trophies, a controller guide and a statistics overlay, laid out like the Xbox's own screens.
+- **A Direct3D 12 renderer** next to upstream's Vulkan renderer. Shaders are translated with Mesa's `spirv_to_dxil`.
+- **Room for big games on the console.** Game memory is committed as it is used, a swap file keeps games within the Series X's app memory limit, and texture options trade detail for memory.
+- **Up to four players.** The DualSense's touchpad, motion sensors, adaptive triggers, haptic feedback, speaker and microphone are mapped to the Xbox controller and its headset.
+- **Games on a USB drive.** Game folders and `.zar` archives play from a drive, and saves, patches and trophies can live there too.
+
+The Xbox version is experimental. Not every game that runs on a PC runs on the Xbox, and draws that the Series X cannot do, such as tessellation, are skipped.
+
+- [XBOX_CHANGES.md](XBOX_CHANGES.md) lists every change against upstream, one commit per topic, and the known limits on the Series X.
+- [src/uwp/README.md](src/uwp/README.md) explains how to build and install the app and how to set up your games.
+
 **[Weekly updates](https://github.com/KytyPS5/KytyPS5/discussions/862)** — game progress, recent fixes, and ongoing development.
 
 **[Development on Discord](https://discord.gg/UNrkMqGaBg)** — KytyPS5 development.
