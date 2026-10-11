@@ -194,6 +194,7 @@ static callback_func_t g_test_backing_read                         = nullptr;
 #endif
 
 static std::string GuestPrivateMemoryReport(); // (defined below, once the virtual ranges are)
+static std::string GuestPrivateMemorySummary(); // (likewise)
 
 #include "memoryAddressSpace.inc"
 
@@ -692,6 +693,34 @@ public:
 		}
 		return fmt::format("guest private memory: stacks {} MB in {} ranges, code {} MB in {}, runtime {} MB in {}. Biggest:{}\n", total[0] >> 20u, count[0], total[1] >> 20u, count[1],
 		                   total[2] >> 20u, count[2], top);
+	}
+
+	// The same as a person reads it: the game's code by module (the biggest three), its thread stacks, and the runtime's memory when there is some.
+	std::string SummarizePrivate() {
+		Common::LockGuard                lock(m_mutex);
+		uint64_t                         stacks = 0, code = 0, runtime = 0;
+		std::map<std::string, uint64_t>  modules;
+		for (const auto& r: m_ranges) {
+			if (r.type == VirtualRangeType::Stack) {
+				stacks += r.size;
+			} else if (r.type == VirtualRangeType::Code) {
+				code += r.size;
+				modules[r.name] += r.size;
+			} else if (r.type == VirtualRangeType::Runtime) {
+				runtime += r.size;
+			}
+		}
+		std::vector<std::pair<std::string, uint64_t>> biggest(modules.begin(), modules.end());
+		std::sort(biggest.begin(), biggest.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+		std::string names;
+		for (size_t i = 0; i < std::min<size_t>(3, biggest.size()); i++) {
+			names += fmt::format("{}{} {} MB", i == 0 ? "" : ", ", biggest[i].first, biggest[i].second >> 20u);
+		}
+		if (biggest.size() > 3) {
+			names += ", ...";
+		}
+		return fmt::format("Game code {} MB ({}), thread stacks {} MB{}\n", code >> 20u, names, stacks >> 20u,
+		                   runtime >> 20u != 0 ? fmt::format(", runtime {} MB", runtime >> 20u) : std::string());
 	}
 
 private:
@@ -3957,6 +3986,10 @@ static uint64_t AllocateGuestRuntimeMemory(uint64_t search_addr, uint64_t size,
 
 static std::string GuestPrivateMemoryReport() {
 	return g_virtual_ranges != nullptr ? g_virtual_ranges->DescribePrivate() : std::string {};
+}
+
+static std::string GuestPrivateMemorySummary() {
+	return g_virtual_ranges != nullptr ? g_virtual_ranges->SummarizePrivate() : std::string {};
 }
 
 uint64_t AllocateProgramMemory(uint64_t search_addr, uint64_t size, VirtualMemory::Mode mode,
