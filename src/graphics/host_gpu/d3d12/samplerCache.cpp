@@ -1,11 +1,13 @@
 #include "graphics/host_gpu/d3d12/samplerCache.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/d3d12/descriptorHeap.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/samplerInfo.h"
 
+#include <algorithm>
 #include <atomic>
 
 namespace Libs::Graphics {
@@ -55,7 +57,8 @@ SamplerHandle SamplerCache::GetSampler(const ShaderSamplerResource& guest, bool 
 	D3D12_SAMPLER_DESC desc {};
 	const auto reduction = info.compareEnable != VK_FALSE ? D3D12_FILTER_REDUCTION_TYPE_COMPARISON
 	                                                      : D3D12_FILTER_REDUCTION_TYPE_STANDARD;
-	if (info.anisotropyEnable != VK_FALSE) {
+	// The settings for speed: no anisotropic filtering, and the mip levels sampled this many coarser (Config::TextureLodBias).
+	if (info.anisotropyEnable != VK_FALSE && Config::AnisotropicFiltering()) {
 		desc.Filter        = D3D12_ENCODE_ANISOTROPIC_FILTER(reduction);
 		desc.MaxAnisotropy = static_cast<UINT>(info.maxAnisotropy);
 	} else {
@@ -69,7 +72,7 @@ SamplerHandle SamplerCache::GetSampler(const ShaderSamplerResource& guest, bool 
 	desc.AddressU       = AddressMode(info.addressModeU);
 	desc.AddressV       = AddressMode(info.addressModeV);
 	desc.AddressW       = AddressMode(info.addressModeW);
-	desc.MipLODBias     = info.mipLodBias;
+	desc.MipLODBias     = std::clamp(info.mipLodBias + static_cast<float>(Config::TextureLodBias()), -16.0f, 15.99f);
 	// vk::CompareOp and D3D12_COMPARISON_FUNC list the same functions, offset by one.
 	desc.ComparisonFunc = info.compareEnable != VK_FALSE
 	                          ? static_cast<D3D12_COMPARISON_FUNC>(static_cast<int>(info.compareOp) + 1)
