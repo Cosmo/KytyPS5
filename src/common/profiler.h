@@ -36,6 +36,8 @@ struct Lifecycle {
 
 } // namespace Profiler
 
+#ifdef TRACY_ENABLE
+
 #define KYTY_PROFILER_CONCAT_IMPL(a, b) a##b
 #define KYTY_PROFILER_CONCAT(a, b)      KYTY_PROFILER_CONCAT_IMPL(a, b)
 #define KYTY_PROFILER_COLOR_OR_DEFAULT(default_color, ...)                                         \
@@ -54,6 +56,14 @@ struct Lifecycle {
 	    TRACY_CALLSTACK, tracy::ProfilerAvailable())
 
 #define KYTY_PROFILER_FUNCTION(...) KYTY_PROFILER_BLOCK(nullptr __VA_OPT__(, ) __VA_ARGS__)
+
+#else
+
+// A build without Tracy's zones (KYTY_PROFILER off): they cost nothing.
+#define KYTY_PROFILER_BLOCK(name, ...) static_cast<void>(0)
+#define KYTY_PROFILER_FUNCTION(...)    static_cast<void>(0)
+
+#endif
 
 #define KYTY_PROFILER_THREAD(name) Profiler::SetThreadName(name)
 

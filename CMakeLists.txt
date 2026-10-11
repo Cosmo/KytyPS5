@@ -200,7 +200,22 @@ if(KYTY_BUILD_UWP)
 	# Everything in this build directory runs inside the UWP app container (src/uwp/README.md).
 	add_compile_definitions(KYTY_PLATFORM_UWP=1)
 	set(KYTY_BUILD_LAUNCHER OFF)
+	if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+		# For the Series X's CPU (Zen 2) and every PC CPU since about 2013 (x86-64-v3: AVX2, FMA, BMI), tuned for Zen 2, and ThinLTO in release
+		# builds: the libraries built here too. A desktop build keeps the plain x86-64 target.
+		add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/clang:-march=x86-64-v3> $<$<COMPILE_LANGUAGE:C,CXX>:/clang:-mtune=znver2>
+		                    $<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<CONFIG:Release>>:/clang:-flto=thin>)
+		add_link_options($<$<CONFIG:Release>:/lldltocache:${CMAKE_BINARY_DIR}/lto-cache>)
+	endif()
 endif()
+# Tracy's profiling zones: the profiler only starts when the config asks for it, but every zone still costs a check. The UWP app leaves them
+# out unless asked (-DKYTY_PROFILER=ON for a profiling build).
+if(KYTY_BUILD_UWP)
+	set(KYTY_PROFILER_DEFAULT OFF)
+else()
+	set(KYTY_PROFILER_DEFAULT ON)
+endif()
+option(KYTY_PROFILER "Tracy's profiling zones in the build" ${KYTY_PROFILER_DEFAULT})
 
 config_compiler_and_linker()
 
