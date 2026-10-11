@@ -178,9 +178,10 @@ winrt::Windows::UI::Color GradeColor(int grade) {
 	}
 }
 
-// The games of the last library scan that have trophy packages, by name (a background thread: it reads the games and LocalState).
+// The games of the last library scan that have trophy packages, by name (a background thread: it reads the games and the user data folder).
 std::vector<GameTrophies> LoadAllTrophies(int language) {
 	std::vector<GameTrophies> games;
+	const auto                user_data = UserDataFolder(LoadSettings());
 	for (auto& game: LoadGameLibrary()) {
 		GameTrophies entry;
 		entry.game = std::move(game);
@@ -197,7 +198,7 @@ std::vector<GameTrophies> LoadAllTrophies(int language) {
 			if (package.package.trophies.empty()) {
 				continue;
 			}
-			package.unlocks  = Trophies::LoadUnlockData(Trophies::UnlocksPath(LocalStateFolder(), entry.game.title_id, USER_ID, label));
+			package.unlocks  = Trophies::LoadUnlockData(Trophies::UnlocksPath(user_data, entry.game.title_id, USER_ID, label));
 			package.progress = Trophies::GetProgress(package.package, package.unlocks);
 			for (size_t grade = 0; grade < entry.progress.total_grade.size(); grade++) {
 				entry.progress.total_grade[grade] += package.progress.total_grade[grade];
