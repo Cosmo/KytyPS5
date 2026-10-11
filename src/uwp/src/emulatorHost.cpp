@@ -308,6 +308,11 @@ uint64_t EmulatorHost::RunTimeMs() const {
 	return start == 0 ? 0 : GetTickCount64() - start;
 }
 
+uint64_t EmulatorHost::FramesPresented() const {
+	std::lock_guard lock(m_presents_mutex);
+	return m_presents;
+}
+
 std::vector<double> EmulatorHost::RecentFrameTimes(size_t count) const {
 	LARGE_INTEGER frequency {};
 	QueryPerformanceFrequency(&frequency);
