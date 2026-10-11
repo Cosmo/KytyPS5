@@ -1414,6 +1414,8 @@ public:
 		std::vector<uint8_t> copy(kWindow);
 		auto                 last_report = Clock::now();
 		uint64_t             previous[6] = {}; // swept, evicted, aborted, page ins, page in ns, written
+		uint64_t             previous_problems[4] = {}; // errors, torn, corrupt, evicted on a failed commit
+		std::string          last_game_memory;          // the game memory line last written
 		// The budget in force. A commit that failed (Regions::MakeRoom evicted on the spot) is the wall of the process: the GPU and the heap share its
 		// memory and grow, and the guest was at the wall with no room for them. The budget drops to what the guest held then minus a margin, and creeps
 		// back up (8 MB a second) once the wall was not hit for half a minute.
@@ -1578,15 +1580,42 @@ public:
 				                             counters.written.load()};
 				const auto     seconds    = std::chrono::duration<double>(now - last_report).count();
 				const uint64_t page_ins   = current[3] - previous[3];
+				const auto     gigabytes  = [](uint64_t bytes) { return static_cast<double>(bytes) / static_cast<double>(uint64_t {1} << 30u); };
+				// What a person reads: the swap file and its traffic.
 				Log::WriteToConsoleAndLog(fmt::format(
-				    "pager: resident {} MB of {} MB, {} windows in the store ({} MB); last {:.0f} s: swept {}, evicted {} ({:.0f} MB/s written), aborted {}, paged in {} (avg {:.0f} us), "
-				    "store reads {}, errors {}, torn {}, corrupt {}, evicted on a failed commit {}, app memory {} of {} MB, views {} (turned private {})\n",
-				    resident() >> 20u, effective >> 20u, evicted_now, (evicted_now * kWindow) >> 20u, seconds, current[0] - previous[0], current[1] - previous[1],
-				    static_cast<double>(current[5] - previous[5]) / 1048576.0 / seconds, current[2] - previous[2], page_ins,
-				    page_ins != 0 ? static_cast<double>(current[4] - previous[4]) / 1000.0 / static_cast<double>(page_ins) : 0.0, counters.read_hits.load(), counters.errors.load(), counters.torn.load(), counters.corrupt.load(), counters.emergency.load(), Config::AppMemoryUsage() >> 20u, app_limit >> 20u, Xbox::Lazy::GetCounters().views.load(), counters.privatized.load()));
+				    "Swap: {:.1f} GB in RAM (limit {:.1f} GB), {:.1f} GB in the file; last {:.0f} s: {} MB out, {} MB in{}\n", gigabytes(resident()),
+				    gigabytes(effective), gigabytes(evicted_now * kWindow), seconds, (current[5] - previous[5]) >> 20u, (page_ins * kWindow) >> 20u,
+				    page_ins != 0 ? fmt::format(" ({:.1f} ms each)", static_cast<double>(current[4] - previous[4]) / 1e6 / static_cast<double>(page_ins)) : std::string()));
+				// Problems, only when there were some.
+				const uint64_t problems[4] = {counters.errors.load(), counters.torn.load(), counters.corrupt.load(), counters.emergency.load()};
+				std::string    problem_text;
+				const char*    problem_names[4] = {"errors", "torn windows", "corrupt windows", "windows evicted on a failed commit"};
+				for (int i = 0; i < 4; i++) {
+					if (problems[i] != previous_problems[i]) {
+						problem_text += fmt::format("{}{} {}", problem_text.empty() ? "" : ", ", problems[i] - previous_problems[i], problem_names[i]);
+					}
+				}
+				if (!problem_text.empty()) {
+					Log::WriteToConsoleAndLog(fmt::format("Swap problems in the last {:.0f} s: {}\n", seconds, problem_text));
+				}
+				std::copy(std::begin(problems), std::end(problems), std::begin(previous_problems));
+				// Everything, with the developer setting's memory report.
+				if (Config::GpuMemoryLog()) {
+					Log::WriteToConsoleAndLog(fmt::format(
+					    "pager: resident {} MB of {} MB, {} windows in the store ({} MB); last {:.0f} s: swept {}, evicted {} ({:.0f} MB/s written), aborted {}, paged in {} (avg {:.0f} us), "
+					    "store reads {}, errors {}, torn {}, corrupt {}, evicted on a failed commit {}, app memory {} of {} MB, views {} (turned private {})\n",
+					    resident() >> 20u, effective >> 20u, evicted_now, (evicted_now * kWindow) >> 20u, seconds, current[0] - previous[0], current[1] - previous[1],
+					    static_cast<double>(current[5] - previous[5]) / 1048576.0 / seconds, current[2] - previous[2], page_ins,
+					    page_ins != 0 ? static_cast<double>(current[4] - previous[4]) / 1000.0 / static_cast<double>(page_ins) : 0.0, counters.read_hits.load(), counters.errors.load(), counters.torn.load(), counters.corrupt.load(), counters.emergency.load(), Config::AppMemoryUsage() >> 20u, app_limit >> 20u, Xbox::Lazy::GetCounters().views.load(), counters.privatized.load()));
+					Log::WriteToConsoleAndLog(GuestPrivateMemoryReport());
+				}
 				std::copy(std::begin(current), std::end(current), std::begin(previous));
 				last_report = now;
-				Log::WriteToConsoleAndLog(GuestPrivateMemoryReport());
+				// The game's code and stacks, when they changed.
+				if (auto game_memory = GuestPrivateMemorySummary(); game_memory != last_game_memory) {
+					Log::WriteToConsoleAndLog(game_memory);
+					last_game_memory = std::move(game_memory);
+				}
 			}
 		}
 	}
