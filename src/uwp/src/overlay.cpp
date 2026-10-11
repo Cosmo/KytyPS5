@@ -819,13 +819,25 @@ void AddOverlaySettings(xaml::Controls::Panel const& panel, xaml::Controls::Stac
 	     L"Frame rate: the frames per second and the time per frame. Compact: also a graph of the last frames, the GPU's time per frame, RAM and "
 	     L"the swap file. Full: everything, from the draws to the shaders.",
 	     L"To turn it off and on during a game, pull both triggers while pressing View and Menu together."});
-	AddSwitch(
-	    panel, explanation, L"Log on screen", settings->overlay_log,
-	    [settings, changed](bool on) {
-		    settings->overlay_log = on;
-		    changed();
-	    },
-	    {L"The latest lines of the emulator's log, under the game.", L"The log file is written either way."});
+	// Off, or 2 to 20 lines in steps of 2 (overlay_log and overlay_log_lines; an odd number from the settings file shows as the next even one).
+	{
+		constexpr auto            MAX_LINES = static_cast<uint32_t>(LOG_LINES);
+		std::vector<std::wstring> lines {L"Off"};
+		for (uint32_t count = 2; count <= MAX_LINES; count += 2) {
+			lines.push_back(std::to_wstring(count) + L" lines");
+		}
+		const size_t selected = settings->overlay_log ? (std::clamp<uint32_t>(settings->overlay_log_lines, 2, MAX_LINES) + 1) / 2 : 0;
+		AddChoice(
+		    panel, explanation, L"Log on screen", std::move(lines), selected,
+		    [settings, changed](size_t index) {
+			    settings->overlay_log = index != 0;
+			    if (index != 0) {
+				    settings->overlay_log_lines = static_cast<uint32_t>(index) * 2;
+			    }
+			    changed();
+		    },
+		    {L"The latest lines of the emulator's log, under the game.", L"The log file is written either way."});
+	}
 	AddSwitch(
 	    panel, explanation, L"Controllers on screen", settings->overlay_controllers,
 	    [settings, changed](bool on) {
