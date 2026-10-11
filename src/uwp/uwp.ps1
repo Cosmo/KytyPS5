@@ -199,17 +199,14 @@ function Invoke-Deploy {
 
 function Invoke-Package {
     # An .msix of the layout for the Xbox, with the framework packages it depends on, signed with
-    # the certificate CN=KytyPS5 of the current user (README.md). Each package gets a newer
+    # KytyPS5-signing.pfx, the public test key for CN=KytyPS5 (README.md). Each package gets a newer
     # version than the last, so it installs over it.
     if (-not (Test-Path "$layout\AppxManifest.xml")) { Fail 'no package layout; run the build first' }
     # The app is stamped with the git revision when it is built; a build from a tree with uncommitted changes is "dirty", and the emulator then keeps no
     # pipeline cache (the shaders are translated again at every start).
     $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes("$layout\kyty_uwp.exe"))
     if ($text -match '[0-9a-f]{7,}-dirty') { Write-Host 'WARNING: this build is dirty (made from uncommitted changes): the pipeline cache is off. Commit and run build again.' -ForegroundColor Yellow }
-    $certificate = Get-ChildItem Cert:\CurrentUser\My | Where-Object {
-        $_.Subject -eq 'CN=KytyPS5' -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date)
-    } | Select-Object -First 1
-    if (-not $certificate) { Fail 'no certificate CN=KytyPS5 to sign with (see README.md)' }
+    $key = "$PSScriptRoot\KytyPS5-signing.pfx"
     $vclibs = "${env:ProgramFiles(x86)}\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.VCLibs" +
         '\14.0\Appx\Retail\x64\Microsoft.VCLibs.x64.14.00.appx'
     $winui = "$WinUIRoot\tools\AppX\x64\Release\Microsoft.UI.Xaml.2.8.appx"
@@ -224,8 +221,10 @@ function Invoke-Package {
     # The layout without what registering it on this PC added.
     Get-ChildItem $layout -Exclude 'microsoft.system.package.metadata' |
         Copy-Item -Destination $staging -Recurse
-    $now = Get-Date
-    $version = '1.0.{0}.{1}' -f ($now.Year % 100 * 1000 + $now.DayOfYear), [int]$now.ToString('HHmm')
+    # The time in UTC, so that packages made on any machine (or on GitHub) count up; 1.1 since the
+    # switch from local time (1.0).
+    $now = [DateTime]::UtcNow
+    $version = '1.1.{0}.{1}' -f ($now.Year % 100 * 1000 + $now.DayOfYear), [int]$now.ToString('HHmm')
     $manifest = "$staging\AppxManifest.xml"
     (Get-Content $manifest -Raw) -replace '(<Identity [^>]*Version=")[^"]+', "`${1}$version" |
         Set-Content $manifest -Encoding utf8 -NoNewline
@@ -233,7 +232,7 @@ function Invoke-Package {
     Step "package $msix"
     makeappx pack /d $staging /p $msix /o | Select-Object -Last 1
     if ($LASTEXITCODE -ne 0) { Fail 'makeappx' }
-    signtool sign /q /fd SHA256 /sha1 $certificate.Thumbprint $msix
+    signtool sign /q /fd SHA256 /f $key $msix
     if ($LASTEXITCODE -ne 0) { Fail 'signtool' }
     Remove-Item $staging -Recurse -Force
     New-Item -ItemType Directory "$out\Dependencies" | Out-Null
