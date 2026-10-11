@@ -135,6 +135,15 @@ void                   InstallGpuResources(Graphics::RenderContext* renderer) no
 bool EnsureGuestCommitted(uint64_t vaddr, uint64_t size);
 // Xbox fork (debugging the pager): what happened to the guest memory windows that these values point into (printed when the game crashes).
 void DumpPagerContext(const uint64_t* values, size_t count);
+// Xbox fork (the overlay): guest memory in RAM (lazily committed windows), in the pager's file, and written to the file and read back since the start, in
+// bytes. All 0 without lazy memory; the last three 0 without the pager.
+struct GuestMemoryTotals {
+	uint64_t resident    = 0;
+	uint64_t swapped     = 0;
+	uint64_t swapped_out = 0;
+	uint64_t swapped_in  = 0;
+};
+[[nodiscard]] GuestMemoryTotals GetGuestMemoryTotals();
 // Xbox fork (the pager): a guest buffer that a host call reads or writes through the system (file and network I/O). It is committed (and brought
 // back from the pager's store) when the scope starts and stays in memory until it ends; the system cannot fault a window back in.
 class GuestBufferScope {

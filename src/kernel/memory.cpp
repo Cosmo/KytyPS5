@@ -968,6 +968,10 @@ void DumpPagerContext(const uint64_t* values, size_t count) {
 	}
 }
 
+GuestMemoryTotals GetGuestMemoryTotals() {
+	return g_guest_address_space != nullptr ? g_guest_address_space->GetTotals() : GuestMemoryTotals {};
+}
+
 GuestBufferScope::GuestBufferScope(uint64_t vaddr, uint64_t size) {
 	if (g_guest_address_space != nullptr) {
 		m_id = g_guest_address_space->PinBuffer(vaddr, size);
