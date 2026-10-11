@@ -43,6 +43,9 @@ AppSettings LoadSettings() {
 			}
 		}
 	}
+	if (const auto path = json.find("user_data_path"); path != json.end() && path->is_string()) {
+		settings.user_data_path = winrt::to_hstring(path->get<std::string>()).c_str();
+	}
 	const auto read = [&json](const char* key, auto& value) {
 		const auto it = json.find(key);
 		if (it != json.end() && !it->is_null()) {
@@ -102,6 +105,7 @@ void SaveSettings(const AppSettings& settings) {
 		folders.push_back(winrt::to_string(folder.wstring()));
 	}
 	json["game_folders"]     = folders;
+	json["user_data_path"]   = winrt::to_string(settings.user_data_path.wstring());
 	json["screen_width"]     = settings.screen_width;
 	json["screen_height"]    = settings.screen_height;
 	json["vsync"]            = settings.vsync;
@@ -125,6 +129,10 @@ void SaveSettings(const AppSettings& settings) {
 	json["headset_speaker"]            = settings.headset_speaker;
 	json["headset_mic"]                = settings.headset_mic;
 	std::ofstream(SettingsPath(), std::ios::binary | std::ios::trunc) << json.dump(2);
+}
+
+std::filesystem::path UserDataFolder(const AppSettings& settings) {
+	return settings.user_data_path.empty() ? LocalStateFolder() : settings.user_data_path;
 }
 
 std::vector<std::filesystem::path> GameFolders() {
