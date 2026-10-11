@@ -78,7 +78,8 @@ struct AppSettings {
 	// The settings page, for testing: the GPU memory savings (Config::GpuMemorySavings) and the video decoder's threads (Config::VideoDecodeThreads). On.
 	bool gpu_memory_savings   = true;
 	bool video_decode_threads = true;
-	// The settings page, Developer: where the GPU memory is in the log every 10 seconds (Config::GpuMemoryLog). Off.
+	// The settings page, Developer: the detailed memory report in the log every 10 seconds (GPU memory by kind, the pager's counters, the game's memory
+	// ranges; Config::GpuMemoryLog). Off: short lines only.
 	bool gpu_memory_log = false;
 	// The settings page, Developer: DRED and the GPU trace, so a GPU hang or crash names the draw (Config::GpuCrashDiagnostics). Off.
 	bool gpu_crash_diagnostics = false;
