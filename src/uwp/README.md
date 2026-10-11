@@ -9,7 +9,7 @@
 - **Home screen.** The games of the game folders as a row of covers over the selected game's background. A starts a game, Menu opens its options (its details, Play, Hide game), Y scans the folders again. The icons at the top right open the controller page, the trophies and the settings.
 - **Game menu.** View + Menu in a game: resume, the overlay's settings, save a frame dump, quit to the library. Its Settings change the overlay at once.
 - **Overlay.** Over a game, as much as the settings choose: the frame rate alone; Compact, with a graph of the frame times, GPU time, RAM and the swap file; or Full, with the run time, the frame rate and frame times, draws, skipped draws and GPU time per frame, the resolutions, CPU and disk reads, the app's RAM in parts, the swap file, the shaders and pipelines with the ones new in this run, the time spent waiting for compiles and for the swap file. The connected controllers and the end of the emulator's log show or hide on their own.
-- **Trophies.** Each game's trophies, how many of each grade are earned, and when.
+- **Trophies.** Each game's trophies, how many of each grade are earned, and when. A trophy a game unlocks shows as a system notification with its name (`src/uwp/src/trophyToast.*`); the Xbox takes no picture in notifications, so it shows the app's logo. Selecting the notification opens the trophy: its details over the game while one runs, else the trophies page at it.
 - **Look.** Laid out and sized like the Xbox's own screens (`src/uwp/src/xboxLook.*`): one bar of controller hints, one title size, the same margins everywhere, and on the Xbox, the Xbox's text size.
 
 ## Design
