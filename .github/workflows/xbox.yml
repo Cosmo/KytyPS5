@@ -1,7 +1,8 @@
 name: Xbox build
 
 # Builds the UWP app's package for the Xbox Series X|S in Developer Mode (src/uwp/README.md) and publishes it as a pre-release
-# with the install steps. It runs only when started: Actions > Xbox build > Run workflow, on a branch.
+# with the install steps, and a title and a What's new section when given. It runs only when started: Actions > Xbox build > Run
+# workflow, on a branch.
 on:
   workflow_dispatch:
     inputs:
@@ -9,6 +10,14 @@ on:
         description: Publish the package as a pre-release (otherwise it is only a download of this run)
         type: boolean
         default: true
+      title:
+        description: "The release's title, for example what is new (empty: KytyPS5 for Xbox <version>)"
+        type: string
+        required: false
+      whats_new:
+        description: "What's new, for the top of the release notes: points separated by | (empty: no What's new)"
+        type: string
+        required: false
 
 permissions:
   contents: write
@@ -144,22 +153,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.package.outputs.version }}
           ZIP: ${{ steps.package.outputs.zip }}
+          # The inputs reach the script as variables, never as its text.
+          TITLE: ${{ inputs.title }}
+          WHATS_NEW: ${{ inputs.whats_new }}
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $source = "https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA"
           $notes = @"
-          An experimental build of KytyPS5 for the Xbox Series X|S in Developer Mode, from ``$env:GITHUB_REF_NAME`` at $env:GITHUB_SHA. What it changes and what does not work yet: [XBOX_CHANGES.md]($source/XBOX_CHANGES.md).
-
-          It needs a Series X or S. The Xbox One can't run it: the app needs AVX2.
+          Experimental build for the **Xbox Series X|S** in Developer Mode (not the Xbox One). [Changes and known limits]($source/XBOX_CHANGES.md)
 
           **Install**
-          1. Unzip ``KytyPS5-Xbox-$env:VERSION.zip`` on a PC.
-          2. Open the Xbox Device Portal (the address Dev Home shows) and choose **Add**.
-          3. Pick the ``.msix``, add both files from ``Dependencies``, and start the install.
-          4. In Dev Home, set the app's type to **Game** for the larger memory budget.
-          5. Put your games on a USB drive: [Setting up your games folder]($source/src/uwp/README.md#setting-up-your-games-folder).
+          1. Unzip on a PC.
+          2. Device Portal → **Add** → the ``.msix`` and both files in ``Dependencies``.
+          3. Dev Home: set the app's type to **Game**.
+          4. Put your games on a USB drive: [how]($source/src/uwp/README.md#setting-up-your-games-folder).
 
-          Each build installs over the previous one and keeps the app's data. The package is signed with ``src/uwp/KytyPS5-signing.pfx``, a test key that is public on purpose.
+          Installs over earlier builds and keeps your data.
           "@
+          # What's new above it: Markdown as given when it has line breaks (from gh workflow run), else points separated by |.
+          $whats_new = "$env:WHATS_NEW".Trim()
+          if ($whats_new -and -not $whats_new.Contains("`n")) {
+            $whats_new = ($whats_new -split '\s*\|\s*' | Where-Object { $_ } | ForEach-Object { "- $_" }) -join "`n"
+          }
+          if ($whats_new) {
+            $notes = "**What's new**`n$whats_new`n`n---`n`n" + $notes
+          }
+          $title = "$env:TITLE".Trim()
+          if (-not $title) {
+            $title = "KytyPS5 for Xbox $env:VERSION"
+          }
           Set-Content "$env:RUNNER_TEMP\notes.md" $notes -Encoding utf8NoBOM
-          gh release create "xbox-$env:VERSION" $env:ZIP --target $env:GITHUB_SHA --prerelease --title "KytyPS5 for Xbox $env:VERSION" --notes-file "$env:RUNNER_TEMP\notes.md"
+          gh release create "xbox-$env:VERSION" $env:ZIP --target $env:GITHUB_SHA --prerelease --title $title --notes-file "$env:RUNNER_TEMP\notes.md"
