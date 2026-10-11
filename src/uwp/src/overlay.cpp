@@ -1,6 +1,7 @@
 #include "overlay.h"
 
 #include "emulatorHost.h"
+#include "fileAccess.h"
 #include "input.h"
 #include "settings.h"
 
@@ -87,6 +88,10 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
           <RowDefinition Height="8" />
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
           <RowDefinition Height="8" />
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
@@ -98,26 +103,36 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
         <!-- Output: the picture the game hands over each frame; Render: the largest viewport it draws its scene into. -->
         <TextBlock Grid.Row="0" Text="Resolution" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
         <TextBlock Grid.Row="3" Text="System" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="6" Text="Shaders" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="9" Text="Pipelines" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="10" Text="Shaders" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="13" Text="Pipelines" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
         <TextBlock Grid.Row="0" Grid.Column="1" Text="Output" />
         <TextBlock Grid.Row="1" Grid.Column="1" Text="Render" />
         <TextBlock Grid.Row="3" Grid.Column="1" Text="CPU" />
         <TextBlock Grid.Row="4" Grid.Column="1" Text="RAM" />
-        <TextBlock Grid.Row="6" Grid.Column="1" Text="Drawing" />
-        <TextBlock Grid.Row="7" Grid.Column="1" Text="Compute" />
-        <TextBlock Grid.Row="9" Grid.Column="1" Text="Built" />
-        <TextBlock Grid.Row="10" Grid.Column="1" Text="From cache" />
-        <TextBlock Grid.Row="11" Grid.Column="1" Text="In cache" />
+        <!-- The parts of RAM: the game's memory in RAM, the part of it in the swap file, the GPU's memory (in RAM on the Xbox, on the graphics card on a
+             PC) and the rest (the emulator and the app). -->
+        <TextBlock Grid.Row="5" Grid.Column="1" Text="  Game" />
+        <TextBlock Grid.Row="6" Grid.Column="1" Text="  Swapped" />
+        <TextBlock Grid.Row="7" Grid.Column="1" Text="  GPU" />
+        <TextBlock Grid.Row="8" Grid.Column="1" Text="  Other" />
+        <TextBlock Grid.Row="10" Grid.Column="1" Text="Drawing" />
+        <TextBlock Grid.Row="11" Grid.Column="1" Text="Compute" />
+        <TextBlock Grid.Row="13" Grid.Column="1" Text="Built" />
+        <TextBlock Grid.Row="14" Grid.Column="1" Text="From cache" />
+        <TextBlock Grid.Row="15" Grid.Column="1" Text="In cache" />
         <TextBlock x:Name="OutputResolution" Grid.Row="0" Grid.Column="2" Typography.NumeralAlignment="Tabular" />
         <TextBlock x:Name="RenderResolution" Grid.Row="1" Grid.Column="2" Typography.NumeralAlignment="Tabular" />
         <TextBlock x:Name="Cpu" Grid.Row="3" Grid.Column="2" />
         <TextBlock x:Name="Memory" Grid.Row="4" Grid.Column="2" />
-        <TextBlock x:Name="DrawingShaders" Grid.Row="6" Grid.Column="2" />
-        <TextBlock x:Name="ComputeShaders" Grid.Row="7" Grid.Column="2" />
-        <TextBlock x:Name="Pipelines" Grid.Row="9" Grid.Column="2" />
-        <TextBlock x:Name="CachedPipelines" Grid.Row="10" Grid.Column="2" />
-        <TextBlock x:Name="SavedPipelines" Grid.Row="11" Grid.Column="2" />
+        <TextBlock x:Name="GameMemory" Grid.Row="5" Grid.Column="2" />
+        <TextBlock x:Name="SwappedMemory" Grid.Row="6" Grid.Column="2" />
+        <TextBlock x:Name="GpuMemory" Grid.Row="7" Grid.Column="2" />
+        <TextBlock x:Name="OtherMemory" Grid.Row="8" Grid.Column="2" />
+        <TextBlock x:Name="DrawingShaders" Grid.Row="10" Grid.Column="2" />
+        <TextBlock x:Name="ComputeShaders" Grid.Row="11" Grid.Column="2" />
+        <TextBlock x:Name="Pipelines" Grid.Row="13" Grid.Column="2" />
+        <TextBlock x:Name="CachedPipelines" Grid.Row="14" Grid.Column="2" />
+        <TextBlock x:Name="SavedPipelines" Grid.Row="15" Grid.Column="2" />
       </Grid>
     </StackPanel>
   </Border>
@@ -285,6 +300,10 @@ struct GameOverlay::State {
 	xaml::Controls::TextBlock  output_resolution {nullptr};
 	xaml::Controls::TextBlock  render_resolution {nullptr};
 	xaml::Controls::TextBlock  memory {nullptr};
+	xaml::Controls::TextBlock  game_memory {nullptr};
+	xaml::Controls::TextBlock  swapped_memory {nullptr};
+	xaml::Controls::TextBlock  gpu_memory {nullptr};
+	xaml::Controls::TextBlock  other_memory {nullptr};
 	xaml::Controls::TextBlock  cpu {nullptr};
 	xaml::Controls::TextBlock  drawing_shaders {nullptr};
 	xaml::Controls::TextBlock  compute_shaders {nullptr};
@@ -300,6 +319,10 @@ struct GameOverlay::State {
 	// The process's CPU time (100 ns units) and the time, at the last update.
 	uint64_t                              cpu_time = 0;
 	std::chrono::steady_clock::time_point cpu_time_at;
+	// The swap file's bytes written and read back since the start, and the time, at the last update.
+	uint64_t                              swapped_out = 0;
+	uint64_t                              swapped_in  = 0;
+	std::chrono::steady_clock::time_point swapped_at;
 
 	void Update();
 };
@@ -349,6 +372,24 @@ void GameOverlay::State::Update() {
 	const uint64_t limit = winrt::Windows::System::MemoryManager::AppMemoryUsageLimit();
 	memory.Text(Megabytes(used) +
 	            (limit < (uint64_t {64} << 30) ? L" of " + Megabytes(limit) : std::wstring()));
+
+	// Its parts. The GPU's memory is part of RAM on the Xbox; on a PC it is on the graphics card, so the rest is RAM minus the game's memory there.
+	const auto totals = CurrentMemoryTotals();
+	const auto now    = std::chrono::steady_clock::now();
+	game_memory.Text(Megabytes(totals.game));
+	std::wstring swapped = Megabytes(totals.swapped);
+	if (swapped_at != std::chrono::steady_clock::time_point {} && totals.swapped_out >= swapped_out && totals.swapped_in >= swapped_in) {
+		const double seconds = std::chrono::duration<double>(now - swapped_at).count();
+		const auto   rate    = [seconds](uint64_t bytes) { return std::to_wstring(std::lround(static_cast<double>(bytes) / 1048576.0 / std::max(seconds, 0.001))); };
+		swapped += L"  (out " + rate(totals.swapped_out - swapped_out) + L", in " + rate(totals.swapped_in - swapped_in) + L" MB/s)";
+	}
+	swapped_memory.Text(swapped);
+	swapped_out = totals.swapped_out;
+	swapped_in  = totals.swapped_in;
+	swapped_at  = now;
+	gpu_memory.Text(Megabytes(totals.gpu) + (IsXbox() ? std::wstring() : std::wstring(L" (graphics card)")));
+	const uint64_t parts = totals.game + (IsXbox() ? totals.gpu : 0);
+	other_memory.Text(Megabytes(used > parts ? used - parts : 0));
 
 	// CPU: the process's share of all processor cores since the last update.
 	FILETIME created {}, exited {}, kernel {}, user {};
@@ -446,6 +487,10 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.output_resolution = find(L"OutputResolution").as<xaml::Controls::TextBlock>();
 	state.render_resolution = find(L"RenderResolution").as<xaml::Controls::TextBlock>();
 	state.memory           = find(L"Memory").as<xaml::Controls::TextBlock>();
+	state.game_memory      = find(L"GameMemory").as<xaml::Controls::TextBlock>();
+	state.swapped_memory   = find(L"SwappedMemory").as<xaml::Controls::TextBlock>();
+	state.gpu_memory       = find(L"GpuMemory").as<xaml::Controls::TextBlock>();
+	state.other_memory     = find(L"OtherMemory").as<xaml::Controls::TextBlock>();
 	state.cpu              = find(L"Cpu").as<xaml::Controls::TextBlock>();
 	state.drawing_shaders  = find(L"DrawingShaders").as<xaml::Controls::TextBlock>();
 	state.compute_shaders  = find(L"ComputeShaders").as<xaml::Controls::TextBlock>();
