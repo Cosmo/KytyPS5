@@ -183,7 +183,7 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
       <ToggleSwitch x:Name="GameOutput"
                     Header="Detailed log: the game's output and the emulator's trace (slower; thousands of lines a second)" />
       <ToggleSwitch x:Name="GpuMemoryLog"
-                    Header="GPU memory report in the log every 10 seconds (short pauses while it is written)" />
+                    Header="Detailed memory report in the log every 10 seconds: GPU, swap file and game memory (short pauses while it is written)" />
       <ToggleSwitch x:Name="GpuCrashDiagnostics"
                     Header="GPU crash diagnostics: a GPU hang or crash names the draw (slower)" />
       <ToggleSwitch x:Name="ShaderCacheAnyBuild" Header="Keep compiled shaders across app builds" />
