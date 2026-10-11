@@ -301,12 +301,14 @@ bool SaveUnlockData(const std::filesystem::path& path, const UnlockData& unlocks
 	file.Close();
 	std::error_code error;
 	if (complete) {
+		// An atomic replace where the C++ library reaches the folder; through the file broker (the UWP app's USB drives) the old file goes
+		// first.
 		std::filesystem::rename(temporary, path, error);
-		if (!error) {
+		if (!error || File::RenameFile(temporary, path)) {
 			return true;
 		}
 	}
-	std::filesystem::remove(temporary, error);
+	File::DeleteFile(temporary);
 	return false;
 }
 
