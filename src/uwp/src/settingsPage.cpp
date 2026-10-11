@@ -153,6 +153,21 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
                  Text="The larger side of a texture, in pixels. Smaller textures stay at full resolution." />
 
+      <ToggleSwitch x:Name="TextureUncompressed" Header="Shrink uncompressed textures too" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Also loads uncompressed textures at lower resolution: more memory saved, but text and interface images can get hard to read." />
+
+      <ComboBox x:Name="TextureLod" Header="Texture sharpness" MinWidth="280" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Textures are drawn from their smaller versions: faster, blurrier." />
+
+      <ToggleSwitch x:Name="Anisotropic" Header="Anisotropic filtering" />
+      <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                 Text="Keeps textures on surfaces seen at an angle sharp. Off is faster." />
+
       <ToggleSwitch x:Name="GpuSavings" Header="Compact GPU memory allocation" />
       <TextBlock Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
@@ -426,10 +441,10 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		});
 	}
 	auto texture_quality = page.FindName(L"TextureQuality").as<xaml::Controls::ComboBox>();
-	for (const auto* name: {L"Full", L"Half resolution", L"Quarter resolution", L"Eighth resolution"}) {
+	for (const auto* name: {L"Full", L"Half resolution", L"Quarter resolution", L"Eighth resolution", L"Sixteenth resolution"}) {
 		texture_quality.Items().Append(winrt::box_value(name));
 	}
-	texture_quality.SelectedIndex(static_cast<int32_t>(std::min<uint32_t>(settings.texture_mip_skip, 3)));
+	texture_quality.SelectedIndex(static_cast<int32_t>(std::min<uint32_t>(settings.texture_mip_skip, 4)));
 	texture_quality.SelectionChanged([state, texture_quality, save](auto const&, auto const&) {
 		if (const auto index = texture_quality.SelectedIndex(); index >= 0) {
 			state->settings.texture_mip_skip = static_cast<uint32_t>(index);
@@ -437,7 +452,7 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		}
 	});
 	auto texture_from = page.FindName(L"TextureFrom").as<xaml::Controls::ComboBox>();
-	constexpr std::array<uint32_t, 3> TEXTURE_SIZES = {1024, 2048, 4096};
+	constexpr std::array<uint32_t, 5> TEXTURE_SIZES = {256, 512, 1024, 2048, 4096};
 	for (size_t index = 0; index < TEXTURE_SIZES.size(); index++) {
 		texture_from.Items().Append(winrt::box_value(winrt::hstring(std::to_wstring(TEXTURE_SIZES[index]) + L" px")));
 		if (TEXTURE_SIZES[index] == settings.texture_mip_skip_min_size) {
@@ -445,13 +460,36 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		}
 	}
 	if (texture_from.SelectedIndex() < 0) {
-		texture_from.SelectedIndex(1);
+		texture_from.SelectedIndex(3);
 	}
 	texture_from.SelectionChanged([state, texture_from, TEXTURE_SIZES, save](auto const&, auto const&) {
 		if (const auto index = texture_from.SelectedIndex(); index >= 0 && static_cast<size_t>(index) < TEXTURE_SIZES.size()) {
 			state->settings.texture_mip_skip_min_size = TEXTURE_SIZES[static_cast<size_t>(index)];
 			save();
 		}
+	});
+	auto texture_uncompressed = page.FindName(L"TextureUncompressed").as<xaml::Controls::ToggleSwitch>();
+	texture_uncompressed.IsOn(settings.texture_mip_skip_uncompressed);
+	texture_uncompressed.Toggled([state, texture_uncompressed, save](auto const&, auto const&) {
+		state->settings.texture_mip_skip_uncompressed = texture_uncompressed.IsOn();
+		save();
+	});
+	auto texture_lod = page.FindName(L"TextureLod").as<xaml::Controls::ComboBox>();
+	for (const auto* name: {L"Full", L"One level softer", L"Two levels softer", L"Three levels softer", L"Four levels softer"}) {
+		texture_lod.Items().Append(winrt::box_value(name));
+	}
+	texture_lod.SelectedIndex(static_cast<int32_t>(std::min<uint32_t>(settings.texture_lod_bias, 4)));
+	texture_lod.SelectionChanged([state, texture_lod, save](auto const&, auto const&) {
+		if (const auto index = texture_lod.SelectedIndex(); index >= 0) {
+			state->settings.texture_lod_bias = static_cast<uint32_t>(index);
+			save();
+		}
+	});
+	auto anisotropic = page.FindName(L"Anisotropic").as<xaml::Controls::ToggleSwitch>();
+	anisotropic.IsOn(settings.anisotropic_filtering);
+	anisotropic.Toggled([state, anisotropic, save](auto const&, auto const&) {
+		state->settings.anisotropic_filtering = anisotropic.IsOn();
+		save();
 	});
 	auto gpu_savings = page.FindName(L"GpuSavings").as<xaml::Controls::ToggleSwitch>();
 	gpu_savings.IsOn(settings.gpu_memory_savings);
