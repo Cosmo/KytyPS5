@@ -47,6 +47,17 @@ struct FrameResolutions {
 };
 [[nodiscard]] FrameResolutions CurrentFrameResolutions();
 
+// The parts of the app's memory the overlay shows (window.cpp), in bytes: the game's memory in RAM, the part of it in the pager's swap file and the
+// swap file's bytes written and read back since the start (0 without the pager), and the GPU's memory (0 before the game's renderer exists).
+struct MemoryTotals {
+	uint64_t game        = 0;
+	uint64_t swapped     = 0;
+	uint64_t swapped_out = 0;
+	uint64_t swapped_in  = 0;
+	uint64_t gpu         = 0;
+};
+[[nodiscard]] MemoryTotals CurrentMemoryTotals();
+
 // Runs the emulator on its own thread inside the app. The XAML page (UI thread) provides the panel
 // frames are presented to and reports its size; the emulator's window (window.cpp) presents to it
 // and waits here until the app asks it to stop.
