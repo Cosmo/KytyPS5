@@ -19,7 +19,7 @@ struct AppSettings {
 	// The settings page, User Data Path: where saves (_SaveData), patches (_Patches) and trophies (_Trophies) are kept, for one on a USB
 	// drive. Empty: LocalState.
 	std::filesystem::path user_data_path;
-	uint32_t                           screen_width  = 1280; // the games' output resolution
+	uint32_t                           screen_width  = 1280; // the TV resolution the games are told: 1080p below 3840 × 2160 (the settings page)
 	uint32_t                           screen_height = 720;
 	bool                               vsync         = false;
 	std::string                        user_name     = "Kyty";
