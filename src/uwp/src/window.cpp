@@ -118,6 +118,15 @@ FrameResolutions CurrentFrameResolutions() {
 	return {sizes.output_width, sizes.output_height, sizes.render_width, sizes.render_height};
 }
 
+MemoryTotals CurrentMemoryTotals() {
+	const auto   guest = Libs::LibKernel::Memory::GetGuestMemoryTotals();
+	MemoryTotals totals {.game = guest.resident, .swapped = guest.swapped, .swapped_out = guest.swapped_out, .swapped_in = guest.swapped_in};
+	if (const auto* window = Libs::Graphics::g_window.get(); window != nullptr && window->graphic_ctx.CanReportMemoryUsage()) {
+		totals.gpu = window->graphic_ctx.GetLocalMemoryUsage();
+	}
+	return totals;
+}
+
 // The shaders and pipelines the renderer has made so far (the overlay shows them); none before the game's renderer exists.
 std::optional<ShaderStatistics> CurrentShaderStatistics() {
 	const auto* window = Libs::Graphics::g_window.get();
