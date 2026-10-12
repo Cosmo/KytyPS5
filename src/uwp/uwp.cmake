@@ -58,7 +58,7 @@ set_source_files_properties(${kyty_uwp_src} PROPERTIES COMPILE_OPTIONS "/EHsc" C
 add_executable(kyty_uwp WIN32 ${kyty_uwp_src} ${kyty_uwp_emulator_src}
 	"${fault_buffer_shader_header}" ${gpu_tiler_shader_headers} ${gpu_blit_shader_headers})
 add_dependencies(kyty_uwp kyty_uwp_projection)
-target_include_directories(kyty_uwp SYSTEM PRIVATE "${kyty_uwp_projection}")
+target_include_directories(kyty_uwp SYSTEM PRIVATE "${kyty_uwp_projection}" "${KYTY_THIRD_PARTY_DIR}/bcdec")
 target_include_directories(kyty_uwp PRIVATE "${KYTY_UWP_DIR}/src" ${inc_headers})
 
 # UWP apps use the store C++ runtime (vcruntime140_app.dll from the VCLibs framework package) and the WindowsApp umbrella library, which comes before
