@@ -9,13 +9,34 @@
 #include <mutex>
 #include <utility>
 
-// The RenderDoc integration, the system overlay and the startup splash screen are Vulkan only; the D3D12 backend has none.
+// The RenderDoc integration and the system overlay are Vulkan only; the D3D12 backend has none. The startup splash screen is the host's.
 
 namespace Libs::Graphics {
 
+namespace {
+
+std::mutex            g_splash_handler_mutex;
+std::function<void()> g_splash_handler;
+
+} // namespace
+
+void SetSplashHiddenHandler(std::function<void()> handler) {
+	std::scoped_lock lock(g_splash_handler_mutex);
+	g_splash_handler = std::move(handler);
+}
+
 void InitializeSplashScreen(const std::filesystem::path& /*sce_sys*/) {}
 
-void HideSplashScreen() {}
+void HideSplashScreen() {
+	std::function<void()> handler;
+	{
+		std::scoped_lock lock(g_splash_handler_mutex);
+		handler = g_splash_handler;
+	}
+	if (handler) {
+		handler();
+	}
+}
 
 void RenderDocInit() {}
 
