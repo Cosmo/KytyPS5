@@ -21,6 +21,8 @@
 #include <windows.h>
 #include <fileapifromapp.h>
 
+#include <nlohmann/json.hpp>
+
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -38,6 +40,7 @@
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -51,36 +54,44 @@ namespace activation = winrt::Windows::ApplicationModel::Activation;
 
 namespace {
 
-// The game's page: the panel the game presents to; in front of it the launch screen (the game's
-// background, name and progress) until the game presents steadily, and the game menu.
+// The game's page: the panel the game presents to; in front of it the launch screen until the game is ready to be seen, and the game menu. The launch
+// screen is the game's start screen as the PS5 shows it (its pic1 and pic2), or, when the game has none, a card with its background, name and progress.
 constexpr wchar_t GameMarkup[] = LR"xaml(
 <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Background="Black">
   <SwapChainPanel x:Name="Panel" HorizontalAlignment="Center" VerticalAlignment="Center" />
-  <Grid x:Name="Launch" Background="#0B0E14" IsHitTestVisible="False">
-    <Grid.OpacityTransition><ScalarTransition Duration="0:0:0.5" /></Grid.OpacityTransition>
-    <Image x:Name="Backdrop" Stretch="UniformToFill" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0">
-      <Image.OpacityTransition><ScalarTransition Duration="0:0:0.4" /></Image.OpacityTransition>
-    </Image>
-    <Rectangle>
-      <Rectangle.Fill>
-        <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-          <GradientStop Color="#800B0E14" Offset="0" />
-          <GradientStop Color="#990B0E14" Offset="0.45" />
-          <GradientStop Color="#F00B0E14" Offset="1" />
-        </LinearGradientBrush>
-      </Rectangle.Fill>
-    </Rectangle>
-    <StackPanel VerticalAlignment="Bottom" Margin="48,0,48,48" Spacing="12">
-      <TextBlock x:Name="Title" Style="{StaticResource TitleTextBlockStyle}" TextTrimming="CharacterEllipsis"
-                 TextWrapping="NoWrap" />
-      <StackPanel Orientation="Horizontal" Spacing="12">
-        <ProgressRing IsActive="True" Width="16" Height="16" />
-        <TextBlock Text="Starting" Style="{StaticResource BodyTextBlockStyle}" VerticalAlignment="Center"
-                   Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+  <Grid x:Name="Launch" Background="Black" IsHitTestVisible="False">
+    <Grid.OpacityTransition><ScalarTransition Duration="0:0:0.3" /></Grid.OpacityTransition>
+    <Grid x:Name="Splash" Visibility="Collapsed">
+      <Image x:Name="SplashBackground" Stretch="Uniform" />
+      <Image x:Name="SplashLogo" Stretch="Uniform" Opacity="0">
+        <Image.OpacityTransition><ScalarTransition Duration="0:0:2.2" /></Image.OpacityTransition>
+      </Image>
+    </Grid>
+    <Grid x:Name="LaunchCard" Background="#0B0E14" Visibility="Collapsed">
+      <Image x:Name="Backdrop" Stretch="UniformToFill" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0">
+        <Image.OpacityTransition><ScalarTransition Duration="0:0:0.4" /></Image.OpacityTransition>
+      </Image>
+      <Rectangle>
+        <Rectangle.Fill>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#800B0E14" Offset="0" />
+            <GradientStop Color="#990B0E14" Offset="0.45" />
+            <GradientStop Color="#F00B0E14" Offset="1" />
+          </LinearGradientBrush>
+        </Rectangle.Fill>
+      </Rectangle>
+      <StackPanel VerticalAlignment="Bottom" Margin="48,0,48,48" Spacing="12">
+        <TextBlock x:Name="Title" Style="{StaticResource TitleTextBlockStyle}" TextTrimming="CharacterEllipsis"
+                   TextWrapping="NoWrap" />
+        <StackPanel Orientation="Horizontal" Spacing="12">
+          <ProgressRing IsActive="True" Width="16" Height="16" />
+          <TextBlock Text="Starting" Style="{StaticResource BodyTextBlockStyle}" VerticalAlignment="Center"
+                     Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        </StackPanel>
       </StackPanel>
-    </StackPanel>
+    </Grid>
   </Grid>
 
   <!-- The game menu (View + Menu, or Escape), in the system's look: the game keeps running behind
@@ -320,6 +331,48 @@ winrt::fire_and_forget ShowLaunchBackdrop(xaml::Controls::Image image, std::file
 	}
 }
 
+// Whether the game asks for its start screen's logo at once (param.json's attribute3 bit 0x1000, as upstream's splash screen reads it).
+bool StartsFast(const std::filesystem::path& game) {
+	const auto text = ReadGameText(game / L"sce_sys" / L"param.json");
+	if (!text) {
+		return false;
+	}
+	const auto json = nlohmann::json::parse(*text, nullptr, false);
+	return json.is_object() && json.contains("attribute3") && json["attribute3"].is_number_integer() &&
+	       (json["attribute3"].get<int64_t>() & 0x1000) != 0;
+}
+
+// The launch screen: the game's start screen as the PS5 shows it while the game starts (its pic1, with pic2's logo fading in over it after 1.4 s,
+// at once for a game that starts fast; upstream's splash screen does the same), or the card with its background, name and progress when it has none.
+// `own` becomes true with the game's start screen.
+winrt::fire_and_forget ShowStartScreen(xaml::Controls::Grid page, std::filesystem::path game, std::shared_ptr<bool> own) {
+	const auto dispatcher = page.Dispatcher();
+	co_await winrt::resume_background();
+	const auto paths = SplashImages(game, LoadSettings().console_language);
+	const bool fast  = StartsFast(game);
+	// Back on the UI thread before awaiting: an awaited operation resumes on the thread it was awaited from, and the XAML below needs the UI thread.
+	co_await winrt::resume_foreground(dispatcher);
+	auto background = co_await LoadDdsImageAsync(dispatcher, paths[0]);
+	auto logo       = background != nullptr ? co_await LoadDdsImageAsync(dispatcher, paths[1]) : nullptr;
+	if (background == nullptr || logo == nullptr) {
+		page.FindName(L"LaunchCard").as<xaml::UIElement>().Visibility(xaml::Visibility::Visible);
+		ShowLaunchBackdrop(page.FindName(L"Backdrop").as<xaml::Controls::Image>(), BackdropImage(game));
+		co_return;
+	}
+	*own = true;
+	page.FindName(L"SplashBackground").as<xaml::Controls::Image>().Source(background);
+	auto logo_image = page.FindName(L"SplashLogo").as<xaml::Controls::Image>();
+	logo_image.Source(logo);
+	page.FindName(L"Splash").as<xaml::UIElement>().Visibility(xaml::Visibility::Visible);
+	if (fast) {
+		logo_image.OpacityTransition(nullptr);
+	} else {
+		co_await winrt::resume_after(std::chrono::milliseconds(1400));
+		co_await winrt::resume_foreground(dispatcher);
+	}
+	logo_image.Opacity(1.0);
+}
+
 // In Segoe MDL2 Assets.
 constexpr wchar_t CHEVRON_RIGHT[] = {0xE76C, 0};
 
@@ -529,10 +582,36 @@ xaml::UIElement CreateEmulatorPage(std::filesystem::path game) {
 			    ShowTrophyToast(name, std::wstring(TrophyLinkArguments(title_id, name)));
 		    });
 	    });
-	EmulatorHost::Get().OnGameVisible(
-	    [launch = page.FindName(L"Launch").as<xaml::UIElement>()] { launch.Opacity(0.0); });
+	// The launch screen goes when the game says it is ready to be seen (sceSystemServiceHideSplashScreen), as on the PS5. A game that never says so
+	// is shown once it presents steadily: at once over the card, 10 s later over its own start screen.
+	const auto launch    = page.FindName(L"Launch").as<xaml::UIElement>();
+	const auto own_start = std::make_shared<bool>(false);
+	Libs::Graphics::SetSplashHiddenHandler([dispatcher = page.Dispatcher(), launch] {
+		(void)dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [launch] {
+			if (launch.Opacity() != 0.0) {
+				Log("launch screen: the game is ready to be seen after %.1f s\n", EmulatorHost::Get().RunTimeMs() / 1000.0);
+				launch.Opacity(0.0);
+			}
+		});
+	});
+	EmulatorHost::Get().OnGameVisible([launch, own_start] {
+		if (!*own_start) {
+			launch.Opacity(0.0);
+			return;
+		}
+		xaml::DispatcherTimer timer;
+		timer.Interval(std::chrono::seconds(10));
+		timer.Tick([launch](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
+			sender.as<xaml::DispatcherTimer>().Stop();
+			if (launch.Opacity() != 0.0) {
+				Log("launch screen: closed 10 s after the game presented steadily; it never said it was ready\n");
+				launch.Opacity(0.0);
+			}
+		});
+		timer.Start();
+	});
 	page.FindName(L"Title").as<xaml::Controls::TextBlock>().Text(title);
-	ShowLaunchBackdrop(page.FindName(L"Backdrop").as<xaml::Controls::Image>(), BackdropImage(game));
+	ShowStartScreen(page, game, own_start);
 	auto panel = page.FindName(L"Panel").as<xaml::Controls::SwapChainPanel>();
 	// The game's picture is 16:9: the panel is the largest 16:9 rectangle that fits the window (black bars around it), so the picture is never stretched.
 	page.SizeChanged([panel](auto const& sender, auto const&) {
