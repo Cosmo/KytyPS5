@@ -14,6 +14,10 @@ namespace Libs::Graphics {
 using TrophyUnlockHandler = std::function<void(std::string_view name, int32_t grade, std::span<const std::byte> icon_png)>;
 void SetTrophyUnlockHandler(TrophyUnlockHandler handler);
 
+// The start screen (the PS5's splash screen) is the host's: the handler runs, on the game's thread, when the game says it is ready to be seen
+// (sceSystemServiceHideSplashScreen).
+void SetSplashHiddenHandler(std::function<void()> handler);
+
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_D3D12_PRESENTATIONSTUBS_H_
