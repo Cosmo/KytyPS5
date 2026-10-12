@@ -10,6 +10,7 @@
 #include "log.h"
 #include "graphics/host_gpu/d3d12/presentationStubs.h"
 #include "graphics/host_gpu/frameDump.h"
+#include "graphics/presentation/splashAnimation.h"
 #include "overlay.h"
 #include "settingsPage.h"
 #include "trophiesPage.h"
@@ -20,6 +21,8 @@
 
 #include <windows.h>
 #include <fileapifromapp.h>
+
+#include <nlohmann/json.hpp>
 
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
@@ -32,16 +35,23 @@
 #include <winrt/Windows.UI.ViewManagement.h>
 #include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
+#include <winrt/Windows.UI.Composition.h>
+#include <winrt/Windows.UI.Xaml.Hosting.h>
+#include <winrt/Windows.UI.Xaml.Media.Animation.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
 
+#include <array>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace Kyty::Uwp {
@@ -51,36 +61,52 @@ namespace activation = winrt::Windows::ApplicationModel::Activation;
 
 namespace {
 
-// The game's page: the panel the game presents to; in front of it the launch screen (the game's
-// background, name and progress) until the game presents steadily, and the game menu.
+// The game's page: the panel the game presents to; in front of it the launch screen until the game is ready to be seen, and the game menu. The launch
+// screen is the game's start screen as the PS5 shows it (its pic1 and pic2), or, when the game has none, a card with its background, name and progress.
 constexpr wchar_t GameMarkup[] = LR"xaml(
 <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Background="Black">
   <SwapChainPanel x:Name="Panel" HorizontalAlignment="Center" VerticalAlignment="Center" />
-  <Grid x:Name="Launch" Background="#0B0E14" IsHitTestVisible="False">
-    <Grid.OpacityTransition><ScalarTransition Duration="0:0:0.5" /></Grid.OpacityTransition>
-    <Image x:Name="Backdrop" Stretch="UniformToFill" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0">
-      <Image.OpacityTransition><ScalarTransition Duration="0:0:0.4" /></Image.OpacityTransition>
-    </Image>
-    <Rectangle>
-      <Rectangle.Fill>
-        <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-          <GradientStop Color="#800B0E14" Offset="0" />
-          <GradientStop Color="#990B0E14" Offset="0.45" />
-          <GradientStop Color="#F00B0E14" Offset="1" />
-        </LinearGradientBrush>
-      </Rectangle.Fill>
-    </Rectangle>
-    <StackPanel VerticalAlignment="Bottom" Margin="48,0,48,48" Spacing="12">
-      <TextBlock x:Name="Title" Style="{StaticResource TitleTextBlockStyle}" TextTrimming="CharacterEllipsis"
-                 TextWrapping="NoWrap" />
-      <StackPanel Orientation="Horizontal" Spacing="12">
-        <ProgressRing IsActive="True" Width="16" Height="16" />
-        <TextBlock Text="Starting" Style="{StaticResource BodyTextBlockStyle}" VerticalAlignment="Center"
-                   Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+  <Grid x:Name="Launch" Background="Black" IsHitTestVisible="False">
+    <Grid.OpacityTransition><ScalarTransition Duration="0:0:0.3" /></Grid.OpacityTransition>
+    <Grid x:Name="Splash" Visibility="Collapsed">
+      <Viewbox Stretch="Uniform">
+        <Canvas Width="1920" Height="1080">
+          <Canvas.Clip><RectangleGeometry Rect="0,0,1920,1080" /></Canvas.Clip>
+          <Image x:Name="SplashBackground" Stretch="Fill" Opacity="0">
+            <Image.RenderTransform><CompositeTransform x:Name="SplashBackgroundTransform" /></Image.RenderTransform>
+          </Image>
+          <Image x:Name="SplashLogo" Stretch="Fill" Opacity="0">
+            <Image.RenderTransform><CompositeTransform x:Name="SplashLogoTransform" /></Image.RenderTransform>
+          </Image>
+          <Grid x:Name="SplashReveal" Width="1920" Height="1080" />
+        </Canvas>
+      </Viewbox>
+    </Grid>
+    <Grid x:Name="LaunchCard" Background="#0B0E14" Visibility="Collapsed">
+      <Image x:Name="Backdrop" Stretch="UniformToFill" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0">
+        <Image.OpacityTransition><ScalarTransition Duration="0:0:0.4" /></Image.OpacityTransition>
+      </Image>
+      <Rectangle>
+        <Rectangle.Fill>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#800B0E14" Offset="0" />
+            <GradientStop Color="#990B0E14" Offset="0.45" />
+            <GradientStop Color="#F00B0E14" Offset="1" />
+          </LinearGradientBrush>
+        </Rectangle.Fill>
+      </Rectangle>
+      <StackPanel VerticalAlignment="Bottom" Margin="48,0,48,48" Spacing="12">
+        <TextBlock x:Name="Title" Style="{StaticResource TitleTextBlockStyle}" TextTrimming="CharacterEllipsis"
+                   TextWrapping="NoWrap" />
+        <StackPanel Orientation="Horizontal" Spacing="12">
+          <ProgressRing IsActive="True" Width="16" Height="16" />
+          <TextBlock Text="Starting" Style="{StaticResource BodyTextBlockStyle}" VerticalAlignment="Center"
+                     Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        </StackPanel>
       </StackPanel>
-    </StackPanel>
+    </Grid>
   </Grid>
 
   <!-- The game menu (View + Menu, or Escape), in the system's look: the game keeps running behind
@@ -320,6 +346,153 @@ winrt::fire_and_forget ShowLaunchBackdrop(xaml::Controls::Image image, std::file
 	}
 }
 
+// Whether the game's logo comes in with its background (param.json's attribute3 bit 12, as upstream's splash animation reads it).
+bool LogoFirst(const std::filesystem::path& game) {
+	const auto text = ReadGameText(game / L"sce_sys" / L"param.json");
+	if (!text) {
+		return false;
+	}
+	const auto json = nlohmann::json::parse(*text, nullptr, false);
+	return json.is_object() && json.contains("attribute3") && json["attribute3"].is_number_integer() &&
+	       (json["attribute3"].get<int64_t>() & 0x1000) != 0;
+}
+
+// The start screen's images are extended on every side by this part of their size, repeating their edge pixels: upstream's animation samples
+// them outside their edges (at its start up to 2.7% beyond each edge).
+constexpr double SPLASH_EDGE = 0.04;
+
+// Upstream's splash animation (graphics/presentation/splashAnimation.h) as keyframes, so that the compositor runs it: every 1/60 s while the
+// background grows in and the logo fades in (3.6 s), every 0.1 s in the slow zoom that follows (to 13.4 s). Each layer's UV span about the
+// center becomes a scale and an offset of its image, which covers its UVs from -SPLASH_EDGE to 1 + SPLASH_EDGE.
+xaml::Media::Animation::Storyboard SplashStoryboard(xaml::Controls::Image background, xaml::Media::CompositeTransform background_transform,
+                                                    xaml::Controls::Image logo, xaml::Media::CompositeTransform logo_transform, bool logo_first) {
+	namespace animation = xaml::Media::Animation;
+	struct Track {
+		animation::DoubleAnimationUsingKeyFrames scale, scale_y, x, y, opacity;
+	};
+	std::array<Track, 2> tracks;
+	std::vector<float>   times;
+	for (int step = 0; step <= 216; step++) {
+		times.push_back(static_cast<float>(step) / 60.0f);
+	}
+	for (int step = 1; step <= 98; step++) {
+		times.push_back(3.6f + 0.1f * static_cast<float>(step));
+	}
+	for (const float time: times) {
+		const auto key    = animation::KeyTimeHelper::FromTimeSpan(
+            std::chrono::duration_cast<winrt::Windows::Foundation::TimeSpan>(std::chrono::duration<float>(time)));
+		const auto layers = Libs::Graphics::AnimateSplash(time, logo_first);
+		for (size_t index = 0; index < tracks.size(); index++) {
+			const auto&  layer = layers[index];
+			const double span  = layer.span;
+			const double start = 0.5 - 0.5 * span;
+			const auto   add   = [&key](animation::DoubleAnimationUsingKeyFrames& track, double value) {
+                animation::LinearDoubleKeyFrame frame;
+                frame.KeyTime(key);
+                frame.Value(value);
+                track.KeyFrames().Append(frame);
+			};
+			add(tracks[index].scale, 1.0 / span);
+			add(tracks[index].scale_y, 1.0 / span);
+			add(tracks[index].x, -(start + SPLASH_EDGE) * 1920.0 / span);
+			add(tracks[index].y, -(start + SPLASH_EDGE) * 1080.0 / span);
+			add(tracks[index].opacity, layer.alpha);
+		}
+	}
+	animation::Storyboard storyboard;
+	const std::array<xaml::Controls::Image, 2>           images {background, logo};
+	const std::array<xaml::Media::CompositeTransform, 2> transforms {background_transform, logo_transform};
+	for (size_t index = 0; index < tracks.size(); index++) {
+		const auto target = [&storyboard](animation::DoubleAnimationUsingKeyFrames const& track, xaml::DependencyObject const& object,
+		                                  const wchar_t* property) {
+			animation::Storyboard::SetTarget(track, object);
+			animation::Storyboard::SetTargetProperty(track, property);
+			storyboard.Children().Append(track);
+		};
+		target(tracks[index].scale, transforms[index], L"ScaleX");
+		target(tracks[index].scale_y, transforms[index], L"ScaleY");
+		target(tracks[index].x, transforms[index], L"TranslateX");
+		target(tracks[index].y, transforms[index], L"TranslateY");
+		target(tracks[index].opacity, images[index], L"Opacity");
+	}
+	return storyboard;
+}
+
+// Upstream's radial reveal (RevealSplash) over the start screen: a black layer whose radial gradient opens from the center. Its stops sit at
+// fixed distances from the center; their alpha runs on the compositor, from keyframes sampled every 1/60 s over the 1.4 s the reveal takes.
+void StartSplashReveal(xaml::FrameworkElement const& host) {
+	namespace composition = winrt::Windows::UI::Composition;
+	constexpr float WIDTH  = 1920.0f;
+	constexpr float HEIGHT = 1080.0f;
+	constexpr float RADIUS = 1102.0f; // a corner's distance from the center
+	constexpr int   STOPS  = 16;
+	constexpr int   STEPS  = 84;      // 1.4 s at 60 per second
+	const auto      black  = [](float alpha) {
+        return winrt::Windows::UI::ColorHelper::FromArgb(static_cast<uint8_t>(std::lround(255.0f * std::clamp(alpha, 0.0f, 1.0f))), 0, 0, 0);
+	};
+	const auto compositor = xaml::Hosting::ElementCompositionPreview::GetElementVisual(host).Compositor();
+	auto       brush      = compositor.CreateRadialGradientBrush();
+	brush.MappingMode(composition::CompositionMappingMode::Absolute);
+	brush.EllipseCenter({WIDTH * 0.5f, HEIGHT * 0.5f});
+	brush.EllipseRadius({RADIUS, RADIUS});
+	std::vector<std::pair<composition::CompositionColorGradientStop, composition::ColorKeyFrameAnimation>> stops;
+	for (int index = 0; index < STOPS; index++) {
+		const float offset = static_cast<float>(index) / static_cast<float>(STOPS - 1);
+		const float x      = 0.5f + offset * RADIUS / WIDTH; // a point at that distance from the center, in the image's 0..1
+		auto        stop   = compositor.CreateColorGradientStop(offset, black(1.0f - Libs::Graphics::RevealSplash(0.0f, x, 0.5f)));
+		auto        reveal = compositor.CreateColorKeyFrameAnimation();
+		for (int step = 1; step <= STEPS; step++) {
+			const float age = static_cast<float>(step) / 60.0f;
+			reveal.InsertKeyFrame(static_cast<float>(step) / STEPS, black(1.0f - Libs::Graphics::RevealSplash(age, x, 0.5f)),
+			                      compositor.CreateLinearEasingFunction());
+		}
+		reveal.Duration(std::chrono::milliseconds(1400));
+		brush.ColorStops().Append(stop);
+		stops.emplace_back(stop, reveal);
+	}
+	auto visual = compositor.CreateSpriteVisual();
+	visual.Size({WIDTH, HEIGHT});
+	visual.Brush(brush);
+	xaml::Hosting::ElementCompositionPreview::SetElementChildVisual(host, visual);
+	for (auto& [stop, reveal]: stops) {
+		stop.StartAnimation(L"Color", reveal);
+	}
+}
+
+// The launch screen: the game's start screen as the PS5 shows it while the game starts (pic1 and pic2's logo over it, with upstream's splash
+// animation and its radial reveal), or the card with its background, name and progress when it has none. `own` becomes true with the game's start screen.
+winrt::fire_and_forget ShowStartScreen(xaml::Controls::Grid page, std::filesystem::path game, std::shared_ptr<bool> own) {
+	const auto dispatcher = page.Dispatcher();
+	co_await winrt::resume_background();
+	const auto paths      = SplashImages(game, LoadSettings().console_language);
+	const bool logo_first = LogoFirst(game);
+	// Back on the UI thread before awaiting: an awaited operation resumes on the thread it was awaited from, and the XAML below needs the UI thread.
+	co_await winrt::resume_foreground(dispatcher);
+	auto background = co_await LoadDdsImageAsync(dispatcher, paths[0], SPLASH_EDGE);
+	auto logo       = background != nullptr ? co_await LoadDdsImageAsync(dispatcher, paths[1], SPLASH_EDGE) : nullptr;
+	if (background == nullptr || logo == nullptr) {
+		page.FindName(L"LaunchCard").as<xaml::UIElement>().Visibility(xaml::Visibility::Visible);
+		ShowLaunchBackdrop(page.FindName(L"Backdrop").as<xaml::Controls::Image>(), BackdropImage(game));
+		co_return;
+	}
+	*own                  = true;
+	auto background_image = page.FindName(L"SplashBackground").as<xaml::Controls::Image>();
+	auto logo_image       = page.FindName(L"SplashLogo").as<xaml::Controls::Image>();
+	background_image.Source(background);
+	logo_image.Source(logo);
+	for (auto image: {background_image, logo_image}) {
+		image.Width(1920.0 * (1.0 + 2.0 * SPLASH_EDGE));
+		image.Height(1080.0 * (1.0 + 2.0 * SPLASH_EDGE));
+	}
+	auto storyboard = SplashStoryboard(background_image, page.FindName(L"SplashBackgroundTransform").as<xaml::Media::CompositeTransform>(), logo_image,
+	                                   page.FindName(L"SplashLogoTransform").as<xaml::Media::CompositeTransform>(), logo_first);
+	auto splash     = page.FindName(L"Splash").as<xaml::Controls::Grid>();
+	splash.Resources().Insert(winrt::box_value(L"SplashAnimation"), storyboard); // kept while it runs
+	StartSplashReveal(page.FindName(L"SplashReveal").as<xaml::FrameworkElement>());
+	splash.Visibility(xaml::Visibility::Visible);
+	storyboard.Begin();
+}
+
 // In Segoe MDL2 Assets.
 constexpr wchar_t CHEVRON_RIGHT[] = {0xE76C, 0};
 
@@ -529,10 +702,36 @@ xaml::UIElement CreateEmulatorPage(std::filesystem::path game) {
 			    ShowTrophyToast(name, std::wstring(TrophyLinkArguments(title_id, name)));
 		    });
 	    });
-	EmulatorHost::Get().OnGameVisible(
-	    [launch = page.FindName(L"Launch").as<xaml::UIElement>()] { launch.Opacity(0.0); });
+	// The launch screen goes when the game says it is ready to be seen (sceSystemServiceHideSplashScreen), as on the PS5. A game that never says so
+	// is shown once it presents steadily: at once over the card, 10 s later over its own start screen.
+	const auto launch    = page.FindName(L"Launch").as<xaml::UIElement>();
+	const auto own_start = std::make_shared<bool>(false);
+	Libs::Graphics::SetSplashHiddenHandler([dispatcher = page.Dispatcher(), launch] {
+		(void)dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [launch] {
+			if (launch.Opacity() != 0.0) {
+				Log("launch screen: the game is ready to be seen after %.1f s\n", EmulatorHost::Get().RunTimeMs() / 1000.0);
+				launch.Opacity(0.0);
+			}
+		});
+	});
+	EmulatorHost::Get().OnGameVisible([launch, own_start] {
+		if (!*own_start) {
+			launch.Opacity(0.0);
+			return;
+		}
+		xaml::DispatcherTimer timer;
+		timer.Interval(std::chrono::seconds(10));
+		timer.Tick([launch](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
+			sender.as<xaml::DispatcherTimer>().Stop();
+			if (launch.Opacity() != 0.0) {
+				Log("launch screen: closed 10 s after the game presented steadily; it never said it was ready\n");
+				launch.Opacity(0.0);
+			}
+		});
+		timer.Start();
+	});
 	page.FindName(L"Title").as<xaml::Controls::TextBlock>().Text(title);
-	ShowLaunchBackdrop(page.FindName(L"Backdrop").as<xaml::Controls::Image>(), BackdropImage(game));
+	ShowStartScreen(page, game, own_start);
 	auto panel = page.FindName(L"Panel").as<xaml::Controls::SwapChainPanel>();
 	// The game's picture is 16:9: the panel is the largest 16:9 rectangle that fits the window (black bars around it), so the picture is never stretched.
 	page.SizeChanged([panel](auto const& sender, auto const&) {
