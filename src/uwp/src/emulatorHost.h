@@ -41,10 +41,12 @@ struct ShaderStatistics {
 // The size of the picture the game flipped last (output) and of the largest viewport it drew its scene into for it (render; 0 without a
 // scene) (window.cpp, Libs::Graphics::FrameResolution); all 0 before the first flip.
 struct FrameResolutions {
-	uint32_t output_width  = 0;
-	uint32_t output_height = 0;
-	uint32_t render_width  = 0;
-	uint32_t render_height = 0;
+	uint32_t output_width   = 0;
+	uint32_t output_height  = 0;
+	uint32_t render_width   = 0;
+	uint32_t render_height  = 0;
+	uint32_t display_width  = 0; // the picture on the screen (the presenter's swap chain)
+	uint32_t display_height = 0;
 };
 [[nodiscard]] FrameResolutions CurrentFrameResolutions();
 
