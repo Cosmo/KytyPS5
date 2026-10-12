@@ -117,7 +117,7 @@ namespace Kyty::Uwp {
 
 FrameResolutions CurrentFrameResolutions() {
 	const auto sizes = Libs::Graphics::FrameResolution::Last();
-	return {sizes.output_width, sizes.output_height, sizes.render_width, sizes.render_height};
+	return {sizes.output_width, sizes.output_height, sizes.render_width, sizes.render_height, sizes.display_width, sizes.display_height};
 }
 
 MemoryTotals CurrentMemoryTotals() {
