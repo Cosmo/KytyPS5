@@ -272,6 +272,7 @@ private:
 		}
 		m_width  = width;
 		m_height = height;
+		FrameResolution::NoteDisplay(width, height);
 	}
 
 	void ReleaseBuffers() {
