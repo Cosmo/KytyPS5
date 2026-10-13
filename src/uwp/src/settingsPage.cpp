@@ -117,10 +117,10 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
           </Style>
         </ListView.ItemContainerStyle>
         <x:String>Display</x:String>
-        <x:String>User</x:String>
+        <x:String>Overlay</x:String>
         <x:String>Controller</x:String>
-        <x:String>Game folders</x:String>
-        <x:String>User Data Path</x:String>
+        <x:String>System</x:String>
+        <x:String>Storage</x:String>
         <x:String>Memory and quality</x:String>
         <x:String>Developer</x:String>
       </ListView>
@@ -136,24 +136,25 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
       </Grid.ColumnDefinitions>
       <ScrollViewer x:Name="Panels" VerticalScrollBarVisibility="Hidden" Padding="0,0,0,16">
         <Grid>
-          <!-- In two groups, as the Xbox groups a page's settings in columns. -->
-          <StackPanel x:Name="Display" Orientation="Horizontal" Spacing="36">
-            <StackPanel x:Name="PictureGroup" Width="219" Spacing="8" />
-            <StackPanel x:Name="OverlayGroup" Width="219" Spacing="8" />
-          </StackPanel>
+          <!-- A category's settings: one column, or two groups with headings where one column would be taller than the screen, as the Xbox
+               groups a page's settings in columns. -->
+          <StackPanel x:Name="Display" Width="219" Spacing="8" />
 
-          <StackPanel x:Name="User" Width="219" Spacing="8" Visibility="Collapsed">
-            <TextBox x:Name="UserName" Header="User name" MaxLength="16" />
-          </StackPanel>
+          <StackPanel x:Name="Overlay" Width="219" Spacing="8" Visibility="Collapsed" />
 
           <StackPanel x:Name="Controller" Width="219" Spacing="8" Visibility="Collapsed" />
 
-          <StackPanel x:Name="GameFolders" Width="474" Spacing="12" Visibility="Collapsed">
-            <StackPanel x:Name="Folders" Spacing="8" />
-            <Button x:Name="AddFolder" Content="Add folder" />
+          <!-- What the emulated console tells the games. -->
+          <StackPanel x:Name="System" Width="219" Spacing="8" Visibility="Collapsed">
+            <TextBox x:Name="UserName" Header="User name" MaxLength="16" />
           </StackPanel>
 
-          <StackPanel x:Name="UserData" Width="474" Spacing="12" Visibility="Collapsed">
+          <!-- Where games are found, and where their data is kept. The headings are as AddHeading makes them. -->
+          <StackPanel x:Name="Storage" Width="474" Spacing="12" Visibility="Collapsed">
+            <TextBlock Text="Game folders" Style="{StaticResource BodyTextBlockStyle}" Margin="0,0,0,-8" />
+            <StackPanel x:Name="Folders" Spacing="8" />
+            <Button x:Name="AddFolder" Content="Add folder" />
+            <TextBlock Text="Data folder" Style="{StaticResource BodyTextBlockStyle}" Margin="0,24,0,-8" />
             <TextBlock x:Name="UserDataPath" TextWrapping="Wrap" />
             <TextBlock x:Name="UserDataStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
             <StackPanel Orientation="Horizontal" Spacing="8">
@@ -162,17 +163,16 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
             </StackPanel>
           </StackPanel>
 
-          <!-- In two groups, as the Xbox groups a page's settings in columns. -->
           <StackPanel x:Name="Memory" Orientation="Horizontal" Spacing="36" Visibility="Collapsed">
             <StackPanel x:Name="MemoryGroup" Width="219" Spacing="8" />
             <StackPanel x:Name="TextureGroup" Width="219" Spacing="8" />
           </StackPanel>
 
-          <!-- The switches, and beside them what removes data: one column of both is taller than the screen. -->
           <StackPanel x:Name="Developer" Orientation="Horizontal" Spacing="36" Visibility="Collapsed">
-            <StackPanel x:Name="DeveloperTiles" Width="219" Spacing="8" />
+            <StackPanel x:Name="DiagnosticsGroup" Width="219" Spacing="8" />
             <StackPanel Width="219" Spacing="8">
-              <Button x:Name="RemoveShaders" Content="Remove compiled shaders" HorizontalAlignment="Stretch" />
+              <StackPanel x:Name="TestingGroup" Spacing="8" />
+              <Button x:Name="RemoveShaders" Content="Remove compiled shaders" HorizontalAlignment="Stretch" Margin="0,8,0,0" />
               <TextBlock x:Name="RemoveShadersStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" />
               <Button x:Name="ResetTrophies" Content="Reset all trophies" HorizontalAlignment="Stretch" Margin="0,8,0,0" />
               <TextBlock x:Name="ResetTrophiesStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" />
@@ -317,10 +317,7 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	const auto explanation = page.FindName(L"Explanation").as<xaml::Controls::StackPanel>();
 
 	// Display.
-	const auto display       = panel(L"PictureGroup");
-	const auto overlay_group = panel(L"OverlayGroup");
-	AddHeading(display, L"Picture");
-	AddHeading(overlay_group, L"Overlay");
+	const auto display = panel(L"Display");
 	{
 		std::vector<std::wstring> names;
 		for (const auto& resolution: RESOLUTIONS) {
@@ -372,8 +369,8 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		              : L"At 120 Hz, games that offer a 120 Hz mode can run at up to 120 frames per second on a display that supports 120 Hz.",
 		     L"A lower rate limits games to that frame rate."});
 	}
-	// The same tiles as in the game menu's Settings.
-	AddOverlaySettings(overlay_group, explanation, std::shared_ptr<AppSettings>(state, &state->settings), save);
+	// Overlay: the same tiles as in the game menu's Settings.
+	AddOverlaySettings(panel(L"Overlay"), explanation, std::shared_ptr<AppSettings>(state, &state->settings), save);
 
 	// Controller.
 	const auto controller = panel(L"Controller");
@@ -443,7 +440,7 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	{
 		std::vector<std::wstring> languages(CONSOLE_LANGUAGES.begin(), CONSOLE_LANGUAGES.end());
 		AddChoice(
-		    panel(L"User"), explanation, L"Console language", std::move(languages),
+		    panel(L"System"), explanation, L"Console language", std::move(languages),
 		    std::min<size_t>(settings.console_language, CONSOLE_LANGUAGES.size() - 1),
 		    [state, save](size_t index) {
 			    state->settings.console_language = static_cast<uint32_t>(index);
@@ -452,7 +449,7 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    {L"The system language the games use for text and speech, where a game offers it.", L"Trophy names follow it too."});
 	}
 	AddSwitch(
-	    panel(L"User"), explanation, L"Skip intro logos", settings.skip_intro_logos,
+	    panel(L"System"), explanation, L"Skip intro logos", settings.skip_intro_logos,
 	    [state, save](bool on) {
 		    state->settings.skip_intro_logos = on;
 		    save();
@@ -462,7 +459,7 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	// Memory and quality. Game memory paging: Automatic is "not set" (on where the app's memory limit is small), the others are the cap in MB.
 	const auto memory   = panel(L"MemoryGroup");
 	const auto textures = panel(L"TextureGroup");
-	AddHeading(memory, L"Memory and video");
+	AddHeading(memory, L"Memory");
 	AddHeading(textures, L"Textures");
 	{
 		std::vector<std::pair<uint32_t, std::wstring>> choices = {{0xFFFFFFFFu, L"Automatic"},         {0, L"Off: all game memory stays in RAM"},
@@ -488,8 +485,10 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    },
 		    {L"When game memory goes over its limit, the parts the game has not used lately move to the swap file. They load back when the game "
 		     L"needs them.",
-		     L"Automatic turns this on when the app may use 8 GB or less, as on the Xbox. The MB choices set the limit for the game's memory. It is "
-		     L"lower while the GPU needs the room.",
+		     IsXbox() ? L"Automatic turns it on, with a limit that fits the console's memory. The MB choices set the limit for the game's memory. It "
+		                L"is lower while the GPU needs the room."
+		              : L"Automatic turns this on when the app may use 8 GB or less, as on the Xbox. The MB choices set the limit for the game's memory. "
+		                L"It is lower while the GPU needs the room.",
 		     L"Off can crash games that need more memory than there is."});
 	}
 	AddChoice(
@@ -549,32 +548,43 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    save();
 	    },
 	    {L"Uses smaller blocks of GPU memory and makes some buffers only when they are needed.",
-	     L"Saved about 300 MB in a test, with no visible difference.", L"Off can crash games on the Xbox when memory runs out."});
-	AddSwitch(
-	    memory, explanation, L"Multi-threaded video decoding", settings.video_decode_threads,
-	    [state, save](bool on) {
-		    state->settings.video_decode_threads = on;
-		    save();
-	    },
-	    {L"Decodes the videos games play through the system video player on all CPU cores.",
-	     L"Off decodes them on one thread. Use it to test video problems."});
+	     L"Saved about 300 MB in a test, with no visible difference.",
+	     IsXbox() ? L"Off can crash games when memory runs out." : L"Off can crash games on the Xbox when memory runs out."});
 
+	// Storage: game folders, and the data folder.
 	ListFolders(state);
-	page.FindName(L"AddFolder")
-.as<xaml::Controls::Button>().Click(
-	    [state](auto const&, auto const&) { AddFolder(state); });
+	auto add_folder = page.FindName(L"AddFolder").as<xaml::Controls::Button>();
+	add_folder.Click([state](auto const&, auto const&) { AddFolder(state); });
+	const Paragraphs game_folders_help = {
+	    L"KytyPS5 looks for games in its own Games folder and in the folders listed here, two folder levels deep.",
+	    L"A game is a folder with eboot.bin, or a .zar archive with eboot.bin at its root.",
+	    L"Each folder must allow apps to read it. If one does not, the library shows how to allow it."};
+	Explain(add_folder, explanation, game_folders_help);
 
 	state->user_data_path   = page.FindName(L"UserDataPath").as<xaml::Controls::TextBlock>();
 	state->user_data_status = page.FindName(L"UserDataStatus").as<xaml::Controls::TextBlock>();
 	ShowUserData(state);
-	page.FindName(L"ChooseUserData").as<xaml::Controls::Button>().Click([state](auto const&, auto const&) { ChooseUserData(state); });
-	page.FindName(L"ResetUserData").as<xaml::Controls::Button>().Click([state](auto const&, auto const&) {
+	auto choose_user_data = page.FindName(L"ChooseUserData").as<xaml::Controls::Button>();
+	auto reset_user_data  = page.FindName(L"ResetUserData").as<xaml::Controls::Button>();
+	choose_user_data.Click([state](auto const&, auto const&) { ChooseUserData(state); });
+	reset_user_data.Click([state](auto const&, auto const&) {
 		state->settings.user_data_path.clear();
 		SaveSettings(state->settings);
 		ShowUserData(state);
 	});
+	const Paragraphs data_folder_help = {
+	    L"The folder for saves, patches and trophies, for example on a USB drive. KytyPS5 keeps them in the subfolders _SaveData, _Patches and "
+	    L"_Trophies.",
+	    L"Saves, patches and trophies in the old folder are not moved. To keep them, copy these subfolders to the new folder yourself.",
+	    L"If the folder can't be written when a game starts, for example when the drive is not plugged in, that game uses the app's folder."};
+	Explain(choose_user_data, explanation, data_folder_help);
+	Explain(reset_user_data, explanation, data_folder_help);
 
-	const auto developer = panel(L"DeveloperTiles");
+	// Developer: what goes to the log, and what helps testing.
+	const auto developer = panel(L"DiagnosticsGroup");
+	const auto testing   = panel(L"TestingGroup");
+	AddHeading(developer, L"Diagnostics");
+	AddHeading(testing, L"Testing");
 	AddSwitch(
 	    developer, explanation, L"Graphics debug layer", settings.debug_layer,
 	    [state, save](bool on) {
@@ -608,7 +618,15 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    },
 	    {L"When the GPU hangs or crashes, the log names the shaders it was running and saves them.", L"Makes games slower."});
 	AddSwitch(
-	    developer, explanation, L"Keep compiled shaders across app builds", settings.shader_cache_any_build,
+	    testing, explanation, L"Multi-threaded video decoding", settings.video_decode_threads,
+	    [state, save](bool on) {
+		    state->settings.video_decode_threads = on;
+		    save();
+	    },
+	    {L"Decodes the videos games play through the system video player on all CPU cores.",
+	     L"Off decodes them on one thread. Use it to test video problems."});
+	AddSwitch(
+	    testing, explanation, L"Keep compiled shaders across app builds", settings.shader_cache_any_build,
 	    [state, save](bool on) {
 		    state->settings.shader_cache_any_build = on;
 		    save();
@@ -660,22 +678,18 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	auto categories = page.FindName(L"Categories").as<xaml::Controls::ListView>();
 	auto panels     = page.FindName(L"Panels").as<xaml::Controls::ScrollViewer>();
 	std::vector<xaml::UIElement> category_panels;
-	for (const auto* name: {L"Display", L"User", L"Controller", L"GameFolders", L"UserData", L"Memory", L"Developer"}) {
+	for (const auto* name: {L"Display", L"Overlay", L"Controller", L"System", L"Storage", L"Memory", L"Developer"}) {
 		category_panels.push_back(page.FindName(name).as<xaml::UIElement>());
 	}
 	// The explanation while a category is chosen and before a setting of it has the focus.
 	const std::vector<Paragraphs> category_explanations = {
 	    {},
+	    {L"What the overlay shows over games. It is the same as in the game menu's Settings."},
 	    {},
-	    {},
-	    {L"KytyPS5 looks for games in its own Games folder and in the folders listed here, two folder levels deep.",
-	     L"A game is a folder with eboot.bin, or a .zar archive with eboot.bin at its root.",
-	     L"Each folder must allow apps to read it. If one does not, the library shows how to allow it."},
-	    {L"The folder for saves, patches and trophies, for example on a USB drive.",
-	     L"KytyPS5 keeps them in the subfolders _SaveData, _Patches and _Trophies.",
-	     L"Saves, patches and trophies in the old folder are not moved. To keep them, copy these subfolders to the new folder yourself.",
-	     L"If the folder can't be written when a game starts, for example when the drive is not plugged in, that game uses the app's folder."},
-	    {L"On the Xbox, turning a memory option off can crash games that need the memory."},
+	    {L"What the console tells the games: the user's name, the language, and whether to skip intro logos."},
+	    {L"Where KytyPS5 looks for games, and where it keeps saves, patches and trophies."},
+	    {IsXbox() ? L"Turning a memory option off can crash games that need the memory."
+	              : L"On the Xbox, turning a memory option off can crash games that need the memory."},
 	    {},
 	};
 	const auto explain_category = [categories, explanation, category_explanations] {
