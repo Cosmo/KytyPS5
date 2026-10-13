@@ -6,6 +6,11 @@
 
 #include <xbyak/xbyak.h>
 
+#if defined(KYTY_PLATFORM_UWP)
+#include "common/platform/sysWindowsVirtual.h"
+#include "common/virtualMemory.h"
+#endif
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -15,6 +20,36 @@
 #include <unordered_set>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+#if defined(KYTY_PLATFORM_UWP)
+namespace {
+
+// Xbyak's own code memory, heap memory made executable with VirtualProtect, does not run on the Xbox. In the UWP app the walkers' code
+// takes whole pages from the emulator's memory functions (outside the guest's address ranges), which make them executable once the
+// code is complete, as the game's own code.
+class AppCodeAllocator final: public Xbyak::Allocator {
+public:
+	uint8_t* alloc(size_t size) override {
+		const auto code = Common::VirtualMemory::Windows::AllocHost(size, Common::VirtualMemory::Mode::ReadWrite);
+		EXIT_IF(code == 0);
+		return reinterpret_cast<uint8_t*>(code);
+	}
+	void free(uint8_t* p) override {
+		if (p != nullptr) {
+			Common::VirtualMemory::Free(reinterpret_cast<uint64_t>(p));
+		}
+	}
+	[[nodiscard]] bool useProtect() const override { return false; }
+};
+
+// Never destroyed: walkers can outlive the end of main.
+Xbyak::Allocator* WalkerCodeAllocator() {
+	static auto* allocator = new AppCodeAllocator;
+	return allocator;
+}
+
+} // namespace
+#endif
 
 SrtRuntime SrtReadCapture::ObservedRuntime() {
 	auto runtime = m_source;
@@ -443,7 +478,11 @@ void CompileSrtWalker(ResourcePlan& program) {
 	}
 	if (visited.size() != pointer_uses.size()) return;
 
+#if defined(KYTY_PLATFORM_UWP)
+	program.srt_code = std::make_unique<Xbyak::CodeGenerator>(4096, Xbyak::AutoGrow, WalkerCodeAllocator());
+#else
 	program.srt_code = std::make_unique<Xbyak::CodeGenerator>(4096, Xbyak::AutoGrow);
+#endif
 	auto& code = *program.srt_code;
 	Xbyak::Label failed, finished;
 	code.push(code.rbp);
@@ -498,6 +537,11 @@ void CompileSrtWalker(ResourcePlan& program) {
 	code.ret();
 	code.readyRE();
 	EXIT_IF(Xbyak::GetError() != 0);
+#if defined(KYTY_PLATFORM_UWP)
+	const auto code_address = reinterpret_cast<uint64_t>(code.getCode());
+	EXIT_IF(!Common::VirtualMemory::Protect(code_address, code.getSize(), Common::VirtualMemory::Mode::ExecuteRead) ||
+	        !Common::VirtualMemory::FlushInstructionCache(code_address, code.getSize()));
+#endif
 }
 
 SrtWalker::SrtWalker(const ResourcePlan& program, const SrtRuntime& runtime,
