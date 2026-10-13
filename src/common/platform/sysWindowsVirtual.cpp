@@ -278,6 +278,26 @@ bool FlushInstructionCache(uint64_t address, uint64_t size) {
 
 namespace Windows {
 
+uint64_t AllocHost(uint64_t size, Mode mode) {
+	const auto ptr = reinterpret_cast<uintptr_t>(
+	    HostVirtualAlloc(nullptr, size, static_cast<DWORD>(MEM_COMMIT) | static_cast<DWORD>(MEM_RESERVE),
+	                     AllocationProtect(mode)));
+	if (ptr == 0) {
+		printf("VirtualAlloc() failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
+		return 0;
+	}
+	if (!FinishAllocation(ptr, size, mode)) {
+		FreeHost(ptr);
+		return 0;
+	}
+	return ptr;
+}
+
+bool FreeHost(uint64_t address) {
+	// Windows releases the whole allocation, whatever the size.
+	return Free(address, 0);
+}
+
 bool ReservePlaceholder(uint64_t address, uint64_t size) {
 	auto* ptr = HostVirtualAlloc2(reinterpret_cast<void*>(address), size,
 	                              MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
