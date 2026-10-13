@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <memory>
 #include <string>
 
 namespace Libs::Graphics {
@@ -137,8 +138,19 @@ void Buffer::CopyFrom(CommandBuffer& command, const Buffer& source, uint64_t sou
 	    destination_offset > Size() || size > Size() - destination_offset) {
 		EXIT("Buffer: invalid copy range\n");
 	}
-	// A buffer cannot be copy source and destination at once.
-	EXIT_NOT_IMPLEMENTED(&source == this);
+	if (&source == this) {
+		// A copy within one buffer, as upstream's Vulkan renderer allows when the ranges do not overlap. A D3D12 resource cannot be
+		// copy source and destination at once: the bytes go through a buffer that lives until the GPU is done with it.
+		if (source_offset < destination_offset + size && destination_offset < source_offset + size) {
+			EXIT("Buffer: overlapping self-copy\n");
+		}
+		auto  owner   = std::make_unique<Buffer>(*m_graphics, *m_scheduler, MemoryUsage::DeviceLocal, 0, size);
+		auto& between = *owner;
+		m_scheduler->DeferOperation([owner = std::move(owner)]() mutable { owner.reset(); });
+		between.CopyFrom(command, *this, source_offset, 0, size);
+		CopyFrom(command, between, 0, destination_offset, size);
+		return;
+	}
 	source.Use(command, D3D12_RESOURCE_STATE_COPY_SOURCE);
 	Use(command, D3D12_RESOURCE_STATE_COPY_DEST);
 	command.Handle()->CopyBufferRegion(m_resource, destination_offset, source.m_resource,
