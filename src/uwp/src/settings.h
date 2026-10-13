@@ -27,8 +27,12 @@ struct AppSettings {
 	uint32_t                           screen_width  = 1280; // the TV resolution the games are told: 1080p below 3840 × 2160 (the settings page)
 	uint32_t                           screen_height = 720;
 	bool                               vsync         = false;
+	// How often the console refreshes its screen for the games, in Hz (Config::vblank_frequency, the desktop launcher's vblank frequency): the
+	// settings page offers 30, 60 and 120; the file may hold any value from 30 to 360.
+	uint32_t                           vblank_frequency = 60;
 	std::string                        user_name     = "Kyty";
 	uint32_t                           console_language = 1; // English (United States)
+	bool                               skip_intro_logos = false; // games that ask the console skip their logo videos at the start
 	bool                               debug_layer      = false; // the D3D12 debug layer
 	bool                               game_output      = false; // the game's printf in the log
 	bool                               d3d12_selftest   = false; // translate and sign built-in shaders at start (not on the settings page)
