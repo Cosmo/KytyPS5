@@ -125,10 +125,12 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.screen_width  = settings.screen_width;
 		config.screen_height = settings.screen_height;
 		config.present_mode  = settings.vsync ? Config::PresentMode::Fifo : Config::PresentMode::Mailbox;
+		config.vblank_frequency = std::clamp<uint32_t>(settings.vblank_frequency, 30, 360);
 		if (!settings.user_name.empty() && settings.user_name.size() <= Config::MAX_USER_NAME_LENGTH) {
 			config.user_name = settings.user_name;
 		}
 		config.console_language          = std::min(settings.console_language, Config::MAX_CONSOLE_LANGUAGE);
+		config.skip_notice_screen        = settings.skip_intro_logos; // sceSystemServiceGetNoticeScreenSkipFlag
 		config.vulkan_validation_enabled = settings.debug_layer; // the D3D12 debug layer
 		config.printf_direction          = settings.game_output ? Config::LogDirection::Console : Config::LogDirection::Silent;
 		// The fonts that stand in for the console's system fonts come with the package (uwp.cmake).
