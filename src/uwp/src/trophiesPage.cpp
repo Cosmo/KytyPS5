@@ -1,5 +1,6 @@
 #include "trophiesPage.h"
 
+#include "fileAccess.h"
 #include "gameImages.h"
 #include "gameLibrary.h"
 #include "gameSource.h"
@@ -8,6 +9,7 @@
 #include "xboxLook.h"
 
 #include "common/archive.h"
+#include "common/file.h"
 #include "common/trophies.h"
 
 #include <winrt/Windows.Foundation.Collections.h>
@@ -26,8 +28,13 @@
 #include <winrt/Windows.UI.Xaml.Media.h>
 #include <winrt/Windows.UI.Xaml.Shapes.h>
 
+// After the WinRT headers: its FindText macro would rename a method of Windows.UI.Text.
+#include <windows.h>
+#include <fileapifromapp.h>
+
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <ctime>
 #include <cwchar>
 #include <filesystem>
@@ -61,6 +68,8 @@ constexpr wchar_t CUP[] = L"M7,3 H17 V9 C17,12.3 14.8,14.5 12,14.5 C9.2,14.5 7,1
 constexpr double COVER_SIZE = 56;
 constexpr double ICON_SIZE  = 56;
 constexpr double CUP_SIZE   = 16;
+// The game menu's side panel is narrow: smaller icons, the grade under the name.
+constexpr double MENU_ICON_SIZE = 40;
 // The grade counts are cells of one width, so that they line up from row to row and with the header's.
 constexpr double GRADE_CELL_WIDTH = 88;
 
@@ -557,6 +566,99 @@ void ShowTrophyOf(const GameTrophies& entry, size_t package, int id, std::functi
 	ShowDetails(entry.packages[package].package.trophies.at(id), earned, earned ? EarnedText(unlocks, id) : std::wstring(), std::move(closed));
 }
 
+// A trophy's row in the game menu's side panel: its icon, its name, and under it its grade and when it was earned.
+xaml::Controls::Grid MenuTrophyRow(const Trophies::Trophy& trophy, const Trophies::UnlockData& unlocks) {
+	const bool earned = unlocks.unlocked.contains(trophy.id);
+	const bool masked = trophy.hidden && !earned;
+	xaml::Controls::Grid row;
+	row.Padding({0, 8, 0, 8});
+	row.ColumnSpacing(12);
+	row.ColumnDefinitions().Append(Column(xaml::GridLengthHelper::FromPixels(MENU_ICON_SIZE)));
+	row.ColumnDefinitions().Append(Column(xaml::GridLengthHelper::FromValueAndType(1, xaml::GridUnitType::Star)));
+	if (masked) {
+		auto cup = Cup(0, 24);
+		cup.Opacity(0.5);
+		row.Children().Append(cup);
+	} else {
+		xaml::Controls::Image icon;
+		icon.Width(MENU_ICON_SIZE);
+		icon.Height(MENU_ICON_SIZE);
+		icon.Opacity(earned ? 1.0 : 0.4);
+		icon.VerticalAlignment(xaml::VerticalAlignment::Center);
+		ShowPng(icon, trophy.icon_png, 80);
+		row.Children().Append(icon);
+	}
+	xaml::Controls::StackPanel text;
+	text.Spacing(2);
+	text.VerticalAlignment(xaml::VerticalAlignment::Center);
+	auto name = Text(TrophyName(trophy, masked));
+	name.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+	name.TextTrimming(xaml::TextTrimming::CharacterEllipsis);
+	name.TextWrapping(xaml::TextWrapping::NoWrap);
+	text.Children().Append(name);
+	xaml::Controls::StackPanel line;
+	line.Orientation(xaml::Controls::Orientation::Horizontal);
+	line.Spacing(6);
+	if (!masked) {
+		line.Children().Append(Cup(trophy.grade, 12));
+	}
+	auto status = Text(earned ? EarnedText(unlocks, trophy.id) : std::wstring(L"Not earned"));
+	status.Foreground(MediumBrush());
+	status.TextTrimming(xaml::TextTrimming::CharacterEllipsis);
+	line.Children().Append(status);
+	text.Children().Append(line);
+	xaml::Controls::Grid::SetColumn(text, 1);
+	row.Children().Append(text);
+	return row;
+}
+
+// The grade counts in one line, for the side panel: a cup and "earned/total" per grade that has trophies.
+xaml::Controls::StackPanel MenuGrades(const Trophies::Progress& progress) {
+	xaml::Controls::StackPanel grades;
+	grades.Orientation(xaml::Controls::Orientation::Horizontal);
+	grades.Spacing(14);
+	for (int grade = 1; grade <= 4; grade++) {
+		if (progress.total_grade[grade] == 0) {
+			continue;
+		}
+		xaml::Controls::StackPanel cell;
+		cell.Orientation(xaml::Controls::Orientation::Horizontal);
+		cell.Spacing(4);
+		cell.Children().Append(Cup(grade, 14));
+		cell.Children().Append(Text(std::to_wstring(progress.earned_grade[grade]) + L"/" + std::to_wstring(progress.total_grade[grade])));
+		grades.Children().Append(cell);
+	}
+	return grades;
+}
+
+// After the game menu found no trophies: each step of reading the first trophy package once more, for the log (background thread).
+void LogTrophyReadSteps(const GameEntry& game, int language) {
+	const auto inner = Trophies::PackagePath(0);
+	if (IsArchivePath(game.folder)) {
+		WIN32_FILE_ATTRIBUTE_DATA attributes {};
+		const bool                read  = GetFileAttributesExFromAppW(game.folder.c_str(), GetFileExInfoStandard, &attributes) != 0;
+		const auto                error = read ? 0ul : GetLastError();
+		Log("trophies: %s: the archive's attributes %s (error %lu)\n", game.title_id.c_str(), read ? "read" : "not read", error);
+	}
+	Log("trophies: %s: %ls in the game: %s\n", game.title_id.c_str(), inner.c_str(), GameFileExists(game.folder / inner) ? "yes" : "no");
+	const auto   path = IsArchivePath(game.folder) ? Common::MakeArchivePath(game.folder, inner) : game.folder / inner;
+	Common::File file(path, Common::File::Mode::Read);
+	const bool   opened = !file.IsInvalid();
+	Log("trophies: %s: package opened: %s, %llu bytes; parsed now: %zu trophies\n", game.title_id.c_str(), opened ? "yes" : "no",
+	    static_cast<unsigned long long>(opened ? file.Size() : 0), Trophies::LoadPackage(path, language).trophies.size());
+}
+
+// Focuses the first item of `list` that can take the focus (a trophy, not a package's heading).
+void FocusFirstItem(xaml::Controls::ListView const& list) {
+	list.UpdateLayout();
+	for (uint32_t index = 0; index < list.Items().Size(); index++) {
+		if (auto item = list.ContainerFromIndex(static_cast<int32_t>(index)).try_as<xaml::Controls::Control>(); item != nullptr && item.IsEnabled()) {
+			item.Focus(xaml::FocusState::Keyboard);
+			return;
+		}
+	}
+}
+
 void Page::ShowGame(size_t index) {
 	open_game        = index;
 	const auto& entry = games[index];
@@ -746,6 +848,123 @@ void ShowTrophyDetails(std::string title_id, std::string trophy_name, std::funct
 		}
 		ShowTrophyOf(*entry, found->first, found->second, std::move(closed));
 	}(std::move(title_id), std::move(trophy_name), std::move(closed));
+}
+
+void ShowGameTrophies(xaml::Controls::Grid const& host, GameEntry game) {
+	host.Children().Clear();
+	host.RowDefinitions().Clear();
+	host.RowSpacing(12);
+	xaml::Controls::RowDefinition header_row;
+	header_row.Height(xaml::GridLengthHelper::Auto());
+	host.RowDefinitions().Append(header_row);
+	host.RowDefinitions().Append(xaml::Controls::RowDefinition {});
+	xaml::Controls::StackPanel header;
+	header.Spacing(8);
+	host.Children().Append(header);
+	// The menu's own list has the same margin: the rows' content lines up with the panel's.
+	xaml::Controls::ListView list;
+	list.SelectionMode(xaml::Controls::ListViewSelectionMode::None);
+	list.IsItemClickEnabled(true);
+	list.Margin({-12, 0, -12, 0});
+	xaml::Controls::Grid::SetRow(list, 1);
+	host.Children().Append(list);
+
+	// While they are read, and when there are none: a line that says so, with the focus.
+	const auto status = [list](const wchar_t* text) {
+		list.Items().Clear();
+		auto line = Text(text);
+		line.TextWrapping(xaml::TextWrapping::Wrap);
+		line.Foreground(MediumBrush());
+		xaml::Controls::ListViewItem item;
+		item.Content(line);
+		list.Items().Append(item);
+		FocusFirstItem(list);
+	};
+	status(L"Reading the game's trophies...");
+
+	[](xaml::Controls::Grid host, xaml::Controls::StackPanel header, xaml::Controls::ListView list, GameEntry game,
+	   std::function<void(const wchar_t*)> status) -> winrt::fire_and_forget {
+		const auto dispatcher = host.Dispatcher();
+		const int  language   = static_cast<int>(LoadSettings().console_language);
+		co_await winrt::resume_background();
+		const auto started = std::chrono::steady_clock::now();
+		auto       loaded  = LoadGameTrophies(game, language, UserDataFolder(LoadSettings()));
+		// Once it found none and the next try found them: what failed, for the log.
+		if (!loaded) {
+			const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+			Log("trophies: the game menu found none for %s (read in %lld ms)\n", game.title_id.c_str(), static_cast<long long>(ms));
+			LogTrophyReadSteps(game, language);
+		}
+		co_await winrt::resume_foreground(dispatcher);
+		// The menu went on to something else meanwhile.
+		uint32_t index = 0;
+		if (host.Visibility() != xaml::Visibility::Visible || !host.Children().IndexOf(list, index)) {
+			co_return;
+		}
+		if (!loaded) {
+			status(L"This game has no trophies.");
+			co_return;
+		}
+		const auto entry = std::make_shared<GameTrophies>(std::move(*loaded));
+		header.Children().Append(Text(Summary(entry->progress)));
+		header.Children().Append(MenuGrades(entry->progress));
+
+		list.Items().Clear();
+		for (size_t p = 0; p < entry->packages.size(); p++) {
+			const auto& package = entry->packages[p];
+			if (entry->packages.size() > 1) {
+				auto heading = Text(package.package.title.empty() ? L"Trophy package " + std::to_wstring(package.label)
+				                                                  : std::wstring(winrt::to_hstring(package.package.title)));
+				heading.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+				heading.Foreground(MediumBrush());
+				heading.Margin({0, p == 0 ? 0.0 : 12.0, 0, 0});
+				xaml::Controls::ListViewItem item;
+				item.Content(heading);
+				item.IsEnabled(false);
+				list.Items().Append(item);
+			}
+			for (const auto& [id, trophy]: package.package.trophies) {
+				auto row = MenuTrophyRow(trophy, package.unlocks);
+				// Which trophy: the package and the trophy id.
+				row.Tag(winrt::box_value((static_cast<uint32_t>(p) << 16u) | static_cast<uint32_t>(id)));
+				list.Items().Append(row);
+			}
+		}
+		list.ItemClick([entry](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
+			const auto row = args.ClickedItem().try_as<xaml::FrameworkElement>();
+			if (row == nullptr || row.Tag() == nullptr) {
+				return;
+			}
+			const uint32_t tag = winrt::unbox_value<uint32_t>(row.Tag());
+			ShowTrophyOf(*entry, tag >> 16u, static_cast<int>(tag & 0xffffu));
+		});
+		FocusFirstItem(list);
+	}(host, header, list, std::move(game), status);
+}
+
+size_t ResetAllTrophies() {
+	const auto root  = UserDataFolder(LoadSettings()) / L"_Trophies";
+	size_t     games = 0;
+	for (const auto& folder: Subfolders(root)) {
+		size_t           removed = 0;
+		WIN32_FIND_DATAW data {};
+		HANDLE find = FindFirstFileExFromAppW((folder / L"trophies_*.json").c_str(), FindExInfoBasic, &data, FindExSearchNameMatch, nullptr, 0);
+		if (find != INVALID_HANDLE_VALUE) {
+			do {
+				if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 && DeleteFileFromAppW((folder / data.cFileName).c_str()) != 0) {
+					removed++;
+				}
+			} while (FindNextFileW(find, &data));
+			FindClose(find);
+		}
+		// The game's folder too, when nothing else is left in it.
+		RemoveDirectoryFromAppW(folder.c_str());
+		if (removed != 0) {
+			games++;
+		}
+	}
+	Log("trophies: reset, the unlocks of %zu games removed from %ls\n", games, root.c_str());
+	return games;
 }
 
 xaml::UIElement CreateTrophiesPage(std::function<void()> back, std::string title_id, std::string trophy_name) {
