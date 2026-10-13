@@ -5,6 +5,7 @@
 #include "overlay.h"
 #include "settingTiles.h"
 #include "settings.h"
+#include "trophiesPage.h"
 #include "xboxLook.h"
 
 #include <winrt/Windows.Foundation.Collections.h>
@@ -167,10 +168,15 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
             <StackPanel x:Name="TextureGroup" Width="219" Spacing="8" />
           </StackPanel>
 
-          <StackPanel x:Name="Developer" Width="219" Spacing="8" Visibility="Collapsed">
-            <StackPanel x:Name="DeveloperTiles" Spacing="8" />
-            <Button x:Name="RemoveShaders" Content="Remove compiled shaders" HorizontalAlignment="Stretch" Margin="0,8,0,0" />
-            <TextBlock x:Name="RemoveShadersStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" />
+          <!-- The switches, and beside them what removes data: one column of both is taller than the screen. -->
+          <StackPanel x:Name="Developer" Orientation="Horizontal" Spacing="36" Visibility="Collapsed">
+            <StackPanel x:Name="DeveloperTiles" Width="219" Spacing="8" />
+            <StackPanel Width="219" Spacing="8">
+              <Button x:Name="RemoveShaders" Content="Remove compiled shaders" HorizontalAlignment="Stretch" />
+              <TextBlock x:Name="RemoveShadersStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" />
+              <Button x:Name="ResetTrophies" Content="Reset all trophies" HorizontalAlignment="Stretch" Margin="0,8,0,0" />
+              <TextBlock x:Name="ResetTrophiesStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" />
+            </StackPanel>
           </StackPanel>
         </Grid>
       </ScrollViewer>
@@ -629,6 +635,25 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		remove_shaders_status.Text(files == 0 ? std::wstring(L"No compiled shaders to remove")
 		                                      : L"Removed " + std::to_wstring(files) + (files == 1 ? L" file (" : L" files (") +
 		                                            std::to_wstring((bytes + (1u << 20u) - 1) >> 20u) + L" MB)");
+	});
+	// The trophies earned in all games, after the player confirms (Cancel has the focus).
+	auto reset_trophies_status = page.FindName(L"ResetTrophiesStatus").as<xaml::Controls::TextBlock>();
+	auto reset_trophies        = page.FindName(L"ResetTrophies").as<xaml::Controls::Button>();
+	Explain(reset_trophies, explanation, {L"Removes the trophies earned in all games.", L"This can't be undone."});
+	reset_trophies.Click([reset_trophies_status](auto const&, auto const&) -> winrt::fire_and_forget {
+		auto                          status = reset_trophies_status; // the captures don't outlive the first co_await
+		xaml::Controls::ContentDialog dialog;
+		dialog.Title(winrt::box_value(L"Reset all trophies?"));
+		dialog.Content(winrt::box_value(L"This removes the trophies you've earned in all games. This can't be undone."));
+		dialog.PrimaryButtonText(L"Reset");
+		dialog.CloseButtonText(L"Cancel");
+		dialog.DefaultButton(xaml::Controls::ContentDialogButton::Close);
+		if (co_await dialog.ShowAsync() != xaml::Controls::ContentDialogResult::Primary) {
+			co_return;
+		}
+		const size_t games = ResetAllTrophies();
+		status.Text(games == 0 ? std::wstring(L"No trophies to reset")
+		                                      : L"Reset the trophies of " + std::to_wstring(games) + (games == 1 ? L" game" : L" games"));
 	});
 
 	// The chosen category's settings, in the categories' order (the markup's panels).
