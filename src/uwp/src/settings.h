@@ -33,6 +33,7 @@ struct AppSettings {
 	std::string                        user_name     = "Kyty";
 	uint32_t                           console_language = 1; // English (United States)
 	bool                               skip_intro_logos = false; // games that ask the console skip their logo videos at the start
+	bool                               home_screen_music = true; // a game's music in the library while its cover has the focus (titleMusic.h)
 	bool                               debug_layer      = false; // the D3D12 debug layer
 	bool                               game_output      = false; // the game's printf in the log
 	bool                               d3d12_selftest   = false; // translate and sign built-in shaders at start (not on the settings page)
