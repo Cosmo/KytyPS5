@@ -48,6 +48,8 @@ public:
 	static constexpr uint32_t BindlessViews = 1u << 16;
 
 	[[nodiscard]] DescriptorRange AllocateViews(CommandBuffer& command, uint32_t count);
+	// Whether the current command list still has room for this many view and sampler descriptors (a list that runs out can't go on).
+	[[nodiscard]] bool Fits(uint32_t views, uint32_t samplers) const;
 	// A persistent view slot (never 0); free it once no recorded work can use it any more.
 	[[nodiscard]] uint32_t                    AllocateBindlessView();
 	void                                      FreeBindlessView(uint32_t index);
@@ -80,6 +82,7 @@ private:
 		[[nodiscard]] ID3D12DescriptorHeap*  Heap() const noexcept { return m_heap; }
 		[[nodiscard]] const DescriptorRange& Base() const noexcept { return m_base; }
 		[[nodiscard]] DescriptorRange       Allocate(CommandScheduler& scheduler, uint32_t count);
+		[[nodiscard]] bool                  Fits(uint64_t tick, uint32_t count) const;
 
 	private:
 		struct Use {
