@@ -6,6 +6,11 @@
 
 #include <xbyak/xbyak.h>
 
+#if defined(KYTY_PLATFORM_UWP)
+#include "common/platform/sysWindowsVirtual.h"
+#include "common/virtualMemory.h"
+#endif
+
 #include <algorithm>
 #include <bit>
 #include <cstring>
@@ -14,6 +19,36 @@
 #include <unordered_set>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+#if defined(KYTY_PLATFORM_UWP)
+namespace {
+
+// Xbyak's own code memory, heap memory made executable with VirtualProtect, does not run on the Xbox. In the UWP app the walkers' code
+// takes whole pages from the emulator's memory functions (outside the guest's address ranges), which make them executable once the
+// code is complete, as the game's own code.
+class AppCodeAllocator final: public Xbyak::Allocator {
+public:
+	uint8_t* alloc(size_t size) override {
+		const auto code = Common::VirtualMemory::Windows::AllocHost(size, Common::VirtualMemory::Mode::ReadWrite);
+		EXIT_IF(code == 0);
+		return reinterpret_cast<uint8_t*>(code);
+	}
+	void free(uint8_t* p) override {
+		if (p != nullptr) {
+			Common::VirtualMemory::Free(reinterpret_cast<uint64_t>(p));
+		}
+	}
+	[[nodiscard]] bool useProtect() const override { return false; }
+};
+
+// Never destroyed: walkers can outlive the end of main.
+Xbyak::Allocator* WalkerCodeAllocator() {
+	static auto* allocator = new AppCodeAllocator;
+	return allocator;
+}
+
+} // namespace
+#endif
 
 SrtRuntime SrtReadCapture::ObservedRuntime() {
 	auto runtime = m_source;
@@ -1339,8 +1374,17 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 } // namespace
 
 void CompileSrtWalker(ResourcePlan& plan, std::span<const Value> values) {
+#if defined(KYTY_PLATFORM_UWP)
+	plan.srt_code = std::make_unique<Xbyak::CodeGenerator>(4096, Xbyak::AutoGrow, WalkerCodeAllocator());
+#else
 	plan.srt_code = std::make_unique<Xbyak::CodeGenerator>(4096, Xbyak::AutoGrow);
+#endif
 	WalkerCompiler(plan, *plan.srt_code).Compile(values);
+#if defined(KYTY_PLATFORM_UWP)
+	const auto code_address = reinterpret_cast<uint64_t>(plan.srt_code->getCode());
+	EXIT_IF(!Common::VirtualMemory::Protect(code_address, plan.srt_code->getSize(), Common::VirtualMemory::Mode::ExecuteRead) ||
+	        !Common::VirtualMemory::FlushInstructionCache(code_address, plan.srt_code->getSize()));
+#endif
 }
 
 bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<uint32_t>& flat,
