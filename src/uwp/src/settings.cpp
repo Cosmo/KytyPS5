@@ -59,8 +59,11 @@ AppSettings LoadSettings() {
 	read("screen_width", settings.screen_width);
 	read("screen_height", settings.screen_height);
 	read("vsync", settings.vsync);
+	read("vblank_frequency", settings.vblank_frequency);
+	read("stretch", settings.stretch);
 	read("user_name", settings.user_name);
 	read("console_language", settings.console_language);
+	read("skip_intro_logos", settings.skip_intro_logos);
 	read("debug_layer", settings.debug_layer);
 	read("game_output", settings.game_output);
 	read("d3d12_selftest", settings.d3d12_selftest);
@@ -115,8 +118,11 @@ void SaveSettings(const AppSettings& settings) {
 	json["screen_width"]     = settings.screen_width;
 	json["screen_height"]    = settings.screen_height;
 	json["vsync"]            = settings.vsync;
+	json["vblank_frequency"] = settings.vblank_frequency;
+	json["stretch"]          = settings.stretch;
 	json["user_name"]        = settings.user_name;
 	json["console_language"] = settings.console_language;
+	json["skip_intro_logos"] = settings.skip_intro_logos;
 	json["debug_layer"]      = settings.debug_layer;
 	json["game_output"]      = settings.game_output;
 	json["d3d12_selftest"]   = settings.d3d12_selftest;
