@@ -527,13 +527,61 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 	GetWorkCounters().draws.fetch_add(1, std::memory_order_relaxed);
 }
 
+// As upstream's Vulkan renderer (renderer/renderCommands.cpp): a rect-list draw with copy_depth_to_color copies the depth target's
+// values into its R32 float color target within the scissor, instead of drawing. The depth target's pending clear comes first.
+bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo& draw,
+                                      const DrawEmitInfo& emit, DrawRenderState& state) {
+	if (!buffer.GetRegisters().GetRenderControl().copy_depth_to_color) {
+		return false;
+	}
+	auto&       ucfg  = buffer.GetUserConfig();
+	const auto& hw    = buffer.GetRegisters();
+	auto&       depth = state.depth_info;
+	auto&       color = state.color_info[0];
+	EXIT_NOT_IMPLEMENTED(!Prospero::IsRectList(ucfg.GetPrimType()) ||
+	                     draw.IsIndexed() || draw.index_count != 3 || draw.instance_count != 1 ||
+	                     emit.first_vertex != 0 || emit.first_instance != 0 ||
+	                     state.color_count != 1 || color.target_slot != 0 || !depth.image_id ||
+	                     color.desc.info.samples != 1 ||
+	                     depth.desc.info.extent.width != color.Extent().width ||
+	                     depth.desc.info.extent.height != color.Extent().height ||
+	                     depth.desc.view_info.layer_count != 1 ||
+	                     color.desc.view_info.layer_count != 1 ||
+	                     hw.GetBlendControl(0).enable || state.ps_input_info.ps_pixel_kill_enable ||
+	                     state.ps_input_info.ps_depth_export_enable ||
+	                     state.ps_input_info.ps_sample_mask_export_enable);
+	const auto targets = AcquireRenderTargets(buffer, &color, 1, depth, false);
+	EXIT_NOT_IMPLEMENTED(targets.unrenderable);
+	auto& cache       = m_context.GetTextureCache();
+	auto& source      = cache.GetImage(depth.image_id);
+	auto& destination = cache.GetImage(color.image_id);
+	EXIT_NOT_IMPLEMENTED((source.backing.format != vk::Format::eD32Sfloat &&
+	                      source.backing.format != vk::Format::eD32SfloatS8Uint) ||
+	                     destination.backing.format != vk::Format::eR32Sfloat);
+	if (depth.load_clear_aspects && targets.depth_clears != 0) {
+		buffer.Handle()->ClearDepthStencilView(targets.depth, targets.depth_clears, targets.depth_clear,
+		                                       targets.stencil_clear, 0, nullptr);
+	}
+	const auto rect = calc_final_scissor(hw.GetScreenViewport(), hw.GetScanModeControl(),
+	                                     vk::Extent2D {targets.width, targets.height}, 0);
+	if (rect.right > rect.left && rect.bottom > rect.top) {
+		const auto& from = depth.desc.view_info;
+		const auto& to   = color.desc.view_info;
+		destination.CopyDepthToColor(buffer, source, ImageSubresourceRange {from.base_level, 1, from.base_layer, 1},
+		                             ImageSubresourceRange {to.base_level, 1, to.base_layer, 1},
+		                             D3D12_RECT {rect.left, rect.top, rect.right, rect.bottom});
+	}
+	return true;
+}
+
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
                                          bool                         primitive_restart_enable) {
-	// Upstream's depth-to-color copy is in the Vulkan renderer only; here it stops as on a Vulkan device without it.
-	EXIT_NOT_IMPLEMENTED(buffer.GetRegisters().GetRenderControl().copy_depth_to_color);
+	if (CopyDepthToColor(buffer, draw, emit, state)) {
+		return;
+	}
 	const auto& vs_input_info = state.vertex_info[0];
 	// (The draw log notes a draw that is skipped, and why.)
 	const auto log_skip = [&draw](const char* reason) {
@@ -698,6 +746,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		return;
 	}
 
+	MakeRoomForDescriptors({&pipeline, mesh_compute});
 	// Resource preparation above may finish and restart the command list. From here on, every
 	// operation records into the current list and cannot touch guest memory.
 	auto* list = buffer.Handle();
