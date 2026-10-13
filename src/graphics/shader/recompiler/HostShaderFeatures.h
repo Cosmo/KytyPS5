@@ -25,6 +25,9 @@ struct HostShaderFeatures {
 	// then uses the native instruction where every lane runs, and a helper lane that the ballot leaves out keeps its own value: in a
 	// waterfall loop it would otherwise wait forever (a GPU hang on the Xbox).
 	bool wave_ops_without_helper_lanes = false;
+	// A sample's texel offset must be a constant without Vulkan's maintenance8 (D3D12: spirv_to_dxil below shader model 6.7). With this, an
+	// offset the shader computes moves the sample's coordinates instead of stopping the game (the emitter's MoveCoordinatesByOffset).
+	bool sample_offset_by_coordinates = false;
 	// The BDA page table has two levels (BdaLayout, the D3D12 build: 32 MB instead of the flat table's 768 MB, for the Xbox's GPU
 	// memory budget): a guest address's lookup reads the directory first.
 	bool bda_two_level = false;
