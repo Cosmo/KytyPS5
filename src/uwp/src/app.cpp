@@ -314,7 +314,8 @@ xaml::UIElement CreateProblemPage(winrt::hstring const& subject, GameProblem con
 	                                                 : xaml::Visibility::Visible;
 	command.Text(problem.command);
 	command.Visibility(has_command);
-	copy.Visibility(has_command);
+	// On the Xbox the command is for a PC, which the console's clipboard doesn't reach.
+	copy.Visibility(IsXbox() ? xaml::Visibility::Collapsed : has_command);
 	copy.Click([text = problem.command](auto const&, auto const&) {
 		winrt::Windows::ApplicationModel::DataTransfer::DataPackage package;
 		package.SetText(text);
