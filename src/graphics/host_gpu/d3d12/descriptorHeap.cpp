@@ -65,6 +65,17 @@ DescriptorRange DescriptorHeap::Ring::Allocate(CommandScheduler& scheduler, uint
 	}
 }
 
+bool DescriptorHeap::Ring::Fits(uint64_t tick, uint32_t count) const {
+	uint32_t used = 0;
+	for (const auto& use: m_uses) {
+		if (use.tick == tick) {
+			used += use.end - use.begin;
+		}
+	}
+	// A range is contiguous, so one may skip the end of the ring: up to `count` entries more.
+	return uint64_t {used} + 2 * uint64_t {count} <= m_capacity - m_first;
+}
+
 DescriptorHeap::CpuPool::~CpuPool() {
 	for (auto* heap: m_heaps) {
 		heap->Release();
@@ -153,6 +164,11 @@ void DescriptorHeap::Bind(CommandBuffer& command) {
 	ID3D12DescriptorHeap* heaps[] = {m_views.Heap(), m_samplers.Heap()};
 	command.Handle()->SetDescriptorHeaps(2, heaps);
 	m_bound_tick = tick;
+}
+
+bool DescriptorHeap::Fits(uint32_t views, uint32_t samplers) const {
+	const auto tick = m_scheduler.CurrentTick();
+	return m_views.Fits(tick, views) && m_samplers.Fits(tick, samplers);
 }
 
 DescriptorRange DescriptorHeap::AllocateViews(CommandBuffer& command, uint32_t count) {
