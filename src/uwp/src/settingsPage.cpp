@@ -462,6 +462,13 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    save();
 	    },
 	    {L"Skips the logo videos that play when a game starts, in games that support it.", L"Other games play their intro logos as usual."});
+	AddSwitch(
+	    panel(L"System"), explanation, L"Home screen music", settings.home_screen_music,
+	    [state, save](bool on) {
+		    state->settings.home_screen_music = on;
+		    save();
+	    },
+	    {L"Plays a game's music in the library while its cover has the focus, in games that have it."});
 
 	// Memory and quality. Game memory paging: Automatic is "not set" (on where the app's memory limit is small), the others are the cap in MB.
 	const auto memory   = panel(L"MemoryGroup");
@@ -693,7 +700,7 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    {},
 	    {L"What the overlay shows over games. It is the same as in the game menu's Settings."},
 	    {},
-	    {L"What the console tells the games: the user's name, the language, and whether to skip intro logos."},
+	    {L"The console's own settings: the user's name, the language, the intro logos and the home screen music."},
 	    {L"Where KytyPS5 looks for games, and where it keeps saves, patches and trophies."},
 	    {IsXbox() ? L"Turning a memory option off can crash games that need the memory."
 	              : L"On the Xbox, turning a memory option off can crash games that need the memory."},

@@ -4,6 +4,7 @@
 #include "gameImages.h"
 #include "input.h"
 #include "settings.h"
+#include "titleMusic.h"
 #include "xboxLook.h"
 
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
@@ -265,6 +266,7 @@ struct Launcher {
 	xaml::Controls::Grid                     controllers {nullptr};
 	std::wstring                             listed_controllers;
 	bool                                     headset_mic_option = false; // the settings page's, when the page was made
+	bool                                     home_screen_music  = true;  // the settings page's Home screen music, when the page was made
 	// The options of the game at options_index, while open.
 	xaml::FrameworkElement    options {nullptr};
 	xaml::Controls::ListView  options_items {nullptr};
@@ -336,6 +338,9 @@ void Select(const std::shared_ptr<Launcher>& launcher, size_t index) {
 	const auto& game   = launcher->games[index];
 	launcher->title.Text(winrt::to_hstring(game.name));
 	ShowBackdrop(launcher, ++launcher->selection, BackdropImage(game.folder));
+	if (launcher->home_screen_music) {
+		TitleMusic::Play(game);
+	}
 }
 
 winrt::fire_and_forget ShowCover(xaml::Controls::Border cover, std::filesystem::path path) {
@@ -525,6 +530,7 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	launcher->page            = page;
 	launcher->controllers     = find(L"Controllers").as<xaml::Controls::Grid>();
 	launcher->headset_mic_option = LoadSettings().headset_mic;
+	launcher->home_screen_music  = LoadSettings().home_screen_music;
 	launcher->settings_button = find(L"SettingsButton").as<xaml::Controls::Button>();
 	launcher->settings_button.Click(
 	    [launcher](auto const&, auto const&) { launcher->actions.open_settings(); });
@@ -668,6 +674,7 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	controller_timer.Tick([launcher](auto const&, auto const&) { ListControllers(launcher); });
 	controller_timer.Start();
 	page.Unloaded([window, key_token, activated_token, controller_timer](auto const&, auto const&) {
+		TitleMusic::Stop(); // a game starts, or another page opens
 		controller_timer.Stop();
 		window.CoreWindow().KeyDown(key_token);
 		window.Activated(activated_token);

@@ -64,6 +64,7 @@ AppSettings LoadSettings() {
 	read("user_name", settings.user_name);
 	read("console_language", settings.console_language);
 	read("skip_intro_logos", settings.skip_intro_logos);
+	read("home_screen_music", settings.home_screen_music);
 	read("debug_layer", settings.debug_layer);
 	read("game_output", settings.game_output);
 	read("d3d12_selftest", settings.d3d12_selftest);
@@ -123,6 +124,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["user_name"]        = settings.user_name;
 	json["console_language"] = settings.console_language;
 	json["skip_intro_logos"] = settings.skip_intro_logos;
+	json["home_screen_music"] = settings.home_screen_music;
 	json["debug_layer"]      = settings.debug_layer;
 	json["game_output"]      = settings.game_output;
 	json["d3d12_selftest"]   = settings.d3d12_selftest;
