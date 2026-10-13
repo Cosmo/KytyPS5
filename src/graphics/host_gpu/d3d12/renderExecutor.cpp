@@ -81,6 +81,20 @@ void WriteRawView(ID3D12Device* device, const BufferBinding& binding,
 
 } // namespace
 
+void RenderExecutor::MakeRoomForDescriptors(std::initializer_list<const PipelineCache::Pipeline*> pipelines) {
+	uint32_t views    = 0;
+	uint32_t samplers = 0;
+	for (const auto* pipeline: pipelines) {
+		if (pipeline != nullptr) {
+			views += DescriptorCount(pipeline->layout.views);
+			samplers += DescriptorCount(pipeline->layout.samplers);
+		}
+	}
+	if (!m_context.GetDescriptorHeap().Fits(views, samplers)) {
+		m_context.GetCommandScheduler().Flush();
+	}
+}
+
 void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
                                     const PipelineCache::Pipeline&     pipeline,
                                     std::span<PreparedBindings* const> stages,
@@ -298,6 +312,7 @@ void RenderExecutor::RecordDispatch(CommandBuffer& buffer, const PipelineCache::
 	if (FrameDump::LogActive()) {
 		FrameDump::LogDispatch(DescribeDispatch(pipeline, bindings, fmt::format("groups {}x{}x{}", groups_x, groups_y, groups_z)));
 	}
+	MakeRoomForDescriptors({&pipeline});
 	// spirv_to_dxil's compute runtime data: group counts, padding, base group.
 	const uint32_t    runtime[7] = {groups_x, groups_y, groups_z, 0, 0, 0, 0};
 	PreparedBindings* stage      = &bindings;
@@ -350,6 +365,7 @@ void RenderExecutor::RecordDispatchIndirect(CommandBuffer&                 buffe
 	if (FrameDump::LogActive()) {
 		FrameDump::LogDispatch(DescribeDispatch(pipeline, bindings, "groups from an indirect buffer"));
 	}
+	MakeRoomForDescriptors({&pipeline});
 	// spirv_to_dxil reads the group counts from its runtime data. The command signature sets
 	// them from arguments that precede the dispatch's own: [x y z][x y z].
 	constexpr uint64_t CountsSize = 3 * sizeof(uint32_t);

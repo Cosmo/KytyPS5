@@ -508,6 +508,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	features.guest_pointer_table = !m_compiler.SupportsHeapIndexing();
 	features.lane_shuffle_loop   = !m_compiler.SupportsDivergentLaneIndex(); // (below shader model 6.7 a lane shuffle needs the same lane number in every lane)
 	features.wave_ops_without_helper_lanes = !m_compiler.SupportsHelperLanesInWaveOps();
+	features.sample_offset_by_coordinates = true; // texel offsets the shader computes (Vulkan's maintenance8 is not available here)
 	ShaderRecompiler::SetHostShaderFeatures(features);
 #if defined(KYTY_PLATFORM_UWP)
 	// Constant-alpha blend factors fail at pipeline creation on the Xbox (E_INVALIDARG, guard G4): the constant color factors stand in.
