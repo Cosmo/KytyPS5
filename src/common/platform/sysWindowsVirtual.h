@@ -41,6 +41,10 @@ namespace Common::VirtualMemory::Windows {
 // Read-only, no-access or read-write for committed pages of such a reservation.
 [[nodiscard]] bool ProtectLazy(uint64_t address, uint64_t size, Mode mode);
 
+// Memory of the emulator itself, committed at an address the OS chooses (Alloc(0, ...) places memory in the guest's address
+// ranges, which the guest may have taken all of). Free it with Free; Protect makes it executable.
+[[nodiscard]] uint64_t AllocHost(uint64_t size, Mode mode);
+
 // Called first for every access violation: makes a page that is meant to be writable and
 // executable accessible for the faulting access. False when the fault is not such a page.
 [[nodiscard]] bool HandleWriteExecuteFault(uint64_t address, bool execute);
