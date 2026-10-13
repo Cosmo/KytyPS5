@@ -1035,6 +1035,49 @@ void Image::CopyContents(CommandBuffer& command, Image& source, uint32_t source_
 	}
 }
 
+void Image::CopyDepthToColor(CommandBuffer& command, Image& depth, const ImageSubresourceRange& depth_range,
+                             const ImageSubresourceRange& range, const D3D12_RECT& rect) {
+	EXIT_IF(rect.left < 0 || rect.top < 0 || rect.right <= rect.left || rect.bottom <= rect.top);
+	depth.Use(command, D3D12_RESOURCE_STATE_COPY_SOURCE, ImageSubresourceRange {depth_range.base_level, 1, depth_range.base_layer, 1});
+	Use(command, D3D12_RESOURCE_STATE_COPY_DEST, ImageSubresourceRange {range.base_level, 1, range.base_layer, 1});
+	auto*      from              = depth.backing.resources[depth.backing.current].resource;
+	auto*      to                = backing.resources[backing.current].resource;
+	const auto depth_subresource = depth.backing.Subresource(depth_range.base_level, depth_range.base_layer, 0);
+	const auto subresource       = backing.Subresource(range.base_level, range.base_layer, 0);
+	const auto width             = std::max(depth.backing.extent.width >> depth_range.base_level, 1u);
+	const auto height            = std::max(depth.backing.extent.height >> depth_range.base_level, 1u);
+	EXIT_IF(static_cast<uint32_t>(rect.right) > width || static_cast<uint32_t>(rect.bottom) > height);
+
+	// A depth plane can only be copied whole: all of it goes into a buffer, and the rectangle goes on from there.
+	const auto pitch   = static_cast<uint32_t>(Common::AlignUp<uint64_t>(uint64_t {width} * sizeof(float), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT));
+	auto&      scratch = ScratchBuffer(m_graphics, m_scheduler, uint64_t {pitch} * height);
+	D3D12_TEXTURE_COPY_LOCATION linear {};
+	linear.pResource                          = scratch.Resource();
+	linear.Type                               = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+	linear.PlacedFootprint.Footprint.Format   = CopyFormat(m_graphics.device, from, depth_subresource);
+	linear.PlacedFootprint.Footprint.Width    = width;
+	linear.PlacedFootprint.Footprint.Height   = height;
+	linear.PlacedFootprint.Footprint.Depth    = 1;
+	linear.PlacedFootprint.Footprint.RowPitch = pitch;
+	D3D12_TEXTURE_COPY_LOCATION plane {};
+	plane.pResource        = from;
+	plane.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+	plane.SubresourceIndex = depth_subresource;
+	auto* list             = command.Handle();
+	scratch.Use(command, D3D12_RESOURCE_STATE_COPY_DEST);
+	list->CopyTextureRegion(&linear, 0, 0, 0, &plane, nullptr);
+
+	scratch.Use(command, D3D12_RESOURCE_STATE_COPY_SOURCE);
+	linear.PlacedFootprint.Footprint.Format = CopyFormat(m_graphics.device, to, subresource);
+	D3D12_TEXTURE_COPY_LOCATION target {};
+	target.pResource        = to;
+	target.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+	target.SubresourceIndex = subresource;
+	const D3D12_BOX box {static_cast<UINT>(rect.left), static_cast<UINT>(rect.top), 0, static_cast<UINT>(rect.right),
+	                     static_cast<UINT>(rect.bottom), 1};
+	list->CopyTextureRegion(&target, box.left, box.top, 0, &linear, &box);
+}
+
 void Image::CopyImage(Image& source) {
 	EXIT_IF(source.backing.samples != backing.samples);
 	const uint32_t levels     = std::min(source.backing.mip_levels, backing.mip_levels);
