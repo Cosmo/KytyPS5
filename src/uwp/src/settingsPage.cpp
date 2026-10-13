@@ -338,9 +338,34 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    state->settings.vsync = on;
 		    save();
 	    },
-	    {L"On: each frame waits for the display's next refresh. Smooth, with a little more delay.",
-	     L"Off: the newest frame shows at the next refresh and older ones are skipped. Less delay.",
-	     L"Games run at up to 60 frames a second either way."});
+	    IsXbox() ? Paragraphs {L"Syncs each frame to the display's refresh for smooth, even motion, at the cost of slightly higher input latency.",
+	                           L"When off, frames are shown as soon as they're ready, with lower latency.",
+	                           L"To run games above 60 frames per second, turn V-Sync off."}
+	             : Paragraphs {L"Syncs each frame to the display's refresh for smooth, even motion, at the cost of slightly higher input latency.",
+	                           L"When off, frames are shown as soon as they're ready, with lower latency."});
+	{
+		// The settings page's rates; another one from the settings file stays a choice of its own.
+		std::vector<uint32_t> rates {30, 60, 120};
+		const auto            current = std::clamp<uint32_t>(settings.vblank_frequency, 30, 360);
+		if (std::find(rates.begin(), rates.end(), current) == rates.end()) {
+			rates.insert(std::upper_bound(rates.begin(), rates.end(), current), current);
+		}
+		std::vector<std::wstring> names;
+		for (const auto rate: rates) {
+			names.push_back(std::to_wstring(rate) + L" Hz");
+		}
+		AddChoice(
+		    display, explanation, L"Refresh rate", std::move(names), static_cast<size_t>(std::find(rates.begin(), rates.end(), current) - rates.begin()),
+		    [state, save, rates](size_t index) {
+			    state->settings.vblank_frequency = rates[index];
+			    save();
+		    },
+		    {L"The refresh rate the console reports to games. Most games are designed for 60 Hz.",
+		     IsXbox() ? L"At 120 Hz, games that offer a 120 Hz mode can run at up to 120 frames per second. This requires a TV that supports 120 Hz, "
+		                L"120 Hz selected in TV & display options, and V-Sync turned off."
+		              : L"At 120 Hz, games that offer a 120 Hz mode can run at up to 120 frames per second on a display that supports 120 Hz.",
+		     L"A lower rate limits games to that frame rate."});
+	}
 	// The same tiles as in the game menu's Settings.
 	AddOverlaySettings(overlay_group, explanation, std::shared_ptr<AppSettings>(state, &state->settings), save);
 
@@ -420,6 +445,13 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    },
 		    {L"The system language the games use for text and speech, where a game offers it.", L"Trophy names follow it too."});
 	}
+	AddSwitch(
+	    panel(L"User"), explanation, L"Skip intro logos", settings.skip_intro_logos,
+	    [state, save](bool on) {
+		    state->settings.skip_intro_logos = on;
+		    save();
+	    },
+	    {L"Skips the logo videos that play when a game starts, in games that support it.", L"Other games play their intro logos as usual."});
 
 	// Memory and quality. Game memory paging: Automatic is "not set" (on where the app's memory limit is small), the others are the cap in MB.
 	const auto memory   = panel(L"MemoryGroup");
