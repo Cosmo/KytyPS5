@@ -98,6 +98,10 @@ public:
 	                                                           bool            read_only = false);
 	// Frame dump (debugging): the first mip of the first layer of a 2D color image as tight rows of `row_bytes` bytes (the GPU is flushed and waited for). False when it cannot be read.
 	[[nodiscard]] bool ReadbackColor(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height, uint32_t& row_bytes);
+	// The depth values of `depth` (D32, at `depth_range`'s first level and layer) into this R32 float image (at `range`'s first level
+	// and layer), within `rect`: the copy of a draw with copy_depth_to_color.
+	void CopyDepthToColor(CommandBuffer& command, Image& depth, const ImageSubresourceRange& depth_range,
+	                      const ImageSubresourceRange& range, const D3D12_RECT& rect);
 #else
 	using Barriers = std::vector<vk::ImageMemoryBarrier2>;
 	[[nodiscard]] Barriers GetBarriers(vk::ImageLayout                      destination_layout,
