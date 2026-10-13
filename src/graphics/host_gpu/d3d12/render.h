@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <span>
@@ -161,9 +162,10 @@ private:
 	                                          uint32_t         render_target_slice_offset,
 	                                          DrawRenderState& state);
 	void ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer, const DrawCallInfo& draw,
-	                         DrawRenderState& state, vk::PrimitiveTopology topology,
-	                         const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
-	                         bool primitive_restart_enable);
+	                         DrawRenderState& state, const DrawEmitInfo& emit,
+	                         const DrawIndexBufferSource& index_source);
+	[[nodiscard]] bool CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo& draw,
+	                                    const DrawEmitInfo& emit, DrawRenderState& state);
 	[[nodiscard]] bool ResolveColorTargets(CommandBuffer& buffer,
 	                                       uint32_t       render_target_slice_offset);
 	[[nodiscard]] bool ConsumeMetadataColorOperation(CommandBuffer& buffer,
@@ -192,6 +194,9 @@ private:
 	                            const Buffer& args, uint64_t args_offset);
 	// The command signature of indirect dispatches of `pipeline`.
 	[[nodiscard]] ID3D12CommandSignature* DispatchSignature(const PipelineCache::Pipeline& pipeline);
+	// Before work records into the command list: a new list when the descriptor tables of these pipelines might not fit into the
+	// current one (it holds 2048 samplers at most).
+	void MakeRoomForDescriptors(std::initializer_list<const PipelineCache::Pipeline*> pipelines);
 	// Sets the root signature and arguments of `pipeline` for the prepared stages, in order.
 	void CommitBindings(CommandBuffer& buffer, bool graphics, const PipelineCache::Pipeline& pipeline,
 	                    std::span<PreparedBindings* const> stages,
