@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <span>
@@ -154,22 +155,19 @@ private:
 	void PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
 	                             std::span<RenderColorInfo> colors);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,
-	                              uint32_t render_target_slice_offset, uint32_t render_target_slot,
-	                              bool ignore_target_mask = false, bool exact_format = false);
+	                              uint32_t render_target_slot, bool ignore_target_mask = false,
+	                              bool exact_format = false);
 	void ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& target);
 	[[nodiscard]] bool DepthStencilCopy(CommandBuffer& buffer);
 	// Shared with the Vulkan renderer (renderer/renderDraw.cpp).
 	[[nodiscard]] bool PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
-	                                          uint32_t         render_target_slice_offset,
 	                                          DrawRenderState& state);
-	void ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer, const DrawCallInfo& draw,
-	                         DrawRenderState& state, vk::PrimitiveTopology topology,
-	                         const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
-	                         bool primitive_restart_enable);
-	[[nodiscard]] bool ResolveColorTargets(CommandBuffer& buffer,
-	                                       uint32_t       render_target_slice_offset);
-	[[nodiscard]] bool ConsumeMetadataColorOperation(CommandBuffer& buffer,
-	                                                 uint32_t       render_target_slice_offset);
+	void ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallInfo& draw, DrawRenderState& state,
+	                         const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source);
+	[[nodiscard]] bool CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo& draw,
+	                                    const DrawEmitInfo& emit, DrawRenderState& state);
+	[[nodiscard]] bool ResolveColorTargets(CommandBuffer& buffer);
+	[[nodiscard]] bool ConsumeMetadataColorOperation(CommandBuffer& buffer);
 	// `read_only_depth` binds the depth target read-only, for a draw that also samples it.
 	[[nodiscard]] RenderTargets AcquireRenderTargets(CommandBuffer& buffer, RenderColorInfo* colors,
 	                                                 uint32_t color_count, RenderDepthInfo& depth,
@@ -194,6 +192,9 @@ private:
 	                            const Buffer& args, uint64_t args_offset);
 	// The command signature of indirect dispatches of `pipeline`.
 	[[nodiscard]] ID3D12CommandSignature* DispatchSignature(const PipelineCache::Pipeline& pipeline);
+	// Before work records into the command list: a new list when the descriptor tables of these pipelines might not fit into the
+	// current one (it holds 2048 samplers at most).
+	void MakeRoomForDescriptors(std::initializer_list<const PipelineCache::Pipeline*> pipelines);
 	// Sets the root signature and arguments of `pipeline` for the prepared stages, in order.
 	void CommitBindings(CommandBuffer& buffer, bool graphics, const PipelineCache::Pipeline& pipeline,
 	                    std::span<PreparedBindings* const> stages,
