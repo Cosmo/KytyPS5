@@ -88,6 +88,16 @@ namespace {
 	return layout.Footprint.Format;
 }
 
+// Views that D3D12 has no shader resource view for, which shaders read from a copy (ImageViewDescriptors::copy): 2D and 2D array
+// views of a 3D image (upstream's e2DArrayCompatible views), and 2D and cube views that start at a later layer of an array (a
+// Texture2D or TextureCube view always starts at the first).
+[[nodiscard]] bool CopiedView(const ImageBacking& backing, const ImageViewInfo& view) {
+	if (backing.image_type == vk::ImageType::e3D) {
+		return view.type != vk::ImageViewType::e3D;
+	}
+	return (view.type == vk::ImageViewType::e2D || view.type == vk::ImageViewType::eCube) && view.base_layer != 0;
+}
+
 [[nodiscard]] uint32_t Plane(vk::ImageAspectFlags aspect) {
 	return aspect == vk::ImageAspectFlagBits::eStencil ? 1u : 0u;
 }
@@ -222,6 +232,9 @@ uint64_t Image::GpuBytes() const {
 	for (const auto& resource: backing.resources) {
 		bytes += resource.allocation->GetSize();
 	}
+	for (const auto& view: backing.views) {
+		bytes += view.copy.allocation != nullptr ? view.copy.allocation->GetSize() : 0;
+	}
 	return bytes;
 }
 
@@ -240,6 +253,9 @@ Image::~Image() {
 				if (handle.ptr != 0) {
 					heap.FreeCpu(type, handle);
 				}
+			}
+			if (view.copy.allocation != nullptr) {
+				view.copy.allocation->Release();
 			}
 		}
 	}
@@ -398,6 +414,13 @@ void Image::Use(CommandBuffer& command, uint32_t state, std::optional<ImageSubre
                 std::optional<ImageViewHandle> view) {
 	const auto resource = view ? backing.views[view->index].resource : backing.current;
 	Synchronize(command, resource);
+	// Shaders read a CopiedView from its copy; copies and targets use the image itself.
+	constexpr auto shader_read = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	if (view && (state & shader_read) != 0 && !IsWriteState(static_cast<D3D12_RESOURCE_STATES>(state)) &&
+	    CopiedView(backing, backing.views[view->index].info)) {
+		UseCopy(command, backing.views[view->index], state);
+		return;
+	}
 	Transition(command, resource, state, range);
 	if (IsWriteState(static_cast<D3D12_RESOURCE_STATES>(state))) {
 		backing.version++;
@@ -406,11 +429,127 @@ void Image::Use(CommandBuffer& command, uint32_t state, std::optional<ImageSubre
 	}
 }
 
-ImageViewHandle Image::CreateView(const ImageViewInfo& view_info) {
-	if (backing.image_type == vk::ImageType::e3D && view_info.type != vk::ImageViewType::e3D &&
-	    !(view_info.usage & vk::ImageUsageFlagBits::eStorage)) {
-		EXIT_NOT_IMPLEMENTED("D3D12: sampled 2D views of 3D images are not supported\n");
+void Image::UseCopy(CommandBuffer& command, ImageViewDescriptors& view, uint32_t state) {
+	const auto& info   = view.info;
+	auto&       copy   = view.copy;
+	auto&       from   = backing.resources[view.resource];
+	const bool  volume = backing.image_type == vk::ImageType::e3D;
+	const auto  width  = std::max(backing.extent.width >> info.base_level, 1u);
+	const auto  height = std::max(backing.extent.height >> info.base_level, 1u);
+	// The copy's subresources: its levels are the view's, its layers the view's layers (or slices); the planes as the image's.
+	const auto subresource = [&](uint32_t level, uint32_t layer, uint32_t plane) {
+		return level + (layer + plane * info.layer_count) * info.level_count;
+	};
+	if (copy.resource == nullptr) {
+		// A block-compressed texture's size is whole blocks (a level of the image can be smaller).
+		const auto block = GetCopyBlock(backing.format, vk::ImageAspectFlagBits::eColor);
+		EXIT_NOT_IMPLEMENTED(width % block.width != 0 || height % block.height != 0);
+		EXIT_NOT_IMPLEMENTED(volume && info.level_count != 1);
+		D3D12_RESOURCE_DESC desc {};
+		desc.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		desc.Width            = width;
+		desc.Height           = height;
+		desc.DepthOrArraySize = static_cast<UINT16>(info.layer_count);
+		desc.MipLevels        = static_cast<UINT16>(info.level_count);
+		desc.Format           = from.family;
+		desc.SampleDesc.Count = backing.samples;
+		// Multisampled and depth textures must be targets.
+		desc.Flags = from.resource->GetDesc().Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+		D3D12MA::ALLOCATION_DESC allocation {};
+		allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+		// A BC array the CPU writes (GraphicContext::cpu_written_block_arrays): the device's copies would place the copy's small
+		// levels wrongly too, so the CPU copies it.
+		copy.cpu_written = from.cpu_written;
+		if (copy.cpu_written) {
+			allocation.CustomPool = m_graphics.cpu_texture_pool;
+		}
+		const auto initial = copy.cpu_written ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_COPY_DEST;
+		const auto result  = m_graphics.allocator->CreateResource(&allocation, &desc, initial, nullptr, &copy.allocation, IID_NULL, nullptr);
+		if (FAILED(result)) {
+			m_graphics.LogMemoryBudget();
+			EXIT("D3D12: failed to create the copy of an image view: %ux%u, %u levels, %u layers, format %d, HRESULT=0x%08x\n", width,
+			     height, info.level_count, info.layer_count, static_cast<int>(desc.Format), static_cast<uint32_t>(result));
+		}
+		copy.resource = copy.allocation->GetResource();
+		copy.family   = desc.Format;
+		copy.states.assign(static_cast<size_t>(info.level_count) * info.layer_count * backing.planes, initial);
 	}
+	std::vector<D3D12_RESOURCE_BARRIER> barriers;
+	const auto                          transition = [&](D3D12_RESOURCE_STATES after) {
+		barriers.clear();
+		for (uint32_t index = 0; index < copy.states.size(); index++) {
+			if (copy.states[index] != after) {
+				D3D12_RESOURCE_BARRIER barrier {};
+				barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+				barrier.Transition.pResource   = copy.resource;
+				barrier.Transition.Subresource = index;
+				barrier.Transition.StateBefore = copy.states[index];
+				barrier.Transition.StateAfter  = after;
+				barriers.push_back(barrier);
+				copy.states[index] = after;
+			}
+		}
+		if (!barriers.empty()) {
+			command.Handle()->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+		}
+	};
+	if (copy.version != backing.version && copy.cpu_written) {
+		// Such an image only changes by the CPU's uploads (UploadWithCpu), which wait for the GPU.
+		const auto           block = GetCopyBlock(backing.format, vk::ImageAspectFlagBits::eColor);
+		std::vector<uint8_t> data;
+		for (uint32_t level = 0; level < info.level_count; level++) {
+			const uint64_t row_pitch   = DivCeil(std::max(width >> level, 1u), block.width) * block.bytes;
+			const uint64_t slice_pitch = DivCeil(std::max(height >> level, 1u), block.height) * row_pitch;
+			data.resize(slice_pitch);
+			for (uint32_t layer = 0; layer < info.layer_count; layer++) {
+				const auto source      = backing.Subresource(info.base_level + level, info.base_layer + layer, 0);
+				const auto destination = subresource(level, layer, 0);
+				D3D12::Check(from.resource->Map(source, nullptr, nullptr), "image view copy: map image");
+				const HRESULT read = from.resource->ReadFromSubresource(data.data(), static_cast<UINT>(row_pitch), static_cast<UINT>(slice_pitch),
+				                                                        source, nullptr);
+				from.resource->Unmap(source, nullptr);
+				D3D12::Check(read, "image view copy: read image");
+				D3D12::Check(copy.resource->Map(destination, nullptr, nullptr), "image view copy: map copy");
+				const HRESULT written = copy.resource->WriteToSubresource(destination, nullptr, data.data(), static_cast<UINT>(row_pitch),
+				                                                          static_cast<UINT>(slice_pitch));
+				copy.resource->Unmap(destination, nullptr);
+				D3D12::Check(written, "image view copy: write copy");
+			}
+		}
+		copy.version = backing.version;
+	} else if (copy.version != backing.version) {
+		Transition(command, view.resource, D3D12_RESOURCE_STATE_COPY_SOURCE,
+		           ImageSubresourceRange {info.base_level, info.level_count, info.base_layer, info.layer_count});
+		transition(D3D12_RESOURCE_STATE_COPY_DEST);
+		for (uint32_t plane = 0; plane < backing.planes; plane++) {
+			for (uint32_t level = 0; level < info.level_count; level++) {
+				for (uint32_t layer = 0; layer < info.layer_count; layer++) {
+					D3D12_TEXTURE_COPY_LOCATION src {};
+					src.pResource        = from.resource;
+					src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+					src.SubresourceIndex = backing.Subresource(info.base_level + level, volume ? 0 : info.base_layer + layer, plane);
+					D3D12_TEXTURE_COPY_LOCATION dst {};
+					dst.pResource        = copy.resource;
+					dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+					dst.SubresourceIndex = subresource(level, layer, plane);
+					if (volume) {
+						// A 3D level is one subresource: each slice goes to its layer (Dawn copies between 3D and 2D array textures the same
+						// way). A layer of an array is copied whole, as depth and multisampled textures require.
+						const UINT      slice = info.base_layer + layer;
+						const D3D12_BOX box {0, 0, slice, width, height, slice + 1};
+						command.Handle()->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+					} else {
+						command.Handle()->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+					}
+				}
+			}
+		}
+		copy.version = backing.version;
+	}
+	transition(static_cast<D3D12_RESOURCE_STATES>(state));
+}
+
+ImageViewHandle Image::CreateView(const ImageViewInfo& view_info) {
 	ImageViewDescriptors view;
 	view.info     = view_info;
 	view.resource = ResourceIndex(view_info.format);
@@ -441,6 +580,37 @@ D3D12_CPU_DESCRIPTOR_HANDLE Image::ShaderResourceView(ImageViewHandle handle) {
 	                                                         : format.mapping);
 	const float min_lod = static_cast<float>(info.base_level) + static_cast<float>(info.min_lod) / 256.0f;
 	const UINT  plane   = stencil ? 1 : 0;
+	if (CopiedView(backing, info)) {
+		// The view's copy (UseCopy made it before the first draw that reads it): its first level and layer are the view's.
+		EXIT_IF(view.copy.resource == nullptr);
+		const float copy_min_lod = static_cast<float>(info.min_lod) / 256.0f;
+		switch (info.type) {
+			case vk::ImageViewType::e2D:
+				if (multisample) {
+					desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+				} else {
+					desc.ViewDimension                 = D3D12_SRV_DIMENSION_TEXTURE2D;
+					desc.Texture2D.MipLevels           = info.level_count;
+					desc.Texture2D.PlaneSlice          = plane;
+					desc.Texture2D.ResourceMinLODClamp = copy_min_lod;
+				}
+				break;
+			case vk::ImageViewType::eCube:
+				desc.ViewDimension                   = D3D12_SRV_DIMENSION_TEXTURECUBE;
+				desc.TextureCube.MipLevels           = info.level_count;
+				desc.TextureCube.ResourceMinLODClamp = copy_min_lod;
+				break;
+			default:
+				desc.ViewDimension                      = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+				desc.Texture2DArray.MipLevels           = info.level_count;
+				desc.Texture2DArray.ArraySize           = info.layer_count;
+				desc.Texture2DArray.ResourceMinLODClamp = copy_min_lod;
+				break;
+		}
+		view.srv = m_scheduler.Context().GetDescriptorHeap().AllocateCpu(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		m_graphics.device->CreateShaderResourceView(view.copy.resource, &desc, view.srv);
+		return view.srv;
+	}
 	switch (info.type) {
 		case vk::ImageViewType::e1D:
 			desc.ViewDimension                 = D3D12_SRV_DIMENSION_TEXTURE1D;
@@ -458,8 +628,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE Image::ShaderResourceView(ImageViewHandle handle) {
 			break;
 		case vk::ImageViewType::e2D:
 			// The view dimension must match the shader's Texture2D, which always reads the
-			// resource's first array slice.
-			EXIT_NOT_IMPLEMENTED(info.base_layer != 0);
+			// resource's first array slice (later ones are CopiedView).
 			if (multisample) {
 				desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
 			} else {
@@ -496,7 +665,6 @@ D3D12_CPU_DESCRIPTOR_HANDLE Image::ShaderResourceView(ImageViewHandle handle) {
 			desc.TextureCube.MostDetailedMip     = info.base_level;
 			desc.TextureCube.MipLevels           = info.level_count;
 			desc.TextureCube.ResourceMinLODClamp = min_lod;
-			EXIT_NOT_IMPLEMENTED(info.base_layer != 0);
 			break;
 		case vk::ImageViewType::eCubeArray:
 			desc.ViewDimension                        = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
