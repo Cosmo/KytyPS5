@@ -241,10 +241,35 @@ void SetViewports(const CommandBuffer& buffer, ID3D12GraphicsCommandList* list,
 }
 
 void SetDynamicState(const CommandBuffer& buffer, ID3D12GraphicsCommandList* list,
-                     const RenderDepthInfo& depth, bool depth_bounds) {
+                     const RenderDepthInfo& depth, bool depth_bounds, bool alpha_blend_factor) {
 	const auto&       ctx   = buffer.GetRegisters();
 	const auto&       blend = ctx.GetBlendColor();
-	const float       blend_constants[] {blend.red, blend.green, blend.blue, blend.alpha};
+	float             blend_constants[] {blend.red, blend.green, blend.blue, blend.alpha};
+	if (!alpha_blend_factor) {
+		// Without blend factors for the constant's alpha on color channels, the pipelines use the constant color there
+		// (BlendFactor in pipelineCache.cpp): with the alpha in all four channels that is exact, unless the draw also blends
+		// a color channel with the constant color.
+		using F             = Prospero::BlendFactor;
+		bool constant_alpha = false;
+		bool constant_color = false;
+		for (uint32_t slot = 0; slot < 8; slot++) {
+			const auto& control = ctx.GetBlendControl(slot);
+			if (!control.enable) {
+				continue;
+			}
+			for (const auto factor: {control.color_srcblend, control.color_destblend}) {
+				const auto f = static_cast<F>(factor);
+				constant_alpha |= f == F::kConstantAlpha || f == F::kOneMinusConstantAlpha;
+				constant_color |= f == F::kConstantColor || f == F::kOneMinusConstantColor;
+			}
+		}
+		if (constant_alpha && !constant_color) {
+			blend_constants[0] = blend_constants[1] = blend_constants[2] = blend.alpha;
+		} else if (constant_alpha) {
+			static std::atomic_bool warned = false;
+			WarnOnce(warned, "a draw blends color channels with both the constant's alpha and its color; the alpha uses the color");
+		}
+	}
 	list->OMSetBlendFactor(blend_constants);
 	if (depth.stencil_test_enable) {
 		if (depth.stencil_front.reference != depth.stencil_back.reference) {
@@ -808,7 +833,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                                    0);
 	}
 	SetDynamicState(buffer, list, state.depth_info,
-	                state.depth_info.depth_bounds_test_enable && targets.has_depth);
+	                state.depth_info.depth_bounds_test_enable && targets.has_depth,
+	                m_context.GetPipelineCache().AlphaBlendFactor());
 
 	LogDrawPhase(draw.Name(), "Draw");
 	list->OMSetRenderTargets(targets.color_count, targets.colors.data(), FALSE,

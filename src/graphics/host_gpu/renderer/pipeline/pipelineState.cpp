@@ -162,6 +162,12 @@ MakeGraphicsPipelineKey(const GraphicContext& graphics, std::span<const RenderCo
 	}
 	if (color_count == 0 && !with_depth) {
 		attachment_samples = render_sample_count(ctx.GetAaConfig().msaa_num_samples);
+#if defined(KYTY_GPU_BACKEND_D3D12)
+		// D3D12 rasterizes without attachments at 1, 4, 8 or 16 samples (ForcedSampleCount): 2 samples rasterize as 4.
+		if (attachment_samples == 2) {
+			attachment_samples = 4;
+		}
+#endif
 		EXIT_IF(!graphics.SupportsSamplesWithoutAttachments(attachment_samples));
 	}
 	EXIT_IF(attachment_samples == 0 ||

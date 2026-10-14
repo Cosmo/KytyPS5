@@ -102,8 +102,11 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		EXIT("unsupported memory unmap from an asynchronous GPU completion, addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", vaddr, size);
 	}
 	const auto unmap = [this, vaddr, size] {
-		// Work already recorded may still read this range on the GPU.
-		if (m_command_scheduler.Active()) {
+		// As upstream's renderer: check cache ownership on the GPU thread. Guest-memory callbacks can still access a range with no
+		// cached data, so they must finish before it is unmapped.
+		if (m_command_scheduler.Active() &&
+		    (m_buffer_cache.IsRegionRegistered(vaddr, size) || m_texture_cache.IsRegionRegistered(vaddr, size) ||
+		     m_command_scheduler.HasPendingPriorityOperations())) {
 			const auto tick = m_command_scheduler.CurrentTick();
 			m_command_scheduler.Finish();
 			m_command_scheduler.WaitPriorityOperations(tick);
