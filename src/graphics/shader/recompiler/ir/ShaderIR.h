@@ -401,6 +401,10 @@ inline constexpr uint32_t GuestBufferTableSpace = 1004;
 // Its size: the persistent descriptors (D3D12: DescriptorHeap::BindlessViews). A fixed size, as the
 // translator declares the 64-UAV feature for an unbounded array and the validator does not count it.
 inline constexpr uint32_t GuestBufferTableSize = 1u << 16;
+// The slot of that table that holds the lock words of 64-bit image atomics (HostShaderFeatures::image_atomic64_lock), and how many
+// there are (4 MB). A texel's lock is a hash of its coordinates: texels that share one only wait for each other.
+inline constexpr uint32_t ImageAtomic64LockSlot  = 1;
+inline constexpr uint32_t ImageAtomic64LockCount = 1u << 20;
 
 [[nodiscard]] constexpr uint32_t NativeBinding(ShaderType stage, DescriptorBindingKind kind) {
 	const uint32_t group = stage == ShaderType::Pixel                    ? 1u
