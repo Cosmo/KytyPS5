@@ -513,17 +513,21 @@ uint32_t ValueEmitContext::FirstLane(uint32_t ballot) {
 	              low_first, high_lane);
 }
 
-uint32_t ValueEmitContext::Shuffle(const IR::Inst& inst, size_t index, uint32_t lane) {
+uint32_t ValueEmitContext::Shuffle(const IR::Inst& inst, size_t index, uint32_t lane, const ShuffleLanes& lanes) {
 	const auto type = TypeId(state, inst.Arg(index).GetType());
 	if (other_half == nullptr) {
-		return EmitSubgroupShuffle(state, type, Arg(inst, index), lane);
+		return EmitSubgroupShuffle(state, type, Arg(inst, index), lane, lanes);
 	}
 	const auto physical_lane =
 	    EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 31));
+	if (lanes.same_half && GetHostShaderFeatures().lane_shuffle_loop) {
+		// The lanes read within their own half: the other half's shuffle (a loop of its own) would give nothing they take.
+		return EmitSubgroupShuffle(state, type, Arg(inst, index), physical_lane, lanes);
+	}
 	const auto in_high       = state.builder.AllocateId();
 	const auto value         = state.builder.AllocateId();
-	const auto low           = EmitSubgroupShuffle(state, type, HalfArg(inst, index, 0), physical_lane);
-	const auto high          = EmitSubgroupShuffle(state, type, HalfArg(inst, index, 1), physical_lane);
+	const auto low           = EmitSubgroupShuffle(state, type, HalfArg(inst, index, 0), physical_lane, lanes);
+	const auto high          = EmitSubgroupShuffle(state, type, HalfArg(inst, index, 1), physical_lane, lanes);
 	state.builder.AddFunction(spv::OpINotEqual, TypeBool(state), in_high,
 	                          EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 32)),
 	                          ConstantU32(state, 0));
