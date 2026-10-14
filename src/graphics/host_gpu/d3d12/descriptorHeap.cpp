@@ -4,10 +4,13 @@
 #include "common/logging/log.h"
 #include "graphics/host_gpu/d3d12/commandScheduler.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
+#include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
 
 namespace Libs::Graphics {
+
+namespace IR = ShaderRecompiler::IR;
 
 namespace {
 
@@ -119,6 +122,30 @@ DescriptorHeap::DescriptorHeap(GraphicContext& graphics, CommandScheduler& sched
 	null_view.Buffer.NumElements = 1;
 	null_view.Buffer.Flags       = D3D12_BUFFER_UAV_FLAG_RAW;
 	graphics.device->CreateUnorderedAccessView(nullptr, nullptr, &null_view, BindlessView(0));
+
+	// The lock words of 64-bit image atomics (HostShaderFeatures::image_atomic64_lock): a committed buffer starts as zeros, and a
+	// lock is free again once its atomic is done. Shaders only use it through atomics, so it needs no barriers.
+	static_assert(IR::ImageAtomic64LockSlot == 1 && IR::ImageAtomic64LockSlot < BindlessViews);
+	D3D12_HEAP_PROPERTIES heap {};
+	heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+	D3D12_RESOURCE_DESC buffer {};
+	buffer.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+	buffer.Width            = uint64_t {IR::ImageAtomic64LockCount} * sizeof(uint32_t);
+	buffer.Height           = 1;
+	buffer.DepthOrArraySize = 1;
+	buffer.MipLevels        = 1;
+	buffer.SampleDesc       = {1, 0};
+	buffer.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	buffer.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+	D3D12::Check(graphics.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COMMON, nullptr,
+	                                                      IID_PPV_ARGS(&m_atomic64_locks)),
+	             "create the lock words of 64-bit image atomics");
+	D3D12_UNORDERED_ACCESS_VIEW_DESC locks {};
+	locks.Format             = DXGI_FORMAT_R32_TYPELESS;
+	locks.ViewDimension      = D3D12_UAV_DIMENSION_BUFFER;
+	locks.Buffer.NumElements = IR::ImageAtomic64LockCount;
+	locks.Buffer.Flags       = D3D12_BUFFER_UAV_FLAG_RAW;
+	graphics.device->CreateUnorderedAccessView(m_atomic64_locks, nullptr, &locks, BindlessView(IR::ImageAtomic64LockSlot));
 }
 
 uint32_t DescriptorHeap::AllocateBindlessView() {
@@ -153,6 +180,9 @@ D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap::BindlessTable(CommandBuffer& command
 DescriptorHeap::~DescriptorHeap() {
 	if (m_scratch != nullptr) {
 		m_scratch->Release();
+	}
+	if (m_atomic64_locks != nullptr) {
+		m_atomic64_locks->Release();
 	}
 }
 
