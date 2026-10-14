@@ -39,6 +39,9 @@ struct HostShaderFeatures {
 	// (D3D12 has no USCALED/SSCALED formats and no 10:10:10:2 SNORM vertex format): scaled formats as their integers, 10:10:10:2
 	// SNORM as its unsigned components, sign extended and normalized as Vulkan does.
 	bool vertex_formats_as_integers = false;
+	// Samplers with unnormalized coordinates (texel positions), which D3D12 has none of: the shader divides the coordinates by the
+	// size of the image's first level (ResourceSpecialization::unnormalized_samplers) and samples with a normalized sampler.
+	bool unnormalized_samplers_in_shader = false;
 };
 
 void                                    SetHostShaderFeatures(const HostShaderFeatures& features);

@@ -43,6 +43,9 @@ struct ResourceSpecialization {
 
 	std::vector<Buffer> buffers;
 	std::vector<Image>  images;
+	// Per sampler of the snapshot, whether it takes texel positions (HostShaderFeatures::unnormalized_samplers_in_shader; empty
+	// without it).
+	std::vector<uint8_t> unnormalized_samplers;
 	std::vector<Sampler> samplers;
 
 	bool operator==(const ResourceSpecialization&) const = default;
