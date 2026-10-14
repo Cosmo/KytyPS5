@@ -68,6 +68,8 @@ The "Checked" column says how a change was checked when it was made, before the 
 - **Vertex values in pixel shaders**: the Series X has no barycentrics, so a pixel shader that reads the values of its triangle's three vertices (RDNA2 custom interpolation: P0, P10, P20) gets the interpolated value as P0 and zeros as P10 and P20 (`HostShaderFeatures.h`, `EmitInterpolationParameter`). Plain interpolation comes out right; surfaces whose shaders need the real vertex values show black speckles. Giving the interpolated value for all three, as older Kyty did, speckles too. On a PC the Mesa patch reads them with `AttributeAtVertex`; `xbox_gpu_limits` shows the Series X's result there.
 - **Viewports with different Y directions in one draw**: spirv_to_dxil flips Y by the first viewport's direction only (its lowering reads one flip bit), so the other viewports of such a draw are upside down.
 - **Stencil references and masks per face**: one value for both faces (the front one): separate ones need a newer D3D12 than the Xbox's. Drawing such draws twice, once per face side, would be the workaround.
+- **Storage views that start at a later layer of an array**: a shader that writes a 1D or 2D image through such a view stops the game (a D3D12 RWTexture2D view always starts at the first layer). A game can choose the layer by the address alone, so the fix would change the translation of every shader that writes 1D or 2D images (declared as arrays); left out for now.
+- **Multisampled storage images**: a shader that writes a multisampled image stops the game; D3D12 below shader model 6.7 has no writable multisampled textures.
 
 ## Notes on running the CPU tests
 
