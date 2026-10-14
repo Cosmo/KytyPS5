@@ -152,10 +152,7 @@ D3D12_DEPTH_STENCIL_DESC1 DepthStencilDesc(const RenderDepthInfo&        depth,
 	if (rendering.stencil_format != vk::Format::eUndefined && depth.stencil_test_enable) {
 		const auto& front = depth.stencil_front;
 		const auto& back  = depth.stencil_back;
-		if (front.compareMask != back.compareMask || front.writeMask != back.writeMask) {
-			static std::atomic_bool warned = false;
-			WarnOnce(warned, "stencil masks differ per face; using the front face masks");
-		}
+		// One pair of masks for both faces: a draw whose faces differ in them is drawn once per face (RenderExecutor).
 		desc.StencilEnable    = TRUE;
 		desc.StencilReadMask  = static_cast<UINT8>(front.compareMask);
 		desc.StencilWriteMask = static_cast<UINT8>(front.writeMask);
@@ -1292,7 +1289,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
     std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
     std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
     const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
-    bool primitive_restart_enable, uint32_t strip_cut, const GraphicsPrograms& programs) {
+    bool primitive_restart_enable, uint32_t strip_cut, const GraphicsPrograms& programs, FacePass faces) {
 	KYTY_PROFILER_BLOCK("PipelineCache::GetGraphicsPipeline");
 	const auto& vs_input_info = vertex_info.front();
 	EXIT_IF(!programs.vertex[0] || (ps_input_info != nullptr && !programs.pixel));
@@ -1307,6 +1304,10 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	                                    vertex_ids, ps_input_info != nullptr ? programs.pixel.id : 0);
 	key.depth_stencil = DepthStencilDesc(depth, key.state.rendering);
 	key.strip_cut     = strip_cut;
+	if (faces != FacePass::Guest) {
+		key.state.static_params.cull_front = faces == FacePass::Back;
+		key.state.static_params.cull_back  = faces == FacePass::Front;
+	}
 
 	const auto& ctx         = command.GetRegisters();
 	const auto& mode        = ctx.GetModeControl();
