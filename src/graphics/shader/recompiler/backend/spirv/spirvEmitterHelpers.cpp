@@ -213,6 +213,25 @@ uint32_t EmitVertexParameterComponentU32(EmitterState& state, const InputBinding
 	if (kind == VertexInputScalarKind::Uint) {
 		return raw;
 	}
+	// HostShaderFeatures::vertex_formats_as_integers: the value the guest's format gives, as float bits.
+	if (kind == VertexInputScalarKind::UscaledAsUint || kind == VertexInputScalarKind::SscaledAsSint) {
+		const auto value = Unary(state, kind == VertexInputScalarKind::UscaledAsUint ? spv::OpConvertUToF : spv::OpConvertSToF,
+		                         TypeF32(state), raw);
+		return Unary(state, spv::OpBitcast, TypeU32(state), value);
+	}
+	if (kind == VertexInputScalarKind::Snorm10AsUint) {
+		// The component's bits (R10G10B10A2_UINT: 10 for x, y and z, 2 for w), sign extended, divided by the largest value (511, or 1
+		// for w) and clamped to -1.
+		const uint32_t bits    = component < 3u ? 10u : 2u;
+		const auto     shifted = Binary(state, spv::OpShiftLeftLogical, TypeU32(state), raw, ConstantU32(state, 32u - bits));
+		const auto     signed_value =
+		    Binary(state, spv::OpShiftRightArithmetic, TypeI32(state), Unary(state, spv::OpBitcast, TypeI32(state), shifted),
+		           ConstantU32(state, 32u - bits));
+		const auto value  = Unary(state, spv::OpConvertSToF, TypeF32(state), signed_value);
+		const auto scaled = Binary(state, spv::OpFDiv, TypeF32(state), value, ConstantF32Value(state, static_cast<float>((1u << (bits - 1u)) - 1u)));
+		const auto result = EmitGlsl<GLSLstd450FMax, IR::Type::F32>(state, scaled, ConstantF32Value(state, -1.0f));
+		return Unary(state, spv::OpBitcast, TypeU32(state), result);
+	}
 
 	const auto bits = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpBitcast, TypeU32(state), bits, raw);
