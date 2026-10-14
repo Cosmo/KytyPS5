@@ -372,6 +372,10 @@ void DefineDescriptors(EmitterState& state) {
 				definition.type = ImageType(state, image);
 				definition.variable = Define(ArrayType(definition.type), name.c_str(),
 				                             spv::StorageClassUniformConstant);
+				if (image.atomic64 && GetHostShaderFeatures().image_atomic64_lock) {
+					// Lanes of every wave read and write its texels under a lock.
+					state.builder.AddAnnotation(spv::OpDecorate, definition.variable, spv::DecorationCoherent);
+				}
 				definition.pointer_type = TypePointer(
 				    state, spv::StorageClassUniformConstant, definition.type);
 				if (image.dimension == ImageDimension::Dim1D ||
@@ -384,6 +388,11 @@ void DefineDescriptors(EmitterState& state) {
 				break;
 			}
 		}
+	}
+	// The lock words of 64-bit image atomics are in the guest buffer table (IR::ImageAtomic64LockSlot).
+	if (GetHostShaderFeatures().image_atomic64_lock && state.guest_buffer_table == 0 &&
+	    std::ranges::any_of(info.images, [](const IR::ImageResource& image) { return image.atomic64; })) {
+		DefineGuestBufferTable(state);
 	}
 }
 

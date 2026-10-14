@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
@@ -466,7 +467,8 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
                                               const ShaderRecompiler::IR::DescriptorValue& value) {
-	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
+	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled &&
+	    !ShaderRecompiler::GetHostShaderFeatures().image_atomic64_lock) {
 		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
 	}
 	auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(value);
