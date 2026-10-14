@@ -210,8 +210,8 @@ D3D12_BLEND BlendFactor(uint32_t factor, bool alpha, bool alpha_blend_factor) {
 			if (alpha || !alpha_blend_factor) {
 				if (!alpha) {
 					static std::atomic_bool warned = false;
-					WarnOnce(warned, "constant alpha blend factors of color channels are "
-					                 "unsupported; using the constant color");
+					WarnOnce(warned, "constant alpha blend factors of color channels use the constant color, "
+					                 "set to the constant's alpha where the draw needs no constant color");
 				}
 				return inverse ? D3D12_BLEND_INV_BLEND_FACTOR : D3D12_BLEND_BLEND_FACTOR;
 			}
