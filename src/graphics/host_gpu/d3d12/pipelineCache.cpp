@@ -152,10 +152,7 @@ D3D12_DEPTH_STENCIL_DESC1 DepthStencilDesc(const RenderDepthInfo&        depth,
 	if (rendering.stencil_format != vk::Format::eUndefined && depth.stencil_test_enable) {
 		const auto& front = depth.stencil_front;
 		const auto& back  = depth.stencil_back;
-		if (front.compareMask != back.compareMask || front.writeMask != back.writeMask) {
-			static std::atomic_bool warned = false;
-			WarnOnce(warned, "stencil masks differ per face; using the front face masks");
-		}
+		// One pair of masks for both faces: a draw whose faces differ in them is drawn once per face (RenderExecutor).
 		desc.StencilEnable    = TRUE;
 		desc.StencilReadMask  = static_cast<UINT8>(front.compareMask);
 		desc.StencilWriteMask = static_cast<UINT8>(front.writeMask);
@@ -1303,25 +1300,32 @@ void PipelineCache::SetOutputState(Stream& stream, const GraphicsKey& key) const
 	}
 }
 
-PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
-    std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
-    std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
-    const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
-    bool primitive_restart_enable, uint32_t strip_cut, const GraphicsPrograms& programs) {
+PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(CommandBuffer& command, const DrawRenderState& state, const RenderDepthInfo& depth,
+                                                            uint32_t strip_cut, FacePass faces) {
 	KYTY_PROFILER_BLOCK("PipelineCache::GetGraphicsPipeline");
+	const auto  vertex_info   = state.VertexStages();
+	const auto* ps_input_info = state.ps_active ? &state.ps_input_info : nullptr;
 	const auto& vs_input_info = vertex_info.front();
-	EXIT_IF(!programs.vertex[0] || (ps_input_info != nullptr && !programs.pixel));
+	EXIT_IF(vs_input_info.stage.handle == nullptr || (ps_input_info != nullptr && ps_input_info->stage.handle == nullptr));
 
+	GraphicsPrograms        programs;
 	std::array<uint64_t, 3> vertex_ids {};
-	for (uint32_t i = 0; i < programs.vertex.size(); i++) {
-		vertex_ids[i] = programs.vertex[i].id;
+	for (uint32_t i = 0; i < vertex_info.size(); i++) {
+		programs.vertex[i] = *vertex_info[i].stage.handle;
+		vertex_ids[i]      = programs.vertex[i].id;
+	}
+	if (ps_input_info != nullptr) {
+		programs.pixel = *ps_input_info->stage.handle;
 	}
 	GraphicsKey key;
-	key.state = MakeGraphicsPipelineKey(m_graphics, colors, depth, vertex_info, command,
-	                                    ps_input_info, topology, primitive_restart_enable,
-	                                    vertex_ids, ps_input_info != nullptr ? programs.pixel.id : 0);
+	key.state = MakeGraphicsPipelineKey(m_graphics, std::span {state.color_info, state.color_count}, depth, vertex_info, command,
+	                                    ps_input_info, state.topology, state.primitive_restart_enable, vertex_ids, programs.pixel.id);
 	key.depth_stencil = DepthStencilDesc(depth, key.state.rendering);
 	key.strip_cut     = strip_cut;
+	if (faces != FacePass::Guest) {
+		key.state.static_params.cull_front = faces == FacePass::Back;
+		key.state.static_params.cull_back  = faces == FacePass::Front;
+	}
 
 	const auto& ctx         = command.GetRegisters();
 	const auto& mode        = ctx.GetModeControl();
