@@ -244,18 +244,69 @@ uint32_t EmitBallotLaneActiveBool(EmitterState& state, uint32_t active_ballot, u
 	return ret;
 }
 
-uint32_t EmitSubgroupShuffle(EmitterState& state, uint32_t type, uint32_t value, uint32_t lane) {
+namespace {
+
+// The host's quad operations: the stages that spirv_to_dxil keeps them in (pixel and compute shaders; it makes the others' into
+// shuffles).
+bool HasQuadOperations(const EmitterState& state) {
+	return state.program.stage == ShaderType::Pixel || state.program.stage == ShaderType::Compute || state.mesh_compute;
+}
+
+// Position i of each quad reads position quad[i]: one broadcast where all read the same position, otherwise the swaps across (i ^ 1),
+// down (i ^ 2) and diagonally (i ^ 3) that the positions need, each position taking its own.
+uint32_t EmitQuadShuffle(EmitterState& state, uint32_t type, uint32_t value, const std::array<uint8_t, 4>& quad) {
+	state.builder.RequireCapability(spv::CapabilityGroupNonUniformQuad);
 	const auto subgroup = ConstantU32(state, spv::ScopeSubgroup);
-	if (!GetHostShaderFeatures().lane_shuffle_loop) {
+	if (quad[0] == quad[1] && quad[0] == quad[2] && quad[0] == quad[3]) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformQuadBroadcast, type, result, subgroup, value, ConstantU32(state, quad[0] & 3u));
+		return result;
+	}
+	std::array<uint32_t, 4> swapped {value, 0, 0, 0};
+	const auto              swap = [&](uint32_t position) {
+		const auto distance = (quad[position] ^ position) & 3u;
+		if (swapped[distance] == 0) {
+			swapped[distance] = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpGroupNonUniformQuadSwap, type, swapped[distance], subgroup, value,
+			                          ConstantU32(state, distance - 1u));
+		}
+		return swapped[distance];
+	};
+	auto     result   = swap(0);
+	uint32_t position = 0;
+	for (uint32_t i = 1; i < 4; i++) {
+		if (((quad[i] ^ i) & 3u) == (quad[0] & 3u)) {
+			continue;
+		}
+		if (position == 0) {
+			position = EmitAndConstant(state, EmitSubgroupLocalInvocationId(state), 3);
+		}
+		result = Select(state, type, Binary(state, spv::OpIEqual, TypeBool(state), position, ConstantU32(state, i)), swap(i), result);
+	}
+	return result;
+}
+
+} // namespace
+
+uint32_t EmitSubgroupShuffle(EmitterState& state, uint32_t type, uint32_t value, uint32_t lane, const ShuffleLanes& lanes) {
+	const auto subgroup = ConstantU32(state, spv::ScopeSubgroup);
+	if (!GetHostShaderFeatures().lane_shuffle_loop || lanes.uniform) {
 		const auto result = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, result, subgroup, value, lane);
 		return result;
 	}
-	// Each pass reads one source lane (the loop counter: the same in every lane) and the lane that asked for it takes the value. 32 passes for the pairs of half waves that
-	// stand in for a wave of 64, 64 otherwise.
+	if (lanes.in_quad && HasQuadOperations(state)) {
+		return EmitQuadShuffle(state, type, value, lanes.quad);
+	}
+	// Each pass reads one source lane (the loop counter: the same in every lane) and the lane that asked for it takes the value: the
+	// lanes `lanes` leaves, of the host's wave (32 for the pairs of half waves that stand in for a wave of 64).
 	const auto type_u32 = TypeU32(state);
 	const auto type_bool = TypeBool(state);
-	const auto count     = ConstantU32(state, state.lane_count == 2 ? 32u : 64u);
+	uint32_t   count     = ConstantU32(state, state.lane_count == 2 ? 32u : 64u);
+	if (state.lane_count != 2 && state.subgroup_size_variable != 0) {
+		count = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLoad, type_u32, count, state.subgroup_size_variable);
+	}
 	const auto before    = state.current_label;
 	const auto header    = state.builder.AllocateId();
 	const auto body      = state.builder.AllocateId();
@@ -268,7 +319,7 @@ uint32_t EmitSubgroupShuffle(EmitterState& state, uint32_t type, uint32_t value,
 	state.builder.AddFunction(spv::OpBranch, header);
 
 	EmitLabel(state, header);
-	state.builder.AddFunction(spv::OpPhi, type_u32, index, ConstantU32(state, 0), before, index_next, next);
+	state.builder.AddFunction(spv::OpPhi, type_u32, index, ConstantU32(state, lanes.first), before, index_next, next);
 	state.builder.AddFunction(spv::OpPhi, type, result, value, before, result_next, next);
 	const auto more = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpULessThan, type_bool, more, index, count);
@@ -284,7 +335,7 @@ uint32_t EmitSubgroupShuffle(EmitterState& state, uint32_t type, uint32_t value,
 	state.builder.AddFunction(spv::OpBranch, next);
 
 	EmitLabel(state, next);
-	state.builder.AddFunction(spv::OpIAdd, type_u32, index_next, index, ConstantU32(state, 1));
+	state.builder.AddFunction(spv::OpIAdd, type_u32, index_next, index, ConstantU32(state, lanes.step));
 	state.builder.AddFunction(spv::OpBranch, header);
 
 	EmitLabel(state, merge);
