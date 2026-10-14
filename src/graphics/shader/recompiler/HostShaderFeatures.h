@@ -31,6 +31,10 @@ struct HostShaderFeatures {
 	// The BDA page table has two levels (BdaLayout, the D3D12 build: 32 MB instead of the flat table's 768 MB, for the Xbox's GPU
 	// memory budget): a guest address's lookup reads the directory first.
 	bool bda_two_level = false;
+	// 64-bit image atomics, which need shader model 6.6 in D3D12 (not the Xbox's UWP games), run under a lock: the image is a
+	// two-dword image, and each atomic takes a lock word of a table in the guest buffer table (IR::ImageAtomic64LockSlot), reads
+	// the texel, writes the result and releases the lock. Exact; slower where many lanes hit one texel.
+	bool image_atomic64_lock = false;
 };
 
 void                                    SetHostShaderFeatures(const HostShaderFeatures& features);
