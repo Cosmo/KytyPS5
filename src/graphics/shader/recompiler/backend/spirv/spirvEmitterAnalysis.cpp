@@ -107,7 +107,12 @@ uint32_t ImageType(EmitterState& state, const IR::ImageResource& image) {
 		EXIT_IF(image.numeric_class == Prospero::TextureNumericClass::Sint ||
 		        image.numeric_class == Prospero::TextureNumericClass::Unsupported);
 		sampled = 2;
-		if (image.atomic) {
+		if (image.atomic && image.atomic64 && GetHostShaderFeatures().image_atomic64_lock) {
+			// HostShaderFeatures::image_atomic64_lock: two dwords per texel, which the atomics read and write under a lock.
+			EXIT_IF(image.numeric_class != Prospero::TextureNumericClass::Uint);
+			format = spv::ImageFormatRg32ui;
+			state.builder.RequireCapability(spv::CapabilityStorageImageExtendedFormats);
+		} else if (image.atomic) {
 			EXIT_IF(image.numeric_class != Prospero::TextureNumericClass::Uint);
 			format = image.atomic64 ? spv::ImageFormatR64ui : spv::ImageFormatR32ui;
 			if (image.atomic64) {
@@ -128,8 +133,9 @@ uint32_t ImageType(EmitterState& state, const IR::ImageResource& image) {
 	if (sampled == 2 && info.multisampled != 0u) {
 		state.builder.RequireCapability(spv::CapabilityStorageImageMultisample);
 	}
-	const auto  scalar_type =
-	    image.atomic64 ? TypeU64(state) : ImageScalarType(state, image.numeric_class);
+	const auto  scalar_type = image.atomic64 && !GetHostShaderFeatures().image_atomic64_lock
+	                              ? TypeU64(state)
+	                              : ImageScalarType(state, image.numeric_class);
 	return state.builder.Type(spv::OpTypeImage, scalar_type,
 	                          info.spirv_dimension, image.depth_compare ? 1u : 0u, info.arrayed,
 	                          info.multisampled, sampled, format);
