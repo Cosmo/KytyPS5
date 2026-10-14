@@ -37,6 +37,8 @@
   </Applications>
   <Capabilities>
     <Capability Name="internetClient" />
+    <!-- The local network, for games while the Network connection setting is on. -->
+    <Capability Name="privateNetworkClientServer" />
     <Capability Name="codeGeneration" />
     <!-- USB drives: on the Xbox, games are on one (README.md). -->
     <uap:Capability Name="removableStorage" />
