@@ -48,15 +48,19 @@ SamplerHandle SamplerCache::GetSampler(const ShaderSamplerResource& guest, bool 
 
 	// D3D12's mip LOD bias range is -16 to 15.99.
 	const auto info = GuestSamplerInfo(r, integer_border, 15.99f);
-	if (info.unnormalizedCoordinates != VK_FALSE) {
-		static std::atomic_bool reported = false;
-		if (!reported.exchange(true)) {
-			Log::WriteToConsoleAndLog("D3D12: samplers with unnormalized coordinates are not supported yet; they sample with normalized coordinates\n");
+	// Unnormalized coordinates: the shader normalizes them (HostShaderFeatures::unnormalized_samplers_in_shader), so the sampler
+	// itself takes normalized ones.
+	D3D12_SAMPLER_DESC desc {};
+	auto reduction = info.compareEnable != VK_FALSE ? D3D12_FILTER_REDUCTION_TYPE_COMPARISON
+	                                                : D3D12_FILTER_REDUCTION_TYPE_STANDARD;
+	// FILTER_MODE 1 and 2 are the minimum and the maximum; 0 averages, 3 is undefined, compare samplers average.
+	if (m_graphics.sampler_filter_minmax_enabled && info.compareEnable == VK_FALSE) {
+		if (r.FilterMode() == 1) {
+			reduction = D3D12_FILTER_REDUCTION_TYPE_MINIMUM;
+		} else if (r.FilterMode() == 2) {
+			reduction = D3D12_FILTER_REDUCTION_TYPE_MAXIMUM;
 		}
 	}
-	D3D12_SAMPLER_DESC desc {};
-	const auto reduction = info.compareEnable != VK_FALSE ? D3D12_FILTER_REDUCTION_TYPE_COMPARISON
-	                                                      : D3D12_FILTER_REDUCTION_TYPE_STANDARD;
 	// The settings for speed: no anisotropic filtering, and the mip levels sampled this many coarser (Config::TextureLodBias).
 	if (info.anisotropyEnable != VK_FALSE && Config::AnisotropicFiltering()) {
 		desc.Filter        = D3D12_ENCODE_ANISOTROPIC_FILTER(reduction);
