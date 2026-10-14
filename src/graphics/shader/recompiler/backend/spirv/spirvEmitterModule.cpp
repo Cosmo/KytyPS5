@@ -397,9 +397,18 @@ void DefineDescriptors(EmitterState& state) {
 #endif
 				state.builder.AddName(definition.variable,
 				                      ("image_" + std::to_string(static_cast<uint32_t>(kind))).c_str());
+				if (image.atomic64 && GetHostShaderFeatures().image_atomic64_lock) {
+					// Lanes of every wave read and write its texels under a lock.
+					state.builder.AddAnnotation(spv::OpDecorate, definition.variable, spv::DecorationCoherent);
+				}
 				break;
 			}
 		}
+	}
+	// The lock words of 64-bit image atomics are in the guest buffer table (IR::ImageAtomic64LockSlot).
+	if (GetHostShaderFeatures().image_atomic64_lock && state.guest_buffer_table == 0 &&
+	    std::ranges::any_of(info.images, [](const IR::ImageResource& image) { return image.atomic64; })) {
+		DefineGuestBufferTable(state);
 	}
 }
 

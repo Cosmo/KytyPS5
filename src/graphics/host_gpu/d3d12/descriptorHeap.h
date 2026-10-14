@@ -135,13 +135,15 @@ private:
 	uint32_t m_sampler_used     = 0; // descriptors written for the current command list
 	uint32_t m_sampler_reported = 0; // the most one command list used so far, as last logged
 	ID3D12DescriptorHeap* m_scratch    = nullptr;
+	// The lock words of 64-bit image atomics, at IR::ImageAtomic64LockSlot of the persistent views (zeros when created).
+	ID3D12Resource*       m_atomic64_locks = nullptr;
 	uint64_t              m_bound_tick = 0;
 	struct FreedView {
 		uint32_t index = 0;
 		uint64_t tick  = 0;
 	};
 	Common::Mutex         m_bindless_mutex;
-	uint32_t              m_bindless_next = 1;
+	uint32_t              m_bindless_next = 2; // 0: the null view, 1: the lock words of 64-bit image atomics
 	std::deque<FreedView> m_bindless_freed;
 	Common::Mutex         m_cpu_mutex;
 	std::array<CpuPool, D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES> m_cpu_pools;
