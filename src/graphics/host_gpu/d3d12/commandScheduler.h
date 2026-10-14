@@ -44,6 +44,7 @@ public:
 	void           Wait(uint64_t tick);
 	void           PopPendingOperations();
 	void           DrainPriorityOperations();
+	[[nodiscard]] bool HasPendingPriorityOperations();
 	void           WaitPriorityOperations(uint64_t tick);
 	void           DeferOperation(Common::UniqueFunction<void>&& operation);
 	void           DeferPriorityOperation(Common::UniqueFunction<void>&& operation);
