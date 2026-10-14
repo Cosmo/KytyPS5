@@ -9,6 +9,7 @@
 #include "common/profiler.h"
 #include "gpu_tiler_shaders/gpu_tiler_copy_rows_spv.h"
 #include "graphics/host_gpu/d3d12/formats.h"
+#include "graphics/host_gpu/d3d12/tiler.h"
 #include "graphics/host_gpu/gpuBackend.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 
@@ -1151,10 +1152,53 @@ void Image::Resolve(Image& source, const ImageSubresourceRange& source_range,
 	}
 }
 
-void Image::CopyImageWithBuffer(Image& source, Buffer& /*buffer*/, TileManager& /*tiler*/) {
-	// Copies between format families already go through a buffer (CopyContents).
+void Image::CopyImageWithBuffer(Image& source, Buffer& /*buffer*/, TileManager& tiler) {
 	EXIT_IF(source.backing.samples != 1 || backing.samples != 1);
-	CopyImage(source);
+	const auto source_transform = source.info.GetColorTransform();
+	const auto target_transform = info.GetColorTransform();
+	if (source_transform == target_transform) {
+		// Copies between format families already go through a buffer (CopyContents).
+		CopyImage(source);
+		return;
+	}
+	// As upstream's Vulkan copy: through a buffer, in which the source's color transform (the bgra16 swap, the 10-11-11 order) is
+	// undone and the target's applied. (A D3D12 dispatch cannot read and write one buffer: each transform writes a new one.)
+	const auto     bytes = source.info.bytes_per_block;
+	const uint32_t block = source.info.IsBlock() ? 4u : 1u;
+	EXIT_IF(source.info.IsDepth() || info.IsDepth() || bytes == 0 || bytes != info.bytes_per_block ||
+	        block != (info.IsBlock() ? 4u : 1u));
+	const bool     source_volume = source.backing.image_type == vk::ImageType::e3D;
+	const bool     target_volume = backing.image_type == vk::ImageType::e3D;
+	const uint32_t levels        = std::min(source.backing.mip_levels, backing.mip_levels);
+	for (uint32_t level = 0; level < levels; level++) {
+		const auto width  = std::max(source.backing.extent.width >> level, 1u);
+		const auto height = std::max(source.backing.extent.height >> level, 1u);
+		const auto slices = std::min(source_volume ? std::max(source.backing.extent.depth >> level, 1u) : source.backing.layers,
+		                             target_volume ? std::max(backing.extent.depth >> level, 1u) : backing.layers);
+		const auto size   = static_cast<uint64_t>(DivCeil(width, block)) * bytes * DivCeil(height, block);
+		EXIT_IF(slices == 0 || size == 0);
+		for (uint32_t slice = 0; slice < slices; slice++) {
+			vk::BufferImageCopy from {};
+			from.imageSubresource = {vk::ImageAspectFlagBits::eColor, level, source_volume ? 0u : slice, 1};
+			from.imageOffset      = {0, 0, source_volume ? static_cast<int32_t>(slice) : 0};
+			from.imageExtent      = {width, height, 1};
+			auto to               = from;
+			to.imageSubresource   = {vk::ImageAspectFlagBits::eColor, level, target_volume ? 0u : slice, 1};
+			to.imageOffset        = {0, 0, target_volume ? static_cast<int32_t>(slice) : 0};
+			auto data             = tiler.GetScratchBuffer(size);
+			from.bufferOffset     = data.offset;
+			source.Download({&from, 1}, data.buffer, data.offset, size);
+			data.size = size;
+			if (source_transform != ColorTransform::None) {
+				data = tiler.TransformColor(data, source_transform, false);
+			}
+			if (target_transform != ColorTransform::None) {
+				data = tiler.TransformColor(data, target_transform, true);
+			}
+			to.bufferOffset = data.offset;
+			Upload({&to, 1}, data.buffer, data.offset, size);
+		}
+	}
 }
 
 void Image::CopyMip(Image& source, uint32_t mip, uint32_t layer) {
