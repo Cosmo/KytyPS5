@@ -463,6 +463,122 @@ void MoveCoordinatesByOffset(ValueEmitContext& ctx, const IR::Inst& inst, const 
 	                          moved, layer);
 }
 
+// HostShaderFeatures::image_atomic64_lock: a 64-bit image atomic as a critical section under a lock word in the guest buffer
+// table (IR::ImageAtomic64LockSlot). The lane that gets the lock reads the texel, writes the result and releases the lock in the
+// same iteration, so lanes of one wave that want the same lock take turns instead of waiting for each other forever.
+uint32_t EmitLockedImageAtomic64(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
+                                 const IR::Inst& address, const IR::ImageResource& image) {
+	auto& state = ctx.state;
+	EXIT_IF(state.guest_buffer_table == 0);
+	state.builder.RequireCapability(spv::CapabilityInt64);
+	const auto& info  = ImageDimensionInfoFor(image.dimension);
+	const auto  coord = CoordU32(ctx, mem, address, image.dimension);
+	// The texel's lock: a hash of its coordinates and the image.
+	constexpr uint32_t Multipliers[] {0x9e3779b1u, 0x85ebca77u, 0xc2b2ae3du};
+	auto               hash = ConstantU32(state, (mem.resource + 1u) * 0x27d4eb2fu);
+	for (uint32_t i = 0; i < info.coordinate_components; i++) {
+		auto component = coord;
+		if (info.coordinate_components > 1u) {
+			component = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), component, coord, i);
+		}
+		hash = Binary(state, spv::OpBitwiseXor, TypeU32(state), hash,
+		              Binary(state, spv::OpIMul, TypeU32(state), component, ConstantU32(state, Multipliers[i])));
+	}
+	const auto index = Binary(state, spv::OpBitwiseAnd, TypeU32(state), hash,
+	                          ConstantU32(state, IR::ImageAtomic64LockCount - 1u));
+	const auto lock  = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state, 32), lock,
+	                          state.guest_buffer_table, ConstantU32(state, IR::ImageAtomic64LockSlot),
+	                          ConstantU32(state, 0), index);
+	const auto value = ctx.Arg(inst, inst.NumArgs() - 2);
+	const auto apply = [&](uint32_t old) {
+		const auto u64 = TypeU64(state);
+		switch (inst.GetOpcode()) {
+			case IR::ValueOpcode::ImageAtomicSwap64: return value;
+			case IR::ValueOpcode::ImageAtomicIAdd64: return Binary(state, spv::OpIAdd, u64, old, value);
+			case IR::ValueOpcode::ImageAtomicAnd64: return Binary(state, spv::OpBitwiseAnd, u64, old, value);
+			case IR::ValueOpcode::ImageAtomicOr64: return Binary(state, spv::OpBitwiseOr, u64, old, value);
+			case IR::ValueOpcode::ImageAtomicXor64: return Binary(state, spv::OpBitwiseXor, u64, old, value);
+			case IR::ValueOpcode::ImageAtomicUMin64:
+				return Select(state, u64, Binary(state, spv::OpULessThan, TypeBool(state), value, old), value, old);
+			case IR::ValueOpcode::ImageAtomicUMax64:
+				return Select(state, u64, Binary(state, spv::OpUGreaterThan, TypeBool(state), value, old), value, old);
+			default: ctx.Fail(inst, "is a 64-bit image atomic without an emulation");
+		}
+	};
+
+	const auto scope   = ConstantU32(state, spv::ScopeDevice);
+	const auto none    = ConstantU32(state, spv::MemorySemanticsMaskNone);
+	const auto acquire = ConstantU32(state, spv::MemorySemanticsAcquireMask | spv::MemorySemanticsImageMemoryMask |
+	                                            spv::MemorySemanticsUniformMemoryMask);
+	const auto release = ConstantU32(state, spv::MemorySemanticsReleaseMask | spv::MemorySemanticsImageMemoryMask |
+	                                            spv::MemorySemanticsUniformMemoryMask);
+	const auto entry   = state.current_label;
+	const auto header  = state.builder.AllocateId();
+	const auto body    = state.builder.AllocateId();
+	const auto locked  = state.builder.AllocateId();
+	const auto after   = state.builder.AllocateId();
+	const auto cont    = state.builder.AllocateId();
+	const auto merge   = state.builder.AllocateId();
+	const auto done    = state.builder.AllocateId();
+	const auto result  = state.builder.AllocateId();
+	const auto done_next   = state.builder.AllocateId();
+	const auto result_next = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpBranch, header);
+
+	EmitLabel(state, header);
+	state.builder.AddFunction(spv::OpPhi, TypeBool(state), done, ConstantBool(state, false),
+	                          entry, done_next, cont);
+	state.builder.AddFunction(spv::OpPhi, TypeU64(state), result, ConstantU64(state, 0), entry, result_next, cont);
+	state.builder.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, done, merge, body);
+
+	EmitLabel(state, body);
+	const auto previous = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAtomicCompareExchange, TypeU32(state), previous, lock, scope, acquire, none,
+	                          ConstantU32(state, 1), ConstantU32(state, 0));
+	const auto got = Binary(state, spv::OpIEqual, TypeBool(state), previous, ConstantU32(state, 0));
+	state.builder.AddFunction(spv::OpSelectionMerge, after, spv::SelectionControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, got, locked, after);
+
+	EmitLabel(state, locked);
+	const auto texels = LoadImageDescriptor(state, mem.resource);
+	const auto texel  = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpImageRead, TypeU32Vector(state, 4), texel, texels, coord);
+	const auto low  = state.builder.AllocateId();
+	const auto high = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low, texel, 0u);
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), high, texel, 1u);
+	const auto old     = PackU64(state, low, high);
+	const auto updated = apply(old);
+	const auto words   = Unary(state, spv::OpBitcast, TypeU32Vector(state, 2), updated);
+	const auto word0   = state.builder.AllocateId();
+	const auto word1   = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), word0, words, 0u);
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), word1, words, 1u);
+	const auto written = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), written, word0, word1,
+	                          ConstantU32(state, 0), ConstantU32(state, 0));
+	state.builder.AddFunction(spv::OpImageWrite, texels, coord, written);
+	const auto released = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAtomicExchange, TypeU32(state), released, lock, scope, release, ConstantU32(state, 0));
+	const auto locked_exit = state.current_label;
+	state.builder.AddFunction(spv::OpBranch, after);
+
+	EmitLabel(state, after);
+	state.builder.AddFunction(spv::OpPhi, TypeBool(state), done_next, ConstantBool(state, true),
+	                          locked_exit, ConstantBool(state, false), body);
+	state.builder.AddFunction(spv::OpPhi, TypeU64(state), result_next, old, locked_exit, result, body);
+	state.builder.AddFunction(spv::OpBranch, cont);
+
+	EmitLabel(state, cont);
+	state.builder.AddFunction(spv::OpBranch, header);
+
+	EmitLabel(state, merge);
+	return result;
+}
+
 uint32_t HorizontalOffsets(EmitterState& state, ImageDimension dimension) {
 	const auto components   = ImageDimensionInfoFor(dimension).spatial_components;
 	const auto count        = ConstantU32(state, 4);
@@ -1205,6 +1321,13 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			return sample;
 		};
 		ctx.Define(inst, EmitImageResult(ctx, inst, EmitSample));
+		return;
+	}
+	if (image_info.access == IR::ImageAccess::Atomic && image.atomic64 &&
+	    GetHostShaderFeatures().image_atomic64_lock) {
+		ctx.Define(inst, EmitValueOrDefaultIfCondition(
+		                     state, ctx.Arg(inst, inst.NumArgs() - 1), TypeU64(state), ConstantU64(state, 0),
+		                     [&]() { return EmitLockedImageAtomic64(ctx, inst, mem, *address, image); }));
 		return;
 	}
 	if (image_info.access == IR::ImageAccess::Atomic) {
