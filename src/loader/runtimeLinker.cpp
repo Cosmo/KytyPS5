@@ -98,6 +98,39 @@ using entry_func_t  = KYTY_SYSV_ABI void (*)(EntryParams* params, atexit_func_t 
 using module_ini_fini_func_t = KYTY_SYSV_ABI int (*)(size_t args, const void* argp,
                                                      module_func_t func);
 
+// Calls a module's init or fini function with rbp on a zero root frame, as RunEntry calls the program's entry. Guest code that walks
+// its frame pointers (the heap tracer of a game's C library, for one) then stops there, instead of walking on into host frames, which
+// keep no frame pointer chain: a game read garbage there and crashed.
+static int CallModuleFunction(module_ini_fini_func_t func, size_t args, const void* argp, module_func_t callback) {
+#if (defined(__x86_64__) || defined(_M_X64)) && KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	uintptr_t guest_root_frame[2] = {};
+	register module_ini_fini_func_t func_reg asm("rbx") = func;
+	register uintptr_t              root_reg asm("r8")  = reinterpret_cast<uintptr_t>(guest_root_frame);
+	auto rdi    = static_cast<uint64_t>(args);
+	auto rsi    = reinterpret_cast<uint64_t>(argp);
+	auto rdx    = reinterpret_cast<uint64_t>(callback);
+	int  result = 0;
+	asm volatile("pushq %%r12\n\t"
+	             "pushq %%r13\n\t"
+	             "movq %%rsp, %%r13\n\t"
+	             "andq $-16, %%rsp\n\t"
+	             "movq %%rbp, %%r12\n\t"
+	             "movq %[root], %%rbp\n\t"
+	             "callq *%[func]\n\t"
+	             "movq %%r12, %%rbp\n\t"
+	             "movq %%r13, %%rsp\n\t"
+	             "popq %%r13\n\t"
+	             "popq %%r12\n\t"
+	             : "=a"(result), "+D"(rdi), "+S"(rsi), "+d"(rdx), [root] "+r"(root_reg)
+	             : [func] "r"(func_reg)
+	             : "cc", "memory", "rcx", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6",
+	               "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+	return result;
+#else
+	return func(args, argp, callback);
+#endif
+}
+
 enum class BindType { Unknown, Local, Global, Weak };
 
 struct RelocationInfo {
@@ -1563,8 +1596,9 @@ int RuntimeLinker::StartModule(Program* program, size_t args, const void* argp,
 	LOGF_COLOR(Log::Color::BrightYellow, "---\n--- Start module: %s\n---\n",
 	           Common::PathToString(program->file_name).c_str());
 
-	return reinterpret_cast<module_ini_fini_func_t>(program->dynamic_info->init_vaddr +
-	                                                program->base_vaddr)(args, argp, func);
+	return CallModuleFunction(reinterpret_cast<module_ini_fini_func_t>(program->dynamic_info->init_vaddr +
+	                                                                   program->base_vaddr),
+	                          args, argp, func);
 }
 
 int RuntimeLinker::StopModule(Program* program, size_t args, const void* argp, module_func_t func) {
@@ -1578,8 +1612,9 @@ int RuntimeLinker::StopModule(Program* program, size_t args, const void* argp, m
 	LOGF_COLOR(Log::Color::BrightYellow, "---\n--- Stop module: %s\n---\n",
 	           Common::PathToString(program->file_name).c_str());
 
-	int result = reinterpret_cast<module_ini_fini_func_t>(program->dynamic_info->fini_vaddr +
-	                                                      program->base_vaddr)(args, argp, func);
+	int result = CallModuleFunction(reinterpret_cast<module_ini_fini_func_t>(program->dynamic_info->fini_vaddr +
+	                                                                         program->base_vaddr),
+	                                args, argp, func);
 
 	Libs::LibKernel::PthreadDeleteStaticObjects(program);
 
