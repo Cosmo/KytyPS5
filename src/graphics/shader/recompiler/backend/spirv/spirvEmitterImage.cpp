@@ -362,6 +362,53 @@ uint32_t PackedOffset(ValueEmitContext& ctx, IR::Value value, ImageDimension dim
 // shader computes moves the coordinates instead, by offset / the size of the mip level the sample reads: exact for that level (the
 // second level of a trilinear sample is off by less than half a texel). The level comes from the sample's LOD, or from its gradients.
 // A sample whose level the GPU picks takes the coordinates' own gradients explicitly, so that the moved coordinates keep its level.
+// HostShaderFeatures::unnormalized_samplers_in_shader: texel positions (the sampler's FORCE_UNNORMALIZED) become normalized
+// coordinates, divided by the size of the image's first level; an array layer stays as it is.
+void NormalizeTexelCoordinates(ValueEmitContext& ctx, const IR::Inst& inst, const IR::ImageResource& candidate,
+                               uint32_t resource, uint32_t array_index, uint32_t& coord) {
+	auto& state = ctx.state;
+	if (candidate.cube || candidate.dimension == ImageDimension::Dim3D) {
+		ctx.Fail(inst, "samples a cube or 3D image with texel positions");
+		return;
+	}
+	const auto& info    = ImageDimensionInfoFor(candidate.dimension);
+	const auto  spatial = info.spatial_components;
+	const auto  type_f  = spatial == 1u ? TypeF32(state) : TypeF32Vector(state, spatial);
+	const auto  type_u  = spatial == 1u ? TypeU32(state) : TypeU32Vector(state, spatial);
+	const auto  leading = [&](uint32_t value, uint32_t type) {
+		if (info.coordinate_components == spatial) {
+			return value;
+		}
+		const auto result = state.builder.AllocateId();
+		if (spatial == 1u) {
+			state.builder.AddFunction(spv::OpCompositeExtract, type, result, value, 0u);
+		} else {
+			state.builder.AddFunction(spv::OpVectorShuffle, type, result, value, value, 0u, 1u);
+		}
+		return result;
+	};
+	state.builder.RequireCapability(spv::CapabilityImageQuery);
+	const auto image = LoadImageDescriptor(state, resource, 0u, array_index);
+	const auto size  = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpImageQuerySizeLod, ImageViewSizeType(state, candidate.dimension), size, image,
+	                          ConstantU32(state, 0));
+	const auto normalized = Binary(state, spv::OpFDiv, type_f, leading(coord, type_f),
+	                               Unary(state, spv::OpConvertUToF, type_f, leading(size, type_u)));
+	if (info.coordinate_components == spatial) {
+		coord = normalized;
+		return;
+	}
+	const auto result = state.builder.AllocateId();
+	if (spatial == 1u) {
+		const auto layer = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), layer, coord, 1u);
+		state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 2), result, normalized, layer);
+	} else {
+		state.builder.AddFunction(spv::OpVectorShuffle, TypeF32Vector(state, 3), result, normalized, coord, 0u, 1u, 4u);
+	}
+	coord = result;
+}
+
 void MoveCoordinatesByOffset(ValueEmitContext& ctx, const IR::Inst& inst, const IR::ImageResource& candidate,
                              uint32_t resource, uint32_t array_index, IR::Value offset_value, uint32_t& coord,
                              spv::Op& opcode, std::array<uint32_t, 4>& operands, size_t& operand_count) {
@@ -1247,9 +1294,12 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				const auto& candidate = state.program.info.images[resource];
 				const auto sampler = samplers[candidate.numeric_class != Prospero::TextureNumericClass::Float];
 				const auto dimension = candidate.dimension;
-				const auto coord = CoordF32(
+				auto       coord = CoordF32(
 				    ctx, mem, *address, layout.coord,
 				    ImageDimensionInfoFor(dimension).coordinate_components, candidate.cube);
+				if (state.program.info.samplers.at(mem.sampler).unnormalized) {
+					NormalizeTexelCoordinates(ctx, inst, candidate, resource, array_index, coord);
+				}
 				uint32_t operand_mask = 0;
 				uint32_t offset = 0;
 				if (HasFlag(mem, Decoder::ImageSampleFlagGatherHorizontal)) {
@@ -1337,6 +1387,9 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			    CoordF32(ctx, mem, *address, layout.coord,
 			             ImageDimensionInfoFor(candidate.dimension).coordinate_components,
 			             candidate.cube);
+			if (state.program.info.samplers.at(mem.sampler).unnormalized) {
+				NormalizeTexelCoordinates(ctx, inst, candidate, resource, array_index, coord);
+			}
 			if (move_offset) {
 				MoveCoordinatesByOffset(ctx, inst, candidate, resource, array_index, offset_value, coord,
 				                        sample_opcode, sample_operands, sample_operand_count);
