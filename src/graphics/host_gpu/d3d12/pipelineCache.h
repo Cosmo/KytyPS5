@@ -93,6 +93,9 @@ class PipelineCache {
 public:
 	explicit PipelineCache(GraphicContext& graphics);
 	~PipelineCache();
+	// Whether the device has blend factors for the constant's alpha on color channels (not the Xbox: the pipelines use the
+	// constant color in their place, and SetDynamicState makes that exact where it can).
+	[[nodiscard]] bool AlphaBlendFactor() const noexcept { return m_alpha_blend_factor; }
 	KYTY_CLASS_NO_COPY(PipelineCache);
 
 	// Writes translated shaders and compiled pipelines to the title's cache file, which the next
