@@ -26,18 +26,6 @@ struct ImageViewHandle {
 	uint32_t index = UINT32_MAX;
 };
 
-// The descriptors of one view, created when first needed. The shared view cache normalizes
-// sampled and attachment views to one description, while D3D12 needs a descriptor per usage.
-struct ImageViewDescriptors {
-	ImageViewInfo               info;
-	uint32_t                    resource = 0; // index into ImageBacking::resources
-	D3D12_CPU_DESCRIPTOR_HANDLE srv {};
-	D3D12_CPU_DESCRIPTOR_HANDLE uav {};
-	D3D12_CPU_DESCRIPTOR_HANDLE rtv {};
-	D3D12_CPU_DESCRIPTOR_HANDLE dsv {};
-	D3D12_CPU_DESCRIPTOR_HANDLE dsv_read_only {};
-};
-
 // One D3D12 resource holding an image, and the state of each of its subresources.
 struct ImageResource {
 	D3D12MA::Allocation*               allocation = nullptr;
@@ -49,6 +37,22 @@ struct ImageResource {
 	uint64_t                           version = 0; // contents are current when equal to the image's
 	// In CPU-visible memory, written by the CPU (GraphicContext::cpu_written_block_arrays).
 	bool                               cpu_written = false;
+};
+
+// The descriptors of one view, created when first needed. The shared view cache normalizes
+// sampled and attachment views to one description, while D3D12 needs a descriptor per usage.
+struct ImageViewDescriptors {
+	ImageViewInfo               info;
+	uint32_t                    resource = 0; // index into ImageBacking::resources
+	D3D12_CPU_DESCRIPTOR_HANDLE srv {};
+	D3D12_CPU_DESCRIPTOR_HANDLE uav {};
+	D3D12_CPU_DESCRIPTOR_HANDLE rtv {};
+	D3D12_CPU_DESCRIPTOR_HANDLE dsv {};
+	D3D12_CPU_DESCRIPTOR_HANDLE dsv_read_only {};
+	// A view that D3D12 has no shader resource view for (a 2D view of a 3D image's slices, or a 2D or cube view from a later layer
+	// of an array), read by shaders: its levels and layers copied into a texture of the view's own when the image changed since
+	// (Image::UseCopy).
+	ImageResource               copy;
 };
 
 // The host resources of an image. D3D12 views must share their resource's format family, so an
