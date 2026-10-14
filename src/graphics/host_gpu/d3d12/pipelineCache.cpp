@@ -516,6 +516,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	features.wave_ops_without_helper_lanes = !m_compiler.SupportsHelperLanesInWaveOps();
 	features.sample_offset_by_coordinates = true; // texel offsets the shader computes (Vulkan's maintenance8 is not available here)
 	features.vertex_formats_as_integers   = true; // scaled and 10:10:10:2 SNORM vertex input (D3D12::VertexFormat)
+	features.unnormalized_samplers_in_shader = true; // D3D12 samplers have no unnormalized coordinates
 	// 64-bit image atomics under a lock; they would need shader model 6.6 and its typed 64-bit atomics. (The lock words are in the
 	// guest buffer table.)
 	features.image_atomic64_lock = features.guest_pointer_table;
