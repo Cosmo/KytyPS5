@@ -140,13 +140,13 @@ public:
 	// vertex stage that reads what it wrote.
 	Pipeline&     GetMeshComputePipeline(const ShaderVertexInputInfo& vertex_info,
 	                                     const CompiledProgram&       program);
-	// `strip_cut` is the index that restarts strips (a D3D12_INDEX_BUFFER_STRIP_CUT_VALUE).
-	Pipeline& GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
-	                              const RenderDepthInfo&                 depth,
-	                              std::span<const ShaderVertexInputInfo> vertex_info,
-	                              CommandBuffer& command, const ShaderPixelInputInfo* ps_input_info,
-	                              vk::PrimitiveTopology topology, bool primitive_restart_enable,
-	                              uint32_t strip_cut, const GraphicsPrograms& programs);
+	// The faces a pipeline draws: as the guest culls them, or only the front or back faces (a draw whose faces have different
+	// stencil references or masks is drawn once per face).
+	enum class FacePass : uint8_t { Guest, Front, Back };
+	// The draw state's pipeline with the depth state `depth` (the state's own, or its back faces' values); `strip_cut` is the
+	// index that restarts strips (a D3D12_INDEX_BUFFER_STRIP_CUT_VALUE).
+	Pipeline& GetGraphicsPipeline(CommandBuffer& command, const DrawRenderState& state, const RenderDepthInfo& depth,
+	                              uint32_t strip_cut, FacePass faces = FacePass::Guest);
 
 	struct Statistics {
 		uint64_t shaders            = 0;
