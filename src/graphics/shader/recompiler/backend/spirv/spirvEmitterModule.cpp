@@ -667,6 +667,15 @@ void DefineInputs(EmitterState& state) {
 			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationFlat);
 		}
 	}
+	if (GetHostShaderFeatures().lane_shuffle_loop && state.program.info.subgroup_shuffle && state.lane_count == 1) {
+		// The bound of the shuffle loops (EmitSubgroupShuffle): the host's wave size, 32 or 64.
+		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput, "gl_SubgroupSize");
+		state.subgroup_size_variable = variable;
+		state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn, spv::BuiltInSubgroupSize);
+		if (state.program.stage == ShaderType::Pixel) {
+			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationFlat);
+		}
+	}
 	if (state.program.info.helper_invocation) {
 		const auto variable = DefineInterfaceVariable(state, TypeBool(state), spv::StorageClassInput,
 		                                              "gl_HelperInvocation");
