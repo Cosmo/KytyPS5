@@ -713,11 +713,41 @@ uint32_t EmitUndefU1(EmitterState& state, const IR::Inst& inst) {
 	return result;
 }
 
+// The lanes a DPP move reads (EmitDppTargetLane), for the shuffle: always in the lane's own row of 16; quad_perm, row_xmask 0 to 3 and
+// a DPP8 selection that keeps each half of 8 in itself, the same in both, within quads; row_share N one lane per row.
+static ShuffleLanes DppShuffleLanes(const IR::DppMoveFlags& flags) {
+	ShuffleLanes lanes {.same_half = true};
+	const auto   control = flags.control;
+	if (flags.dpp8) {
+		lanes.in_quad = true;
+		for (uint32_t i = 0; i < 4; i++) {
+			const auto low  = (control >> (3u * i)) & 7u;
+			const auto high = (control >> (3u * (i + 4u))) & 7u;
+			lanes.in_quad   = lanes.in_quad && low < 4u && high == low + 4u;
+			lanes.quad[i]   = static_cast<uint8_t>(low & 3u);
+		}
+	} else if (control <= 0xffu) {
+		lanes.in_quad = true;
+		for (uint32_t i = 0; i < 4; i++) {
+			lanes.quad[i] = static_cast<uint8_t>((control >> (2u * i)) & 3u);
+		}
+	} else if (control >= 0x160u && control <= 0x163u) {
+		lanes.in_quad = true;
+		for (uint32_t i = 0; i < 4; i++) {
+			lanes.quad[i] = static_cast<uint8_t>(i ^ (control & 3u));
+		}
+	} else if (control >= 0x150u && control <= 0x15fu) {
+		lanes.first = control & 0xfu;
+		lanes.step  = 16;
+	}
+	return lanes;
+}
+
 uint32_t EmitDppMoveU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state    = ctx.state;
 	const auto flags    = inst.Flags<IR::DppMoveFlags>();
 	const auto target   = EmitDppTargetLane(state, flags);
-	const auto shuffled = ctx.Shuffle(inst, 0, target.lane);
+	const auto shuffled = ctx.Shuffle(inst, 0, target.lane, DppShuffleLanes(flags));
 	if (flags.fetch_inactive) {
 		return shuffled;
 	}
@@ -789,7 +819,7 @@ uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 	if (!GetHostShaderFeatures().wave_ops_without_helper_lanes) {
 		const auto ballot = ctx.Ballot(inst.Arg(1));
 		const auto lane   = ctx.FirstLane(ballot);
-		return ctx.Shuffle(inst, 0, lane);
+		return ctx.Shuffle(inst, 0, lane, {.uniform = true});
 	}
 	// Every lane that runs is active (exec is true): the value of the first active lane is what the instruction gives, and the languages have an
 	// instruction for exactly that (WaveReadLaneFirst in DXIL). The ballot, the find first bit and the shuffle of the general case, in the
@@ -805,7 +835,7 @@ uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state    = ctx.state;
 	const auto ballot   = ctx.Ballot(inst.Arg(1));
 	const auto lane     = ctx.FirstLane(ballot);
-	const auto shuffled = ctx.Shuffle(inst, 0, lane);
+	const auto shuffled = ctx.Shuffle(inst, 0, lane, {.uniform = true}); // (the first lane of the ballot: the same in every lane)
 	// A lane the ballot does not count (a helper lane: a pixel shader's wave operations leave out the lanes that only exist to complete quads of
 	// pixels, unless the shader has the attribute of shader model 6.7) sees no lane at all once every other lane left the loop: the first lane of
 	// an empty ballot is no lane, the shuffle gives it nothing it could compare with, and a waterfall loop that waits for its value to be served
@@ -825,7 +855,8 @@ uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 }
 
 uint32_t EmitReadLane(ValueEmitContext& ctx, const IR::Inst& inst) {
-	return ctx.Shuffle(inst, 0, ctx.Arg(inst, 1));
+	// The lane number is a scalar register or a constant: the same in every lane.
+	return ctx.Shuffle(inst, 0, ctx.Arg(inst, 1), {.uniform = true});
 }
 
 uint32_t EmitWriteLane(ValueEmitContext& ctx, const IR::Inst& inst) {
@@ -873,10 +904,13 @@ uint32_t EmitPermlane16U32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	state.builder.AddFunction(spv::OpBitwiseAnd, TypeU32(state), index, shifted,
 	                          ConstantU32(state, 15));
 	state.builder.AddFunction(spv::OpBitwiseOr, TypeU32(state), target, row_value, index);
-	const auto shuffled = ctx.Shuffle(inst, 0, target);
+	const auto shuffled = ctx.Shuffle(inst, 0, target, {.same_half = true});
 	uint32_t   result   = shuffled;
 	if (!flags.fetch_inactive) {
-		const auto source_exec = ctx.Shuffle(inst, 3, target);
+		// With the shuffle loops, whether the source lane runs with exec set is a bit of the ballot of exec instead of a second loop.
+		const auto source_exec = GetHostShaderFeatures().lane_shuffle_loop
+		                             ? EmitBallotLaneActiveBool(state, ctx.Ballot(inst.Arg(3)), target)
+		                             : ctx.Shuffle(inst, 3, target);
 		result                 = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpSelect, TypeU32(state), result, source_exec, shuffled,
 		                          ConstantU32(state, 0));
