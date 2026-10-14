@@ -157,6 +157,8 @@ struct EmitterState {
 	const IR::Block*           current_block                         = nullptr;
 	uint32_t                   pixel_valid_mask_variable             = 0;
 	uint32_t                   subgroup_local_invocation_id_variable = 0;
+	// The host's wave size, the bound of the shuffle loops (HostShaderFeatures::lane_shuffle_loop); 0 without them.
+	uint32_t                   subgroup_size_variable                = 0;
 	uint32_t                   per_vertex_variable                   = 0;
 	uint32_t                   point_size_variable                   = 0;
 	uint32_t                   clip_distance_variable                = 0;
@@ -253,6 +255,23 @@ inline uint32_t Select(EmitterState& state, uint32_t type, uint32_t condition, u
 	return result;
 }
 
+// What the instruction tells of the lanes a shuffle reads, for HostShaderFeatures::lane_shuffle_loop (without it the host's shuffle
+// takes any lane number).
+struct ShuffleLanes {
+	// Every lane reads the same lane: the host's shuffle.
+	bool uniform = false;
+	// Every lane reads a lane of its own quad (lanes 4n to 4n + 3), position i of the quad position quad[i]: the host's quad
+	// operations, where the stage has them.
+	bool                    in_quad = false;
+	std::array<uint8_t, 4> quad {};
+	// Otherwise the lanes read only the lanes first, first + step, first + 2 * step, ... (first below step): the loop visits only
+	// those.
+	uint32_t first = 0;
+	uint32_t step  = 1;
+	// Every lane reads a lane of its own 32 (the half of a wave of 64 that the host runs as two waves of 32).
+	bool same_half = false;
+};
+
 struct ValueEmitContext {
 	explicit ValueEmitContext(EmitterState& state_): state(state_) {}
 
@@ -261,7 +280,7 @@ struct ValueEmitContext {
 	uint32_t              HalfArg(const IR::Inst& inst, size_t index, uint32_t half);
 	uint32_t              Ballot(IR::Value predicate);
 	uint32_t              FirstLane(uint32_t ballot);
-	uint32_t              Shuffle(const IR::Inst& inst, size_t index, uint32_t lane);
+	uint32_t              Shuffle(const IR::Inst& inst, size_t index, uint32_t lane, const ShuffleLanes& lanes = {});
 	uint32_t              Result(const IR::Inst& inst);
 	uint32_t              Define(const IR::Inst& inst, uint32_t value);
 	uint32_t              ResourceIndex(IR::Value value, IR::ValueOpcode opcode);
@@ -323,8 +342,9 @@ uint32_t ConstantU32(EmitterState& state, uint32_t value);
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
 // The value of `value` in the lane `lane` of the subgroup (a shuffle): OpGroupNonUniformShuffle, or where the host needs a wave-uniform lane number
-// (HostShaderFeatures::lane_shuffle_loop) a loop over the source lanes.
-uint32_t EmitSubgroupShuffle(EmitterState& state, uint32_t type, uint32_t value, uint32_t lane);
+// (HostShaderFeatures::lane_shuffle_loop) the host's shuffle where every lane reads the same lane, quad operations for a shuffle within
+// quads, and otherwise a loop over the source lanes that `lanes` leaves.
+uint32_t EmitSubgroupShuffle(EmitterState& state, uint32_t type, uint32_t value, uint32_t lane, const ShuffleLanes& lanes = {});
 
 [[noreturn]] void ExitDescriptorBindingFailure(const EmitterState&       state,
                                                IR::DescriptorBindingKind kind, uint32_t resource,
