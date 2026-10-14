@@ -34,6 +34,8 @@ struct AppSettings {
 	uint32_t                           console_language = 1; // English (United States)
 	bool                               skip_intro_logos = false; // games that ask the console skip their logo videos at the start
 	bool                               home_screen_music = true; // a game's music in the library while its cover has the focus (titleMusic.h)
+	bool                               trophy_notifications = true; // a notification for each trophy earned (Config::trophy_enabled)
+	bool                               network_connected    = false; // games see the device's network connection (Config::network_connected)
 	bool                               debug_layer      = false; // the D3D12 debug layer
 	bool                               game_output      = false; // the game's printf in the log
 	bool                               d3d12_selftest   = false; // translate and sign built-in shaders at start (not on the settings page)
@@ -55,6 +57,10 @@ struct AppSettings {
 	// The settings page, Controller: the microphone of that headset as the DualSense's microphone. Off (Windows asks for the microphone when it
 	// is turned on).
 	bool headset_mic = false;
+	// The settings page, Controller: upstream's vibration intensity and DualSense speaker volume, 0 to 100 % (Config::controller_vibration_intensity,
+	// Config::controller_speaker_volume; 50 % is the game's own speaker volume, 100 % adds 6 dB).
+	uint32_t controller_vibration      = 100;
+	uint32_t controller_speaker_volume = 50;
 	// Debugging, only in the file: the Xbox's shader limits on any GPU (Config::XboxGpuLimitsEnabled).
 	bool xbox_gpu_limits = false;
 	// Debugging, only in the file: which limits of the DXIL compiler xbox_gpu_limits applies (bit 0 shader model 6.4, bit 1 16-bit ops lowered; default 3).
@@ -86,6 +92,15 @@ struct AppSettings {
 	// (Config::AnisotropicFiltering; on).
 	uint32_t texture_lod_bias      = 0;
 	bool     anisotropic_filtering = true;
+	// The settings page, Textures: upstream's options for images the GPU writes in linear layout, and small tiled ones, read back to the game's
+	// memory after each submission (Config::readback_linear_images, Config::readback_tiled_images), and for raw reads of images the GPU wrote
+	// (Config::sync_raw_image_buffers). Off.
+	bool readback_linear_images = false;
+	bool readback_tiled_images  = false;
+	bool accurate_texture_sync  = false;
+	// The settings page, Testing: upstream's command-line flags --playgo-hack (Config::playgo_hack_enabled) and --vr (Config::vr_enabled). Off.
+	bool playgo_fallback    = false;
+	bool virtual_vr_headset = false;
 	// Debugging, only in the file: ask for a frame dump this many seconds after the game started (0: never; the game menu has Save frame dump).
 	uint32_t frame_dump_after_s = 0;
 	// Debugging, only in the file: 1 adds the average color of the large floating-point render targets after each draw to the frame dump's draw log (slow).
