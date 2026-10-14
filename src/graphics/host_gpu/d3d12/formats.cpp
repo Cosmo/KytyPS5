@@ -195,6 +195,16 @@ DXGI_FORMAT VertexFormat(vk::Format format) {
 		case vk::Format::eR32G32B32Uint: return DXGI_FORMAT_R32G32B32_UINT;
 		case vk::Format::eR32G32B32Sint: return DXGI_FORMAT_R32G32B32_SINT;
 		case vk::Format::eR32G32B32Sfloat: return DXGI_FORMAT_R32G32B32_FLOAT;
+		// D3D12 has no scaled formats and no 10:10:10:2 SNORM vertex format: they come in as integers, which the vertex shader
+		// converts (HostShaderFeatures::vertex_formats_as_integers).
+		case vk::Format::eR16G16Uscaled: return DXGI_FORMAT_R16G16_UINT;
+		case vk::Format::eR16G16Sscaled: return DXGI_FORMAT_R16G16_SINT;
+		case vk::Format::eR8G8B8A8Uscaled: return DXGI_FORMAT_R8G8B8A8_UINT;
+		case vk::Format::eR8G8B8A8Sscaled: return DXGI_FORMAT_R8G8B8A8_SINT;
+		case vk::Format::eR16G16B16A16Uscaled: return DXGI_FORMAT_R16G16B16A16_UINT;
+		case vk::Format::eR16G16B16A16Sscaled: return DXGI_FORMAT_R16G16B16A16_SINT;
+		case vk::Format::eA2B10G10R10UscaledPack32: return DXGI_FORMAT_R10G10B10A2_UINT;
+		case vk::Format::eA2B10G10R10SnormPack32: return DXGI_FORMAT_R10G10B10A2_UINT;
 		default: break;
 	}
 	const auto info = GetFormatInfo(format);
