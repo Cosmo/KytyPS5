@@ -2,8 +2,11 @@
 
 // Copies rows of bytes between two buffer layouts, e.g. from tightly packed guest texel rows to
 // the aligned rows that texture copies require. One invocation writes one destination dword.
+// TEXEL_MODE 1 widens 12-byte texels to 16 bytes (the fourth dword is params.alpha), 2 narrows
+// 16-byte texels to 12: 96-bit textures are 128-bit resources in the D3D12 renderer.
 
 layout(local_size_x = 64) in;
+layout(constant_id = 0) const uint TEXEL_MODE = 0u;
 
 layout(set = 0, binding = 0, std430) readonly buffer Input { uint data[]; } input_buffer;
 layout(set = 0, binding = 1, std430) buffer Output { uint data[]; } output_buffer;
@@ -19,6 +22,7 @@ layout(push_constant, std430) uniform Params {
 	uint row_bytes;
 	uint rows;
 	uint slices;
+	uint alpha;
 } params;
 
 uint load_dword(uint index) {
@@ -31,8 +35,14 @@ void main() {
 	if (id.x >= dwords || id.y >= params.rows || id.z >= params.slices) {
 		return;
 	}
+	uint column = id.x * 4u;
+	if (TEXEL_MODE == 1u) {
+		column = (id.x >> 2u) * 12u + (id.x & 3u) * 4u;
+	} else if (TEXEL_MODE == 2u) {
+		column = (id.x / 3u) * 16u + (id.x % 3u) * 4u;
+	}
 	uint src = params.src_base + id.z * params.src_slice_pitch + id.y * params.src_row_pitch +
-	           id.x * 4u;
+	           column;
 	uint dst = params.dst_base + id.z * params.dst_slice_pitch + id.y * params.dst_row_pitch +
 	           id.x * 4u;
 
@@ -40,6 +50,9 @@ void main() {
 	uint value = load_dword(src >> 2u);
 	if (shift != 0u) {
 		value = (value >> shift) | (load_dword((src >> 2u) + 1u) << (32u - shift));
+	}
+	if (TEXEL_MODE == 1u && (id.x & 3u) == 3u) {
+		value = params.alpha;
 	}
 
 	uint bytes = min(4u, params.row_bytes - id.x * 4u);
