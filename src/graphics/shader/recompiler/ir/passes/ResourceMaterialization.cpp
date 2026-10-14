@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/shaderBindings.h"
 
@@ -1068,6 +1069,13 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		}
 	}
 	CompactImages(snapshot.images, [&](size_t index) { return !specialization.images[index].fmask; });
+	specialization.unnormalized_samplers.clear();
+	if (GetHostShaderFeatures().unnormalized_samplers_in_shader) {
+		for (const auto& sampler: snapshot.samplers) {
+			// S# dword 0 bit 15: FORCE_UNNORMALIZED.
+			specialization.unnormalized_samplers.push_back(static_cast<uint8_t>((sampler.dwords[0] >> 15u) & 1u));
+		}
+	}
 	return true;
 }
 
@@ -1836,6 +1844,8 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 			samplers.push_back(samplers[binding.source]);
 		}
 		samplers[index].snapshot_index = binding.source;
+		samplers[index].unnormalized   = binding.source < specialization.unnormalized_samplers.size() &&
+		                                 specialization.unnormalized_samplers[binding.source] != 0;
 		samplers[index].force_point_filtering = binding.type == SamplerClass::Integer;
 		samplers[index].integer_border        = binding.type != SamplerClass::Float;
 	}
