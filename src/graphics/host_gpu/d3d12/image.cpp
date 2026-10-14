@@ -98,6 +98,15 @@ namespace {
 	return (view.type == vk::ImageViewType::e2D || view.type == vk::ImageViewType::eCube) && view.base_layer != 0;
 }
 
+// A 96-bit format: its textures are 128-bit resources (D3D12::GetFormatInfo), and copies between them and buffers widen or narrow
+// each texel (RowCopy::texel_mode). The value the fourth channel gets: 1, as the PS5 reads it.
+[[nodiscard]] bool Expanded96(vk::Format format) {
+	return format == vk::Format::eR32G32B32Uint || format == vk::Format::eR32G32B32Sint || format == vk::Format::eR32G32B32Sfloat;
+}
+[[nodiscard]] uint32_t Expanded96One(vk::Format format) {
+	return format == vk::Format::eR32G32B32Sfloat ? 0x3f800000u : 1u;
+}
+
 [[nodiscard]] uint32_t Plane(vk::ImageAspectFlags aspect) {
 	return aspect == vk::ImageAspectFlagBits::eStencil ? 1u : 0u;
 }
@@ -142,9 +151,11 @@ struct RowCopy {
 	uint64_t dst_offset      = 0;
 	uint64_t dst_row_pitch   = 0;
 	uint64_t dst_slice_pitch = 0;
-	uint32_t row_bytes       = 0;
+	uint32_t row_bytes       = 0; // of a destination row
 	uint32_t rows            = 0;
 	uint32_t slices          = 0;
+	uint32_t texel_mode      = 0; // the kernel's TEXEL_MODE: 1 widens 12-byte texels to 16, 2 narrows them back
+	uint32_t alpha           = 0; // the fourth dword a widened texel gets
 };
 
 void RecordRowCopy(CommandBuffer& command, const Buffer& source, const Buffer& destination,
@@ -168,9 +179,11 @@ void RecordRowCopy(CommandBuffer& command, const Buffer& source, const Buffer& d
 	                           static_cast<uint32_t>(copy.dst_slice_pitch),
 	                           copy.row_bytes,
 	                           copy.rows,
-	                           copy.slices};
-	auto& kernels  = command.GetContext().GetComputeKernels();
-	auto* pipeline = kernels.Get(GPU_TILER_COPY_ROWS_SPV);
+	                           copy.slices,
+	                           copy.alpha};
+	auto&                               kernels    = command.GetContext().GetComputeKernels();
+	const D3D12::SpecializationConstant constant[] = {{0, copy.texel_mode}};
+	auto*                               pipeline   = kernels.Get(GPU_TILER_COPY_ROWS_SPV, constant);
 	ComputeKernels::Bindings bindings;
 	bindings.input         = &source;
 	bindings.input_offset  = src_root;
@@ -195,7 +208,7 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	}
 	const auto format = D3D12::GetFormatInfo(info.pixel_format);
 	if (!format.Supported()) {
-		// Left without a host resource, like an image without a format: draws that use it are skipped (guard G1 for 96-bit formats).
+		// Left without a host resource, like an image without a format: draws that use it are skipped.
 		static std::atomic_bool reported = false;
 		if (!reported.exchange(true)) {
 			Log::WriteToConsoleAndLog(fmt::format("D3D12: image format {} is not supported; images of it are not created\n", static_cast<int>(info.pixel_format)));
@@ -832,6 +845,7 @@ void Image::CopyRegions(CommandBuffer& command, std::span<const vk::BufferImageC
 	};
 	std::vector<Job> jobs;
 	uint64_t         scratch_size = 0;
+	const bool       expanded     = Expanded96(backing.format);
 	for (const auto& copy: copies) {
 		const auto& sub    = copy.imageSubresource;
 		const auto  block  = GetCopyBlock(backing.format, sub.aspectMask);
@@ -845,6 +859,7 @@ void Image::CopyRegions(CommandBuffer& command, std::span<const vk::BufferImageC
 		const auto     rows            = static_cast<uint32_t>(DivCeil(copy.imageExtent.height, block.height));
 		const auto     slices          = copy.imageExtent.depth;
 		const auto     row_bytes       = static_cast<uint32_t>(width_blocks * block.bytes);
+		const auto     host_row_bytes  = expanded ? static_cast<uint32_t>(width_blocks * 16u) : row_bytes;
 		const bool     volume          = backing.image_type == vk::ImageType::e3D;
 		const auto     layers          = volume ? 1u : sub.layerCount;
 		for (uint32_t layer = 0; layer < layers; layer++) {
@@ -863,25 +878,33 @@ void Image::CopyRegions(CommandBuffer& command, std::span<const vk::BufferImageC
 			           static_cast<UINT>(copy.imageOffset.z) + slices};
 			const uint64_t buffer_offset =
 			    copy.bufferOffset + src_slice_pitch * slices * layer;
-			job.direct = buffer_offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT == 0 &&
+			job.direct = !expanded && buffer_offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT == 0 &&
 			             src_row_pitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT == 0 &&
 			             (slices == 1 || src_slice_pitch == src_row_pitch * rows);
 			if (job.direct) {
 				job.footprint.Offset             = buffer_offset;
 				job.footprint.Footprint.RowPitch = static_cast<UINT>(src_row_pitch);
 			} else {
-				const auto pitch  = Common::AlignUp<uint64_t>(row_bytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+				const auto pitch  = Common::AlignUp<uint64_t>(host_row_bytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
 				scratch_size      = Common::AlignUp<uint64_t>(scratch_size, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
 				job.footprint.Offset             = scratch_size;
 				job.footprint.Footprint.RowPitch = static_cast<UINT>(pitch);
 				scratch_size += pitch * rows * slices;
 				job.rows = {buffer_offset, src_row_pitch, src_slice_pitch, job.footprint.Offset,
-				            pitch,         pitch * rows,  row_bytes,       rows,
+				            pitch,         pitch * rows,  host_row_bytes,  rows,
 				            slices};
+				if (expanded) {
+					job.rows.texel_mode = 1;
+					job.rows.alpha      = Expanded96One(backing.format);
+				}
 				if (!upload) {
 					std::swap(job.rows.src_offset, job.rows.dst_offset);
 					std::swap(job.rows.src_row_pitch, job.rows.dst_row_pitch);
 					std::swap(job.rows.src_slice_pitch, job.rows.dst_slice_pitch);
+					if (expanded) {
+						job.rows.row_bytes  = row_bytes;
+						job.rows.texel_mode = 2;
+					}
 				}
 			}
 			jobs.push_back(job);
