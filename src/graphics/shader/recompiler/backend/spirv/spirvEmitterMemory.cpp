@@ -17,15 +17,52 @@ uint32_t AndCondition(EmitterState& state, uint32_t lhs, uint32_t rhs) {
 }
 
 uint32_t EmitDsMaskedLaneRead(EmitterState& state, uint32_t source, uint32_t target,
-                              uint32_t exec) {
+                              uint32_t exec, const ShuffleLanes& lanes = {}) {
 	if (state.lane_count == 2) {
 		target = Binary(state, spv::OpBitwiseAnd, TypeU32(state), target, ConstantU32(state, 31));
 	}
-	const auto shuffled    = EmitSubgroupShuffle(state, TypeU32(state), source, target);
+	const auto shuffled    = EmitSubgroupShuffle(state, TypeU32(state), source, target, lanes);
+	if (GetHostShaderFeatures().lane_shuffle_loop) {
+		// With the shuffle loops, whether the source lane runs with exec set is a bit of the ballot of exec (a lane that does not run
+		// adds none) instead of a second loop.
+		const auto ballot = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformBallot, TypeU32Vector(state, 4), ballot,
+		                          ConstantU32(state, spv::ScopeSubgroup), exec);
+		return Select(state, TypeU32(state), EmitBallotLaneActiveBool(state, ballot, target), shuffled, ConstantU32(state, 0));
+	}
 	const auto source_exec = EmitSubgroupShuffle(state, TypeBool(state), exec, target);
 	const auto source_active =
 	    AndCondition(state, source_exec, EmitSubgroupLaneActiveBool(state, target));
 	return Select(state, TypeU32(state), source_active, shuffled, ConstantU32(state, 0));
+}
+
+// The lanes a DS_SWIZZLE reads (EmitDsSwizzleTargetLane), for the shuffle: always in the lane's own 32; the quad mode, and the bit mask
+// mode where the masks keep bits 2 to 4 of the lane, within quads; in the bit mask mode, the bits below the lowest one the and mask
+// keeps are the same in every source lane.
+ShuffleLanes DsSwizzleShuffleLanes(uint32_t control) {
+	ShuffleLanes lanes {.same_half = true};
+	if ((control & 0xc000u) == 0xc000u) {
+		return lanes;
+	}
+	if ((control & 0x8000u) != 0) {
+		lanes.in_quad = true;
+		for (uint32_t i = 0; i < 4; i++) {
+			lanes.quad[i] = static_cast<uint8_t>((control >> (2u * i)) & 3u);
+		}
+		return lanes;
+	}
+	const uint32_t and_mask = control & 0x1fu;
+	const uint32_t or_mask  = (control >> 5u) & 0x1fu;
+	const uint32_t xor_mask = (control >> 10u) & 0x1fu;
+	if ((and_mask & 0x1cu) == 0x1cu && ((or_mask | xor_mask) & 0x1cu) == 0) {
+		lanes.in_quad = true;
+		for (uint32_t i = 0; i < 4; i++) {
+			lanes.quad[i] = static_cast<uint8_t>((((i & and_mask) | or_mask) ^ xor_mask) & 3u);
+		}
+	}
+	lanes.step  = 1u << (and_mask == 0 ? 5 : std::countr_zero(and_mask));
+	lanes.first = (or_mask ^ xor_mask) & (lanes.step - 1u);
+	return lanes;
 }
 
 struct BufferAddress {
@@ -1688,7 +1725,8 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 		                          ConstantU32(state, spv::MemorySemanticsMaskNone), count);
 		return value;
 	});
-	return EmitSubgroupShuffle(state, TypeU32(state), atomic, source_lane);
+	// (The first lane of the ballot: the same in every lane.)
+	return EmitSubgroupShuffle(state, TypeU32(state), atomic, source_lane, {.uniform = true});
 }
 
 uint32_t EmitReadConst(ValueEmitContext& ctx, const IR::Inst& inst) {
@@ -1811,9 +1849,9 @@ uint32_t EmitSwizzleU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto& state = ctx.state;
 	state.builder.AddFunction(spv::OpStore, ctx.scratch_u32_variable, ctx.Arg(inst, 0));
 	const auto source = EmitNative<spv::OpLoad, IR::Type::U32>(state, ctx.scratch_u32_variable);
-	const auto target = EmitDsSwizzleTargetLane(state, EmitSubgroupLocalInvocationId(state),
-	                                            inst.Arg(1).IsImmediate() ? inst.Arg(1).U32() : 0);
-	return EmitDsMaskedLaneRead(state, source, target, ctx.Arg(inst, 2));
+	const auto control = inst.Arg(1).IsImmediate() ? inst.Arg(1).U32() : 0;
+	const auto target  = EmitDsSwizzleTargetLane(state, EmitSubgroupLocalInvocationId(state), control);
+	return EmitDsMaskedLaneRead(state, source, target, ctx.Arg(inst, 2), DsSwizzleShuffleLanes(control));
 }
 
 uint32_t EmitPermuteU32(ValueEmitContext& ctx, const IR::Inst& inst) {
