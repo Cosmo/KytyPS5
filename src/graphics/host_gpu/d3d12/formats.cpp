@@ -96,10 +96,11 @@ FormatInfo GetFormatInfo(vk::Format format) {
 		case F::eR32G32Sint: return Color(DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_SINT);
 		case F::eR32G32Sfloat: return Color(DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_FLOAT);
 
-		// 96-bit textures are not created: on the Xbox it removes the device (guard G1). Vertex input of these formats is fine (VertexFormat).
-		case F::eR32G32B32Uint:
-		case F::eR32G32B32Sint:
-		case F::eR32G32B32Sfloat: return {};
+		// 96-bit textures are 128-bit resources (Expanded96 in image.cpp): a 96-bit texture removes the Xbox's device. Uploads add the
+		// fourth channel as 1, which is what the PS5 reads there; vertex input of these formats stays 96-bit (VertexFormat).
+		case F::eR32G32B32Uint: return Color(DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_UINT);
+		case F::eR32G32B32Sint: return Color(DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_SINT);
+		case F::eR32G32B32Sfloat: return Color(DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_FLOAT);
 
 		case F::eR32G32B32A32Uint:
 			return Color(DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_UINT);
@@ -189,7 +190,7 @@ HostColorFormat RenderableHostFormat(vk::Format format, Prospero::ColorComponent
 }
 
 DXGI_FORMAT VertexFormat(vk::Format format) {
-	// The 96-bit formats are no textures (see GetFormatInfo) but fine as vertex input.
+	// The 96-bit formats are 128-bit textures (see GetFormatInfo) but 96-bit vertex input.
 	switch (format) {
 		case vk::Format::eR32G32B32Uint: return DXGI_FORMAT_R32G32B32_UINT;
 		case vk::Format::eR32G32B32Sint: return DXGI_FORMAT_R32G32B32_SINT;
