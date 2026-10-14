@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
+#include <cmath>
 #include <fmt/format.h>
 #include <memory>
 #include <string>
@@ -105,6 +106,28 @@ namespace {
 }
 [[nodiscard]] uint32_t Expanded96One(vk::Format format) {
 	return format == vk::Format::eR32G32B32Sfloat ? 0x3f800000u : 1u;
+}
+
+// A color in the shared-exponent format E5B9G9R9 (the conversion the Vulkan and D3D specifications give).
+[[nodiscard]] uint32_t PackE5B9G9R9(const float* rgb) {
+	constexpr int   Mantissa = 9;
+	constexpr int   Bias     = 15;
+	constexpr float Largest  = 65408.0f; // (2^9 - 1) / 2^9 * 2^(31 - 15)
+	float           c[3];
+	for (int i = 0; i < 3; i++) {
+		c[i] = std::isnan(rgb[i]) ? 0.0f : std::clamp(rgb[i], 0.0f, Largest);
+	}
+	const float largest  = std::max({c[0], c[1], c[2]});
+	int         exponent = largest > 0.0f ? std::max(-Bias - 1, static_cast<int>(std::floor(std::log2(largest)))) + 1 + Bias : 0;
+	if (std::floor(largest / std::exp2(static_cast<float>(exponent - Bias - Mantissa)) + 0.5f) == static_cast<float>(1 << Mantissa)) {
+		exponent++;
+	}
+	uint32_t packed = static_cast<uint32_t>(exponent) << 27u;
+	for (int i = 0; i < 3; i++) {
+		const auto value = static_cast<uint32_t>(std::floor(c[i] / std::exp2(static_cast<float>(exponent - Bias - Mantissa)) + 0.5f));
+		packed |= std::min(value, 511u) << (9u * static_cast<uint32_t>(i));
+	}
+	return packed;
 }
 
 [[nodiscard]] uint32_t Plane(vk::ImageAspectFlags aspect) {
@@ -1493,6 +1516,34 @@ void Image::Clear(CommandBuffer& command, vk::Format format, const vk::ImageSubr
 				                                   0, nullptr);
 			} else {
 				list->ClearUnorderedAccessViewFloat(visible.gpu, cpu, target, color, 0, nullptr);
+			}
+		} else if (format == vk::Format::eE5B9G9R9UfloatPack32) {
+			// D3D12 neither renders to nor writes shared-exponent images: the packed color is copied in from a buffer it fills.
+			const bool     volume = backing.image_type == vk::ImageType::e3D;
+			const auto     width  = std::max(backing.extent.width >> level, 1u);
+			const auto     height = std::max(backing.extent.height >> level, 1u);
+			const auto     depth  = volume ? std::max(backing.extent.depth >> level, 1u) : 1u;
+			const auto     pitch  = static_cast<UINT>(Common::AlignUp<uint64_t>(uint64_t {width} * 4u, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT));
+			const uint64_t size   = uint64_t {pitch} * height * depth;
+			auto&          scratch = ScratchBuffer(m_graphics, m_scheduler, size);
+			scratch.Fill(0, size, PackE5B9G9R9(clear.color.float32.data()));
+			scratch.Use(command, D3D12_RESOURCE_STATE_COPY_SOURCE);
+			Use(command, D3D12_RESOURCE_STATE_COPY_DEST, subresources, handle);
+			auto* target = backing.resources[resource].resource;
+			for (uint32_t layer = 0; layer < (volume ? 1u : range.layerCount); layer++) {
+				D3D12_TEXTURE_COPY_LOCATION dst {};
+				dst.pResource        = target;
+				dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+				dst.SubresourceIndex = backing.Subresource(level, volume ? 0 : range.baseArrayLayer + layer, 0);
+				D3D12_TEXTURE_COPY_LOCATION src {};
+				src.pResource                          = scratch.Resource();
+				src.Type                               = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+				src.PlacedFootprint.Footprint.Format   = CopyFormat(m_graphics.device, target, dst.SubresourceIndex);
+				src.PlacedFootprint.Footprint.Width    = width;
+				src.PlacedFootprint.Footprint.Height   = height;
+				src.PlacedFootprint.Footprint.Depth    = depth;
+				src.PlacedFootprint.Footprint.RowPitch = pitch;
+				list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 			}
 		} else {
 			EXIT("D3D12: image format %d cannot be cleared\n", static_cast<int>(format));
