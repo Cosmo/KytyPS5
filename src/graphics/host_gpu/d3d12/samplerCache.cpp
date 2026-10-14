@@ -48,12 +48,8 @@ SamplerHandle SamplerCache::GetSampler(const ShaderSamplerResource& guest, bool 
 
 	// D3D12's mip LOD bias range is -16 to 15.99.
 	const auto info = GuestSamplerInfo(r, integer_border, 15.99f);
-	if (info.unnormalizedCoordinates != VK_FALSE) {
-		static std::atomic_bool reported = false;
-		if (!reported.exchange(true)) {
-			Log::WriteToConsoleAndLog("D3D12: samplers with unnormalized coordinates are not supported yet; they sample with normalized coordinates\n");
-		}
-	}
+	// Unnormalized coordinates: the shader normalizes them (HostShaderFeatures::unnormalized_samplers_in_shader), so the sampler
+	// itself takes normalized ones.
 	D3D12_SAMPLER_DESC desc {};
 	const auto reduction = info.compareEnable != VK_FALSE ? D3D12_FILTER_REDUCTION_TYPE_COMPARISON
 	                                                      : D3D12_FILTER_REDUCTION_TYPE_STANDARD;
