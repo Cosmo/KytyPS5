@@ -279,7 +279,8 @@ struct ValueEmitContext {
 	uint32_t                                                           half       = 0;
 };
 
-enum class VertexInputScalarKind { Float, Sint, Uint };
+// UscaledAsUint, SscaledAsSint and Snorm10AsUint: HostShaderFeatures::vertex_formats_as_integers.
+enum class VertexInputScalarKind { Float, Sint, Uint, UscaledAsUint, SscaledAsSint, Snorm10AsUint };
 
 constexpr uint32_t NoImageComponent = 0xffffffffu;
 
