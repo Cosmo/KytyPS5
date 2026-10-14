@@ -430,6 +430,10 @@ void RootLayout::Add(const IR::CompiledShaderInfo& program, bool program_runtime
 	const bool table = ShaderRecompiler::GetHostShaderFeatures().guest_pointer_table;
 	heap_indexing    = heap_indexing || (program.info.uses_dma && !table);
 	guest_table      = guest_table || (program.info.uses_dma && table);
+	// The lock words of emulated 64-bit image atomics are in the guest buffer table too.
+	if (ShaderRecompiler::GetHostShaderFeatures().image_atomic64_lock) {
+		guest_table = guest_table || std::ranges::any_of(program.info.images, [](const IR::ImageResource& image) { return image.atomic64; });
+	}
 	// The bindings in kind order, each sized as the SPIR-V emitter's DefineDescriptors declares
 	// it: buffers, images and samplers are arrays, every other kind is a single descriptor.
 	for (auto mask = program.bindings.descriptor_mask; mask != 0; mask &= mask - 1) {
@@ -511,6 +515,9 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	features.lane_shuffle_loop   = !m_compiler.SupportsDivergentLaneIndex(); // (below shader model 6.7 a lane shuffle needs the same lane number in every lane)
 	features.wave_ops_without_helper_lanes = !m_compiler.SupportsHelperLanesInWaveOps();
 	features.sample_offset_by_coordinates = true; // texel offsets the shader computes (Vulkan's maintenance8 is not available here)
+	// 64-bit image atomics under a lock; they would need shader model 6.6 and its typed 64-bit atomics. (The lock words are in the
+	// guest buffer table.)
+	features.image_atomic64_lock = features.guest_pointer_table;
 	ShaderRecompiler::SetHostShaderFeatures(features);
 #if defined(KYTY_PLATFORM_UWP)
 	// Constant-alpha blend factors fail at pipeline creation on the Xbox (E_INVALIDARG, guard G4): the constant color factors stand in.
