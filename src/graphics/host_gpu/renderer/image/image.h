@@ -233,6 +233,7 @@ private:
 	void                   Transition(CommandBuffer& command, uint32_t resource, uint32_t state,
 	                                  std::optional<ImageSubresourceRange> range);
 	void                   Synchronize(CommandBuffer& command, uint32_t resource);
+	void                   UseCopy(CommandBuffer& command, ImageViewDescriptors& view, uint32_t state);
 	void CopyRegions(CommandBuffer& command, std::span<const vk::BufferImageCopy> copies,
 	                 BufferHandle buffer, bool upload);
 	void UploadWithCpu(CommandBuffer& command, std::span<const vk::BufferImageCopy> copies,
