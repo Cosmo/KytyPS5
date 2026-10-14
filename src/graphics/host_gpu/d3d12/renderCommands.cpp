@@ -264,10 +264,7 @@ void SetDynamicState(const CommandBuffer& buffer, ID3D12GraphicsCommandList* lis
 	}
 	list->OMSetBlendFactor(blend_constants);
 	if (depth.stencil_test_enable) {
-		if (depth.stencil_front.reference != depth.stencil_back.reference) {
-			static std::atomic_bool warned = false;
-			WarnOnce(warned, "stencil references differ per face; using the front reference");
-		}
+		// (A draw whose faces have different references is drawn once per face: ExecutePreparedDraw.)
 		list->OMSetStencilRef(depth.stencil_front.reference);
 	}
 	if (depth_bounds) {
@@ -738,11 +735,29 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const auto strip_cut = !primitive_restart_enable ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED
 	                       : index16 ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF
 	                                 : D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
-	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
-	    std::span {state.color_info, state.color_count}, state.depth_info,
-	    std::span {state.vertex_info.data(), 1}, buffer,
-	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
-	    strip_cut, state.programs);
+	// D3D12 below OPTIONS14 has one stencil reference and one pair of stencil masks for both faces: a triangle draw whose faces
+	// differ in them is drawn once per face, each time with that face's values (a draw that culls its front faces, only with the
+	// back faces' values).
+	const auto& stencil  = state.depth_info;
+	const bool  per_face = !mesh && IsTriangleTopology(topology) && stencil.stencil_test_enable && !mode.cull_back &&
+	                      (stencil.stencil_front.reference != stencil.stencil_back.reference ||
+	                       stencil.stencil_front.compareMask != stencil.stencil_back.compareMask ||
+	                       stencil.stencil_front.writeMask != stencil.stencil_back.writeMask);
+	const bool      only_back  = per_face && mode.cull_front;
+	RenderDepthInfo back_faces = state.depth_info;
+	back_faces.stencil_front   = back_faces.stencil_back;
+	const auto get_pipeline    = [&](const RenderDepthInfo& depth, PipelineCache::FacePass faces) -> PipelineCache::Pipeline& {
+		return m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state, depth, strip_cut, faces);
+	};
+	auto& pipeline = get_pipeline(only_back ? back_faces : state.depth_info,
+	                              per_face && !only_back ? PipelineCache::FacePass::Front : PipelineCache::FacePass::Guest);
+	PipelineCache::Pipeline* back_pass =
+	    per_face && !only_back ? &get_pipeline(back_faces, PipelineCache::FacePass::Back) : nullptr;
+	if (back_pass != nullptr && (back_pass->pipeline == nullptr || back_pass->root_signature != pipeline.root_signature)) {
+		static std::atomic_bool warned = false;
+		WarnOnce(warned, "the back faces of a draw with per-face stencil values could not get their own pipeline; they are not drawn");
+		back_pass = nullptr;
+	}
 	if (FrameDump::LogActive()) {
 		FrameDump::LogDraw(DescribeDraw(m_context.GetGraphics(), buffer, draw, state, topology, primitive_restart_enable, mesh, emulated_mesh, pipeline, bindings.vertex[0],
 		                                state.ps_active && bindings.pixel ? &*bindings.pixel : nullptr) +
@@ -844,7 +859,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                                    buffer.GetRegisters().GetUserClipPlanes().data(),
 		                                    IR::PushData::UserClipPlaneDword);
 	}
-	SetDynamicState(buffer, list, state.depth_info,
+	SetDynamicState(buffer, list, only_back ? back_faces : state.depth_info,
 	                state.depth_info.depth_bounds_test_enable && targets.has_depth,
 	                m_context.GetPipelineCache().AlphaBlendFactor());
 
@@ -880,12 +895,19 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		buffer.MeshHandle()->DispatchMesh(mesh_groups, draw.instance_count, 1);
 	} else {
 		list->IASetPrimitiveTopology(PrimitiveTopology(topology));
-		if (indexed) {
-			list->DrawIndexedInstanced(count, draw.instance_count, 0, vertex_offset,
-			                           emit.first_instance);
-		} else {
-			list->DrawInstanced(count, draw.instance_count, emit.first_vertex,
-			                    emit.first_instance);
+		const auto record = [&]() {
+			if (indexed) {
+				list->DrawIndexedInstanced(count, draw.instance_count, 0, vertex_offset, emit.first_instance);
+			} else {
+				list->DrawInstanced(count, draw.instance_count, static_cast<uint32_t>(vertex_offset), emit.first_instance);
+			}
+		};
+		record();
+		if (back_pass != nullptr) {
+			// The back faces, with their stencil values.
+			list->SetPipelineState(back_pass->pipeline);
+			list->OMSetStencilRef(back_faces.stencil_front.reference);
+			record();
 		}
 	}
 	trace.End(list, slot);
