@@ -131,6 +131,15 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		}
 		config.console_language          = std::min(settings.console_language, Config::MAX_CONSOLE_LANGUAGE);
 		config.skip_notice_screen        = settings.skip_intro_logos; // sceSystemServiceGetNoticeScreenSkipFlag
+		config.controller_vibration_intensity = std::min<uint32_t>(settings.controller_vibration, 100);
+		config.controller_speaker_volume      = std::min<uint32_t>(settings.controller_speaker_volume, 100);
+		config.trophy_enabled            = settings.trophy_notifications;
+		config.network_connected         = settings.network_connected;
+		config.readback_linear_images    = settings.readback_linear_images;
+		config.readback_tiled_images     = settings.readback_tiled_images;
+		config.sync_raw_image_buffers    = settings.accurate_texture_sync;
+		config.playgo_hack_enabled       = settings.playgo_fallback;
+		config.vr_enabled                = settings.virtual_vr_headset;
 		config.vulkan_validation_enabled = settings.debug_layer; // the D3D12 debug layer
 		config.printf_direction          = settings.game_output ? Config::LogDirection::Console : Config::LogDirection::Silent;
 		// The fonts that stand in for the console's system fonts come with the package (uwp.cmake).

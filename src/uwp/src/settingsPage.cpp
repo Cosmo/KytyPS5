@@ -302,6 +302,15 @@ void ListFolders(const std::shared_ptr<SettingsState>& state) {
 	}
 }
 
+// 0% to 100% in steps of 10: the controller's vibration and speaker volume.
+std::vector<std::wstring> Percentages() {
+	std::vector<std::wstring> names;
+	for (int percent = 0; percent <= 100; percent += 10) {
+		names.push_back(std::to_wstring(percent) + L"%");
+	}
+	return names;
+}
+
 } // namespace
 
 xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> back) {
@@ -394,6 +403,14 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	     L"A sudden effect, such as a knock or a step, gives a soft bump on the small motor. An effect that goes on, such as rain or an engine, only "
 	     L"bumps when it starts.",
 	     L"The game's sound is not affected."});
+	AddChoice(
+	    controller, explanation, L"Vibration intensity", Percentages(), std::min<size_t>((settings.controller_vibration + 5) / 10, 10),
+	    [state, save](size_t index) {
+		    state->settings.controller_vibration = static_cast<uint32_t>(index * 10);
+		    save();
+	    },
+	    {L"How strongly the controller rumbles, including haptic feedback as rumble.", L"At 0%, it doesn't rumble.",
+	     L"Impulse Triggers keep their strength."});
 	AddSwitch(
 	    controller, explanation, L"Controller speaker on the headset", settings.headset_speaker,
 	    [state, save](bool on) {
@@ -405,6 +422,13 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	              : L"Sound a game plays on player 1's DualSense speaker plays on a headset plugged into player 1's controller, or else on the "
 	                L"communications device of Windows where that is not the default one.",
 	     L"Without a headset, it plays with the rest of the sound."});
+	AddChoice(
+	    controller, explanation, L"Controller speaker volume", Percentages(), std::min<size_t>((settings.controller_speaker_volume + 5) / 10, 10),
+	    [state, save](size_t index) {
+		    state->settings.controller_speaker_volume = static_cast<uint32_t>(index * 10);
+		    save();
+	    },
+	    {L"How loud the sound a game plays on the DualSense's speaker is.", L"At 50%, it plays at the game's own volume. 100% adds 6 dB."});
 	AddSwitch(
 	    controller, explanation, L"Headset microphone", settings.headset_mic,
 	    [state, save](bool on) {
@@ -462,6 +486,21 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    save();
 	    },
 	    {L"Plays a game's music in the library while its cover has the focus, in games that have it."});
+	AddSwitch(
+	    panel(L"System"), explanation, L"Trophy notifications", settings.trophy_notifications,
+	    [state, save](bool on) {
+		    state->settings.trophy_notifications = on;
+		    save();
+	    },
+	    {L"Shows a notification when you earn a trophy.", L"When off, trophies are still earned and kept."});
+	AddSwitch(
+	    panel(L"System"), explanation, L"Network connection", settings.network_connected,
+	    [state, save](bool on) {
+		    state->settings.network_connected = on;
+		    save();
+	    },
+	    {IsXbox() ? L"Lets games use the console's local network connection." : L"Lets games use your computer's local network connection.",
+	     L"When off, games are told that there is no network."});
 
 	// Memory and quality. Game memory paging: Automatic is "not set" (on where the app's memory limit is small), the others are the cap in MB.
 	const auto memory   = panel(L"MemoryGroup");
@@ -549,6 +588,30 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    },
 	    {L"Keeps textures sharp on surfaces seen at an angle, where the game asks for it.", L"Off uses plain filtering instead. It can be a little faster."});
 	AddSwitch(
+	    textures, explanation, L"Accurate texture synchronization", settings.accurate_texture_sync,
+	    [state, save](bool on) {
+		    state->settings.accurate_texture_sync = on;
+		    save();
+	    },
+	    {L"Can fix missing textures and incorrect transparency in some games.", L"May reduce performance."});
+	AddSwitch(
+	    textures, explanation, L"Read back linear images", settings.readback_linear_images,
+	    [state, save](bool on) {
+		    state->settings.readback_linear_images = on;
+		    save();
+	    },
+	    {L"Copies the images the GPU writes without tiling back to the game's memory after each submission, for games that read them.",
+	     L"Makes games slower."});
+	AddSwitch(
+	    textures, explanation, L"Read back small tiled images", settings.readback_tiled_images,
+	    [state, save](bool on) {
+		    state->settings.readback_tiled_images = on;
+		    save();
+	    },
+	    {L"Copies small images the GPU writes in tiled layout back to the game's memory after each submission. Some games read GPU results "
+	     L"from them, for example for water physics.",
+	     L"Can make games slower."});
+	AddSwitch(
 	    memory, explanation, L"Compact GPU memory allocation", settings.gpu_memory_savings,
 	    [state, save](bool on) {
 		    state->settings.gpu_memory_savings = on;
@@ -632,6 +695,20 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    },
 	    {L"Decodes the videos games play through the system video player on all CPU cores.",
 	     L"Off decodes them on one thread. Use it to test video problems."});
+	AddSwitch(
+	    testing, explanation, L"PlayGo fallback", settings.playgo_fallback,
+	    [state, save](bool on) {
+		    state->settings.playgo_fallback = on;
+		    save();
+	    },
+	    {L"Gives a game a default list of installed parts when its own list can't be read.", L"Only for testing games that need it."});
+	AddSwitch(
+	    testing, explanation, L"Virtual VR headset", settings.virtual_vr_headset,
+	    [state, save](bool on) {
+		    state->settings.virtual_vr_headset = on;
+		    save();
+	    },
+	    {L"Tells games that a VR headset is connected and worn.", L"Only for testing games that need one."});
 	AddSwitch(
 	    testing, explanation, L"Keep compiled shaders across app builds", settings.shader_cache_any_build,
 	    [state, save](bool on) {
