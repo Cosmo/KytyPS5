@@ -19,7 +19,9 @@ struct HostShaderFeatures {
 	bool guest_pointer_table = false;
 	// WaveReadLaneAt needs the same lane number in every lane of the wave below shader model 6.7 (the Xbox's UWP games run at 6.4): with a number that differs from lane to
 	// lane (DS_BPERMUTE, DS_SWIZZLE, the PERMLANEs, read lane with a VGPR) the Series X gives wrong values (measured by the graphics lab: about 1000 of 1024 wrong). The
-	// emitter then reads each source lane in turn, with the loop counter as the (uniform) lane number, and the lane that asked for it keeps the value.
+	// emitter then reads each source lane in turn, with the loop counter as the (uniform) lane number, and the lane that asked for it keeps the value: only
+	// the lanes the instruction can ask for, up to the host's wave size. Where every lane asks for the same lane (read lane, read first lane, append)
+	// it uses the shuffle as it is, and for a shuffle within quads (quad_perm, DS_SWIZZLE's quad mode) the quad operations of pixel and compute shaders.
 	bool lane_shuffle_loop = false;
 	// A pixel shader's wave operations leave out its helper lanes below shader model 6.7 (the Xbox's UWP games). A read of the first lane
 	// then uses the native instruction where every lane runs, and a helper lane that the ballot leaves out keeps its own value: in a
