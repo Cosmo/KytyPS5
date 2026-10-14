@@ -208,6 +208,8 @@ struct SamplerResource {
 	bool     depth_compare         = false;
 	bool     integer_border        = false;
 	bool     gather_lod            = false;
+	// HostShaderFeatures::unnormalized_samplers_in_shader: the guest sampler takes texel positions.
+	bool     unnormalized          = false;
 
 	bool operator==(const SamplerResource& other) const = default;
 };
