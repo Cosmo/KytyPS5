@@ -328,6 +328,11 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 	}
 }
 
+bool CommandScheduler::HasPendingPriorityOperations() {
+	std::lock_guard lock(m_operation_mutex);
+	return !m_priority_operations.empty() || m_priority_active;
+}
+
 void CommandScheduler::DrainPriorityOperations() {
 	EXIT_IF(g_deferred_callback_scheduler == this);
 	std::unique_lock lock(m_operation_mutex);
