@@ -152,6 +152,8 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.red_zone_protection_enabled = true;
 		config.xbox_gpu_limits_enabled     = settings.xbox_gpu_limits;
 		config.xbox_limits_dxil_parts      = settings.xbox_limits_dxil_parts;
+		// Without relaxed format casting (the Xbox), views in a format of another family would otherwise copy the image over.
+		config.shared_format_aliases       = IsXbox() || settings.xbox_gpu_limits;
 		config.dump_pipeline               = settings.dump_pipeline;
 		if (!settings.shader_override.empty()) {
 			// A folder name is taken in LocalState (the shader dumps' folder, for one); a full path stays as it is.

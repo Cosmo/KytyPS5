@@ -239,6 +239,10 @@ uint32_t XboxLimitsDxilParts() {
 	return g_config != nullptr ? g_config->xbox_limits_dxil_parts : 3;
 }
 
+bool SharedFormatAliases() {
+	return g_config != nullptr && g_config->shared_format_aliases;
+}
+
 uint32_t DumpPipeline() {
 	return g_config != nullptr ? g_config->dump_pipeline : 0;
 }
