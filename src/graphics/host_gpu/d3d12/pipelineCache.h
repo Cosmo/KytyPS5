@@ -20,7 +20,6 @@
 #include <mutex>
 #include <span>
 #include <string>
-#include <string_view>
 #include <thread>
 #include <tuple>
 #include <unordered_map>
@@ -232,13 +231,6 @@ private:
 	                                  std::initializer_list<const D3D12::DxilShader*> shaders);
 	void                 InitializeDiskCache();
 	[[nodiscard]] std::string CacheSignature() const;
-	// Without a pipeline library: the blobs from the cache file's library part (m_library_data), if the driver is not known to fail.
-	void InitializeBlobs();
-	// The pipeline of `desc` with its compiled code `blob` (a cached PSO subobject at the end of the stream); null where refused.
-	[[nodiscard]] ID3D12PipelineState* CreateWithBlob(const D3D12_PIPELINE_STATE_STREAM_DESC& desc, std::span<const uint8_t> blob);
-	// Keeps a new pipeline's compiled code (GetCachedBlob) under its name; the first time with this driver, after a round trip.
-	void KeepBlob(const std::wstring& name, const D3D12_PIPELINE_STATE_STREAM_DESC& desc, ID3D12PipelineState* pipeline);
-	void SetBlobProbe(std::string_view state);
 
 	GraphicContext&                                                     m_graphics;
 	D3D12::ComPtr<ID3D12Device2>                                        m_device;
@@ -261,13 +253,6 @@ private:
 	// Compiled pipelines by name; they are read from m_library_data, which must outlive it.
 	std::vector<uint8_t>                  m_library_data;
 	D3D12::ComPtr<ID3D12PipelineLibrary1> m_library;
-	// Without a pipeline library (the Xbox's driver): each pipeline's compiled code (GetCachedBlob) by name, given back in its
-	// description on the next start (D3D12_CACHED_PIPELINE_STATE), saved where the library would be. The first round trip with a
-	// driver writes a marker before it (m_probe_file), so that a start that ends in it leaves the blobs off from then on.
-	bool                                                   m_blobs_enabled    = false;
-	bool                                                   m_blobs_known_good = false;
-	std::unordered_map<std::wstring, std::vector<uint8_t>> m_blobs;
-	PipelineCacheFile                                      m_probe_file;
 	uint64_t                              m_loaded_pipelines = 0;
 	// Pipelines compiled since the start, when the last one was, and how many the file has.
 	std::atomic_uint64_t                  m_changes {0};
