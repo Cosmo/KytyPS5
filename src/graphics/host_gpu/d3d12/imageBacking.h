@@ -53,9 +53,10 @@ struct ImageViewDescriptors {
 	D3D12_CPU_DESCRIPTOR_HANDLE dsv {};
 	D3D12_CPU_DESCRIPTOR_HANDLE dsv_read_only {};
 	// A view that D3D12 has no shader resource view for (a 2D view of a 3D image's slices, or a 2D or cube view from a later layer
-	// of an array), read by shaders: its levels and layers copied into a texture of the view's own when the image changed since
-	// (Image::UseCopy).
+	// of an array), read by shaders, or a view a draw samples while rendering to it (Image::UseSnapshot): its levels and layers copied
+	// into a texture of the view's own when the image changed since (Image::UseCopy), and the shader resource view on that copy.
 	ImageResource               copy;
+	D3D12_CPU_DESCRIPTOR_HANDLE copy_srv {};
 };
 
 // The host resources of an image. D3D12 views must share their resource's format family, so an
