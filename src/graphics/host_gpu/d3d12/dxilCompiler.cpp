@@ -313,6 +313,10 @@ bool DxilCompiler::SupportsHelperLanesInWaveOps() const noexcept {
 	return m_shader_model >= SHADER_MODEL_6_7;
 }
 
+bool DxilCompiler::SupportsCompareBiasGrad() const noexcept {
+	return m_shader_model >= SHADER_MODEL_6_8;
+}
+
 std::vector<DxilShader> DxilCompiler::CompileLinked(std::span<const LinkedStage> stages,
                                                     uint64_t pipeline_hash,
                                                     bool*    from_cache) const {
