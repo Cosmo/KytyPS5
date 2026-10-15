@@ -37,6 +37,9 @@ struct HostShaderFeatures {
 	// two-dword image, and each atomic takes a lock word of a table in the guest buffer table (IR::ImageAtomic64LockSlot), reads
 	// the texel, writes the result and releases the lock. Exact; slower where many lanes hit one texel.
 	bool image_atomic64_lock = false;
+	// 64-bit atomics on buffers and group shared memory, which need shader model 6.6 in D3D12 too, run under a lock of the same table:
+	// the lane that gets it reads both dwords with 32-bit atomics, writes the result and releases the lock.
+	bool int64_atomics_lock = false;
 	// Vertex inputs in formats the host's input assembler cannot read come in as integers, and the vertex shader converts them
 	// (D3D12 has no USCALED/SSCALED formats and no 10:10:10:2 SNORM vertex format): scaled formats as their integers, 10:10:10:2
 	// SNORM as its unsigned components, sign extended and normalized as Vulkan does.
