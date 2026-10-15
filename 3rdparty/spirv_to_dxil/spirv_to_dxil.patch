@@ -730,7 +730,7 @@ index 09a3203..79a7df7 100644
                                          DXIL_PSG1,
                                          ctx->mod.num_sig_patch_consts,
 diff --git a/src/microsoft/spirv_to_dxil/dxil_spirv_nir.c b/src/microsoft/spirv_to_dxil/dxil_spirv_nir.c
-index 4763c34..c539555 100644
+index 4763c34..49288c8 100644
 --- a/src/microsoft/spirv_to_dxil/dxil_spirv_nir.c
 +++ b/src/microsoft/spirv_to_dxil/dxil_spirv_nir.c
 @@ -79,6 +79,8 @@ spirv_caps = {
@@ -742,7 +742,80 @@ index 4763c34..c539555 100644
     .PhysicalStorageBufferAddresses = true,
  };
  
-@@ -1046,10 +1048,14 @@ dxil_spirv_nir_passes(nir_shader *nir,
+@@ -421,8 +423,45 @@ dxil_spirv_nir_lower_load_push_constant(nir_shader *shader,
+ struct lower_yz_flip_data {
+    bool *reads_sysval_ubo;
+    const struct dxil_spirv_runtime_conf *rt_conf;
++   /* The temporary that holds the viewport index the shader writes (after
++    * nir_lower_io_vars_to_temporaries), or NULL: the flips are viewport 0's.
++    */
++   nir_variable *viewport;
+ };
+ 
++/* The temporary whose value the store of the viewport index output copies:
++ * nir_lower_io_vars_to_temporaries leaves the outputs in temporaries and copies
++ * them at the end, so it holds the final index wherever the position is stored.
++ */
++static nir_variable *
++find_viewport_temporary(nir_shader *shader)
++{
++   nir_foreach_function_impl(impl, shader) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            if (instr->type != nir_instr_type_intrinsic)
++               continue;
++            nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
++            if (intrin->intrinsic != nir_intrinsic_store_deref)
++               continue;
++            nir_variable *var = nir_intrinsic_get_var(intrin, 0);
++            if (!var || var->data.mode != nir_var_shader_out ||
++                var->data.location != VARYING_SLOT_VIEWPORT)
++               continue;
++            nir_instr *value = nir_def_instr(intrin->src[1].ssa);
++            if (value->type != nir_instr_type_intrinsic)
++               return NULL;
++            nir_intrinsic_instr *load = nir_instr_as_intrinsic(value);
++            if (load->intrinsic != nir_intrinsic_load_deref)
++               return NULL;
++            nir_variable *temp = nir_intrinsic_get_var(load, 0);
++            return temp && temp->data.mode == nir_var_function_temp ? temp : NULL;
++         }
++      }
++   }
++   return NULL;
++}
++
+ static bool
+ lower_yz_flip(struct nir_builder *builder, nir_instr *instr,
+               void *cb_data)
+@@ -493,7 +532,17 @@ lower_yz_flip(struct nir_builder *builder, nir_instr *instr,
+    else if (rt_conf->yz_flip.mode & DXIL_SPIRV_Z_FLIP_CONDITIONAL)
+       z_flip_mask = nir_ushr_imm(builder, dyn_yz_flip_mask, DXIL_SPIRV_Z_FLIP_SHIFT);
+ 
+-   /* TODO: Multi-viewport */
++   /* Multi-viewport: the masks hold one bit per viewport; the vertex's viewport
++    * picks its own.
++    */
++   if (data->viewport && glsl_type_is_integer(data->viewport->type)) {
++      nir_def *index = nir_umin(builder, nir_load_var(builder, data->viewport),
++                                nir_imm_int(builder, DXIL_SPIRV_MAX_VIEWPORT - 1));
++      if (y_flip_mask)
++         y_flip_mask = nir_ushr(builder, y_flip_mask, index);
++      if (z_flip_mask)
++         z_flip_mask = nir_ushr(builder, z_flip_mask, index);
++   }
+ 
+    if (y_flip_mask) {
+       nir_def *flip = nir_test_mask(builder, y_flip_mask, 1);
+@@ -528,6 +577,7 @@ dxil_spirv_nir_lower_yz_flip(nir_shader *shader,
+    struct lower_yz_flip_data data = {
+       .rt_conf = rt_conf,
+       .reads_sysval_ubo = reads_sysval_ubo,
++      .viewport = find_viewport_temporary(shader),
+    };
+ 
+    return nir_shader_instructions_pass(shader, lower_yz_flip,
+@@ -1046,10 +1096,14 @@ dxil_spirv_nir_passes(nir_shader *nir,
     NIR_PASS(_, nir, nir_lower_io_array_vars_to_elements_no_indirects, false);
  
  
@@ -758,7 +831,7 @@ index 4763c34..c539555 100644
        NIR_PASS(_, nir,
                   dxil_spirv_nir_lower_yz_flip,
                   conf, &metadata->requires_runtime_data);
-@@ -1113,7 +1119,7 @@ dxil_spirv_nir_passes(nir_shader *nir,
+@@ -1113,7 +1167,7 @@ dxil_spirv_nir_passes(nir_shader *nir,
     NIR_PASS(_, nir, nir_lower_tex, &lower_tex_options);
  
     NIR_PASS(_, nir, dxil_nir_split_clip_cull_distance);
