@@ -35,11 +35,13 @@ CommandBuffer::CommandBuffer(CommandScheduler& scheduler)
 
 ID3D12GraphicsCommandList* CommandBuffer::Handle() const {
 	EXIT_IF(IsInvalid());
+	m_used = true;
 	return m_list;
 }
 
 ID3D12GraphicsCommandList6* CommandBuffer::MeshHandle() const {
 	EXIT_IF(IsInvalid() || m_mesh_list == nullptr);
+	m_used = true;
 	return m_mesh_list;
 }
 
@@ -98,7 +100,12 @@ ID3D12CommandAllocator* CommandScheduler::AllocatorPool::Commit() {
 	}
 	m_ticks[*found] = m_master.CurrentTick();
 	m_hint          = (*found + 1) % m_ticks.size();
+	m_current       = *found;
 	return m_allocators[*found];
+}
+
+void CommandScheduler::AllocatorPool::KeepCurrent() {
+	m_ticks[m_current] = m_master.CurrentTick();
 }
 
 bool CommandScheduler::InDeferredOperation() noexcept {
@@ -147,6 +154,13 @@ void CommandScheduler::Shutdown() {
 	}
 	if (!m_command.IsInvalid()) {
 		Submit();
+	}
+	if (m_list_kept) {
+		// (An empty list left open: closed, never submitted.)
+		D3D12::Check(m_list->Close(), "close command list");
+		m_list_kept           = false;
+		m_command.m_list      = nullptr;
+		m_command.m_mesh_list = nullptr;
 	}
 	m_master.Wait(CurrentTick() - 1);
 	PopPendingOperations();
@@ -376,6 +390,11 @@ CommandBuffer& CommandScheduler::Current() {
 }
 
 CommandBuffer& CommandScheduler::BeginCommand() {
+	if (m_list_kept) {
+		// The list the last Submit left open, with nothing in it.
+		m_list_kept = false;
+		return m_command;
+	}
 	EXIT_IF(!m_command.IsInvalid());
 	auto* allocator = m_allocators.Commit();
 	if (m_list == nullptr) {
@@ -393,6 +412,7 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	m_command.m_list                  = m_list;
 	m_command.m_mesh_list             = m_mesh_list;
 	m_command.m_contains_encoded_draw = false;
+	m_command.m_used                  = false;
 	StartTiming();
 	return m_command;
 }
@@ -451,6 +471,23 @@ void CommandScheduler::ReadTimings() {
 uint64_t CommandScheduler::Submit() {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(m_command.IsInvalid());
+	if (!m_command.m_used) {
+		// Nothing was recorded (a flush right after another, at the end of a guest submission): the tick needs only its fence
+		// signal, after all earlier lists, and the list stays open for the next commands, which saves closing, submitting and
+		// resetting an empty list.
+		uint64_t tick = 0;
+		{
+			Common::LockGuard lock(m_graphics.queue_mutex);
+			tick = m_master.NextTick();
+			D3D12::Check(m_graphics.queue->Signal(m_master.Handle(), tick), "signal GPU timeline");
+		}
+		m_allocators.KeepCurrent();
+		m_list_kept                       = true;
+		m_recorded_release_mem_writes     = 0;
+		m_recorded_release_mem_interrupts = 0;
+		m_recorded_draws                  = 0;
+		return tick;
+	}
 	EndTiming();
 	D3D12::Check(m_list->Close(), "close command list");
 
