@@ -219,7 +219,8 @@ void EnsureLdsStorage(EmitterState& state) {
 		state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationAliased);
 		return variable;
 	};
-	if (state.program.info.shared_int64_atomics) {
+	// (HostShaderFeatures::int64_atomics_lock: 64-bit atomics read and write two dwords of the 32-bit view.)
+	if (state.program.info.shared_int64_atomics && !GetHostShaderFeatures().int64_atomics_lock) {
 		state.lds_variable = define(TypeU32(state), 4u);
 		state.lds_u64_variable = define(TypeU64(state), 8u);
 		state.builder.AddName(state.lds_u64_variable, "lds_qwords");
@@ -344,7 +345,8 @@ uint32_t EmitMemoryElementPointer(EmitterState& state, const MemoryResourceAcces
 			    TypeStorageBufferElementPointer(state, 32));
 		}
 		const auto pointer = state.builder.AllocateId();
-		if (access.kind == IR::ResourceKind::Lds && state.program.info.shared_int64_atomics) {
+		if (access.kind == IR::ResourceKind::Lds && state.program.info.shared_int64_atomics &&
+		    !GetHostShaderFeatures().int64_atomics_lock) {
 			state.builder.AddFunction(spv::OpAccessChain, TypeU32ElementPointer(state, storage_class),
 			                          pointer, access.object_pointer, ConstantU32(state, 0), index);
 			return pointer;

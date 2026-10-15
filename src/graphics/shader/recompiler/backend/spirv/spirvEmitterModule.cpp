@@ -323,14 +323,16 @@ void DefineDescriptors(EmitterState& state) {
 		};
 		switch (kind) {
 			case IR::DescriptorBindingKind::Buffers: {
-				const std::array used {info.buffer_u8, info.buffer_u16, true, info.buffer_int64_atomics};
+				// (HostShaderFeatures::int64_atomics_lock: 64-bit atomics read and write two dwords of the 32-bit view.)
+				const bool native_int64 = info.buffer_int64_atomics && !GetHostShaderFeatures().int64_atomics_lock;
+				const std::array used {info.buffer_u8, info.buffer_u16, true, native_int64};
 				constexpr std::array names {"buffers_u8", "buffers_u16", "buffers", "buffers_u64"};
 				for (uint32_t alias = 0; alias < used.size(); ++alias) {
 					if (!used[alias]) continue;
 					auto& buffer = state.storage_buffers[alias];
 					const auto type = StorageBufferType(state, buffer, 8u << alias);
 					buffer.variable = Define(ArrayType(type), names[alias]);
-					if (info.buffer_u8 || info.buffer_u16 || info.buffer_int64_atomics) {
+					if (info.buffer_u8 || info.buffer_u16 || native_int64) {
 						state.builder.AddAnnotation(spv::OpDecorate, buffer.variable, spv::DecorationAliased);
 					}
 					// RDNA2 stores publish to L2 even without GLC; every alias of the buffer
@@ -373,7 +375,7 @@ void DefineDescriptors(EmitterState& state) {
 			case IR::DescriptorBindingKind::SharedMemory:
 				state.lds_variable = Define(StorageBufferType(state, state.storage_buffers[2]), "lds_dwords");
 				state.builder.AddAnnotation(spv::OpDecorate, state.lds_variable, spv::DecorationCoherent);
-				if (state.program.info.shared_int64_atomics) {
+				if (state.program.info.shared_int64_atomics && !GetHostShaderFeatures().int64_atomics_lock) {
 					state.lds_u64_variable =
 					    Define(StorageBufferType(state, state.storage_buffers[3], 64), "lds_qwords");
 					state.builder.AddAnnotation(spv::OpDecorate, state.lds_u64_variable, spv::DecorationCoherent);
@@ -408,6 +410,11 @@ void DefineDescriptors(EmitterState& state) {
 	// The lock words of 64-bit image atomics are in the guest buffer table (IR::ImageAtomic64LockSlot).
 	if (GetHostShaderFeatures().image_atomic64_lock && state.guest_buffer_table == 0 &&
 	    std::ranges::any_of(info.images, [](const IR::ImageResource& image) { return image.atomic64; })) {
+		DefineGuestBufferTable(state);
+	}
+	// So are those of 64-bit buffer and group shared memory atomics (HostShaderFeatures::int64_atomics_lock).
+	if (GetHostShaderFeatures().int64_atomics_lock && state.guest_buffer_table == 0 &&
+	    (info.buffer_int64_atomics || info.shared_int64_atomics)) {
 		DefineGuestBufferTable(state);
 	}
 }
@@ -852,11 +859,14 @@ void DefineModule(EmitterState& state) {
 		state.builder.RequireCapability(spv::CapabilityPhysicalStorageBufferAddresses);
 		state.builder.RequireExtension("SPV_KHR_physical_storage_buffer");
 	}
+	const bool int64_atomics_lock = GetHostShaderFeatures().int64_atomics_lock;
 	if (state.program.info.buffer_int64_atomics || state.program.info.shared_int64_atomics) {
 		state.builder.RequireCapability(spv::CapabilityInt64);
-		state.builder.RequireCapability(spv::CapabilityInt64Atomics);
+		if (!int64_atomics_lock) {
+			state.builder.RequireCapability(spv::CapabilityInt64Atomics);
+		}
 	}
-	if (state.program.info.shared_int64_atomics &&
+	if (state.program.info.shared_int64_atomics && !int64_atomics_lock &&
 	    state.lds_storage_class == spv::StorageClassWorkgroup) {
 		state.builder.RequireVersion(0x00010400u);
 		state.builder.RequireExtension("SPV_KHR_workgroup_memory_explicit_layout");
