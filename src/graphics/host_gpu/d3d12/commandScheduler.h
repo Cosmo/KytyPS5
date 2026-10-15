@@ -68,13 +68,16 @@ private:
 		KYTY_CLASS_NO_COPY(AllocatorPool);
 
 		ID3D12CommandAllocator* Commit();
+		// The last committed allocator stays with the open list for the current tick (an empty list that was not submitted).
+		void KeepCurrent();
 
 	private:
 		GraphicContext&                      m_graphics;
 		MasterSemaphore&                     m_master;
 		std::vector<ID3D12CommandAllocator*> m_allocators;
 		std::vector<uint64_t>                m_ticks;
-		size_t                               m_hint = 0;
+		size_t                               m_hint    = 0;
+		size_t                               m_current = 0;
 	};
 
 	enum class OperationState { Open, Draining, Closed };
@@ -109,6 +112,9 @@ private:
 	uint32_t                     m_recorded_release_mem_writes     = 0;
 	uint32_t                     m_recorded_release_mem_interrupts = 0;
 	uint32_t                     m_recorded_draws                  = 0;
+	// Submit left the list open: nothing was recorded into it, so the tick got only a fence signal and the next commands
+	// go into the same list.
+	bool                         m_list_kept                       = false;
 	std::queue<PendingOperation> m_pending_operations;
 	std::queue<PendingOperation> m_priority_operations;
 	std::mutex                   m_operation_mutex;
