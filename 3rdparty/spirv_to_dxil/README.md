@@ -9,6 +9,7 @@ The D3D12 backend turns the SPIR-V that Kyty's shader recompiler makes into DXIL
 - the `clip_halfz`, `force_sample_rate_shading` and `shadow_sampler_space_offset` runtime options
 - mesh shaders (shader model 6.5; not available on the Xbox): output counts, per-vertex and per-primitive outputs, triangle indices, `SV_CullPrimitive`
 - fixes for DXIL validator 1.8 and for wave operations in helper lanes
+- Y and Z flips per viewport: a shader that writes the viewport index takes that viewport's bit of the flip masks
 
 Build it once, with the static C runtime so that the DLL imports nothing a UWP app does not have (it imports only `KERNEL32.dll` and an API set):
 
