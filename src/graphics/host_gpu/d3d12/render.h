@@ -89,6 +89,9 @@ private:
 	ID3D12GraphicsCommandList6* m_mesh_list            = nullptr;
 	DebugInfo                  m_debug;
 	bool                       m_contains_encoded_draw = false;
+	// Whether anything asked for the list since it began (Handle, MeshHandle): a list nobody did is not submitted
+	// (CommandScheduler::Submit).
+	mutable bool               m_used                  = false;
 	HW::Context*               m_registers             = nullptr;
 	HW::UserConfig*            m_user_config           = nullptr;
 	HW::Shader*                m_shaders               = nullptr;
@@ -214,6 +217,7 @@ private:
 	// Reused across draws and dispatches (their vectors keep their capacity).
 	GraphicsBindings            m_graphics_bindings;
 	PreparedBindings            m_compute_bindings;
+	std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> m_sampler_handles; // CommitBindings' samplers
 	D3D12_CPU_DESCRIPTOR_HANDLE m_null_render_target {}; // fills unused color slots
 	// The depth target of the draw being recorded while the draw also samples it; its state
 	// is then ReadOnlyDepthState for both uses.
