@@ -1572,9 +1572,130 @@ uint32_t EmitAtomic32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	});
 }
 
+namespace {
+
+// HostShaderFeatures::int64_atomics_lock: a 64-bit atomic on the dwords `low` and `high` as a critical section under a lock word of
+// the guest buffer table (IR::ImageAtomic64LockSlot, shared with the image atomics; `key` picks it), as EmitLockedImageAtomic64: the
+// lane that gets the lock reads both dwords, writes what `apply` makes of them and releases the lock in the same iteration, so lanes
+// of one wave that want the same lock take turns instead of waiting for each other forever. The dwords are read and written with
+// 32-bit atomics (at `scope`, in the memory `memory` names), which other units see at once. Gives the old value.
+template <typename Apply>
+uint32_t EmitLockedAtomic64(EmitterState& state, uint32_t key, uint32_t low, uint32_t high, spv::Scope scope,
+                            spv::MemorySemanticsMask memory, Apply&& apply) {
+	EXIT_IF(state.guest_buffer_table == 0);
+	const auto index = Binary(state, spv::OpBitwiseAnd, TypeU32(state),
+	                          Binary(state, spv::OpIMul, TypeU32(state), key, ConstantU32(state, 0x9e3779b1u)),
+	                          ConstantU32(state, IR::ImageAtomic64LockCount - 1u));
+	const auto lock = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state, 32), lock, state.guest_buffer_table,
+	                          ConstantU32(state, IR::ImageAtomic64LockSlot), ConstantU32(state, 0), index);
+	const auto device  = ConstantU32(state, spv::ScopeDevice);
+	const auto words   = ConstantU32(state, scope);
+	const auto none    = ConstantU32(state, spv::MemorySemanticsMaskNone);
+	const auto acquire = ConstantU32(state, spv::MemorySemanticsAcquireMask | spv::MemorySemanticsUniformMemoryMask | memory);
+	const auto release = ConstantU32(state, spv::MemorySemanticsReleaseMask | spv::MemorySemanticsUniformMemoryMask | memory);
+	const auto entry       = state.current_label;
+	const auto header      = state.builder.AllocateId();
+	const auto body        = state.builder.AllocateId();
+	const auto locked      = state.builder.AllocateId();
+	const auto after       = state.builder.AllocateId();
+	const auto cont        = state.builder.AllocateId();
+	const auto merge       = state.builder.AllocateId();
+	const auto done        = state.builder.AllocateId();
+	const auto result      = state.builder.AllocateId();
+	const auto done_next   = state.builder.AllocateId();
+	const auto result_next = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpBranch, header);
+
+	EmitLabel(state, header);
+	state.builder.AddFunction(spv::OpPhi, TypeBool(state), done, ConstantBool(state, false), entry, done_next, cont);
+	state.builder.AddFunction(spv::OpPhi, TypeU64(state), result, ConstantU64(state, 0), entry, result_next, cont);
+	state.builder.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, done, merge, body);
+
+	EmitLabel(state, body);
+	const auto previous = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAtomicCompareExchange, TypeU32(state), previous, lock, device, acquire, none,
+	                          ConstantU32(state, 1), ConstantU32(state, 0));
+	const auto got = Binary(state, spv::OpIEqual, TypeBool(state), previous, ConstantU32(state, 0));
+	state.builder.AddFunction(spv::OpSelectionMerge, after, spv::SelectionControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, got, locked, after);
+
+	EmitLabel(state, locked);
+	const auto read = [&](uint32_t pointer) {
+		const auto value = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAtomicOr, TypeU32(state), value, pointer, words, none, ConstantU32(state, 0));
+		return value;
+	};
+	const auto old     = PackU64(state, read(low), read(high));
+	const auto updated = Unary(state, spv::OpBitcast, TypeU32Vector(state, 2), apply(old));
+	for (const auto [pointer, component]: {std::pair {low, 0u}, std::pair {high, 1u}}) {
+		const auto word = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), word, updated, component);
+		const auto previous_word = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAtomicExchange, TypeU32(state), previous_word, pointer, words, none, word);
+	}
+	const auto released = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAtomicExchange, TypeU32(state), released, lock, device, release, ConstantU32(state, 0));
+	const auto locked_exit = state.current_label;
+	state.builder.AddFunction(spv::OpBranch, after);
+
+	EmitLabel(state, after);
+	state.builder.AddFunction(spv::OpPhi, TypeBool(state), done_next, ConstantBool(state, true), locked_exit,
+	                          ConstantBool(state, false), body);
+	state.builder.AddFunction(spv::OpPhi, TypeU64(state), result_next, old, locked_exit, result, body);
+	state.builder.AddFunction(spv::OpBranch, cont);
+
+	EmitLabel(state, cont);
+	state.builder.AddFunction(spv::OpBranch, header);
+
+	EmitLabel(state, merge);
+	return result;
+}
+
+// What a 64-bit atomic writes, from the old value (EmitLockedAtomic64).
+uint32_t Atomic64Result(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t old) {
+	auto&      state = ctx.state;
+	const auto u64   = TypeU64(state);
+	switch (inst.GetOpcode()) {
+		case IR::ValueOpcode::BufferAtomicSwap64: return ctx.Arg(inst, inst.NumArgs() - 2);
+		case IR::ValueOpcode::BufferAtomicAnd64: return Binary(state, spv::OpBitwiseAnd, u64, old, ctx.Arg(inst, inst.NumArgs() - 2));
+		case IR::ValueOpcode::BufferAtomicOr64: return Binary(state, spv::OpBitwiseOr, u64, old, ctx.Arg(inst, inst.NumArgs() - 2));
+		case IR::ValueOpcode::SharedAtomicIAdd64: return Binary(state, spv::OpIAdd, u64, old, ctx.Arg(inst, 1));
+		case IR::ValueOpcode::SharedAtomicOr64: return Binary(state, spv::OpBitwiseOr, u64, old, ctx.Arg(inst, 1));
+		case IR::ValueOpcode::SharedAtomicUMax64:
+			return Select(state, u64, Binary(state, spv::OpUGreaterThan, TypeBool(state), ctx.Arg(inst, 1), old), ctx.Arg(inst, 1), old);
+		case IR::ValueOpcode::SharedAtomicCmpSwap64:
+			// RDNA2 DS compares DATA and stores DATA2.
+			return Select(state, u64, Binary(state, spv::OpIEqual, TypeBool(state), old, ctx.Arg(inst, 1)), ctx.Arg(inst, 2), old);
+		default: ctx.Fail(inst, "is a 64-bit atomic without an emulation");
+	}
+}
+
+} // namespace
+
 uint32_t EmitBufferAtomic64(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto& mem   = ctx.Memory(inst);
 	auto&       state = ctx.state;
+	if (GetHostShaderFeatures().int64_atomics_lock) {
+		return EmitValueOrDefaultIfCondition(state, ctx.Arg(inst, inst.NumArgs() - 1), TypeU64(state), ConstantU64(state, 0), [&]() {
+			const auto resource = PrepareStorageBufferResourceAccess(state, mem, state.storage_buffers[2]);
+			const auto qword    = Binary(state, spv::OpShiftRightLogical, TypeU32(state), ByteAddress(ctx, inst, mem), ConstantU32(state, 3u));
+			const auto low      = Binary(state, spv::OpShiftLeftLogical, TypeU32(state), qword, ConstantU32(state, 1u));
+			const auto high     = Binary(state, spv::OpIAdd, TypeU32(state), low, ConstantU32(state, 1u));
+			return EmitValueOrDefaultIfCondition(state, EmitMemoryElementInBounds(state, resource, high), TypeU64(state),
+			                                     ConstantU64(state, 0), [&]() {
+				                                     const auto pointer = [&](uint32_t dword) {
+					                                     return EmitStorageBufferElementPointer(state, resource, dword,
+					                                                                            TypeStorageBufferElementPointer(state, 32));
+				                                     };
+				                                     return EmitLockedAtomic64(
+				                                         state, Binary(state, spv::OpBitwiseXor, TypeU32(state), qword, ConstantU32(state, 0x51ed270bu)),
+				                                         pointer(low), pointer(high), spv::ScopeDevice, spv::MemorySemanticsUniformMemoryMask,
+				                                         [&](uint32_t old) { return Atomic64Result(ctx, inst, old); });
+			                                     });
+		});
+	}
 	return EmitValueOrDefaultIfCondition(
 	    state, ctx.Arg(inst, inst.NumArgs() - 1), TypeU64(state), ConstantU64(state, 0), [&]() {
 		    const auto resource =
@@ -1605,6 +1726,27 @@ void EmitSharedAtomic64(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto in_bounds = Binary(state, spv::OpULessThan, TypeBool(state), index,
 	                              ConstantU32(state, LdsDwordCount(state) / 2u));
 	const auto active = EmitLogicalAndBool(state, ctx.Arg(inst, inst.NumArgs() - 1), in_bounds);
+	if (GetHostShaderFeatures().int64_atomics_lock) {
+		// Two dwords of the 32-bit view under a lock (EmitLockedAtomic64).
+		const auto emit_locked = [&]() {
+			const auto access = PrepareMemoryResourceAccess(state, mem);
+			const auto low    = Binary(state, spv::OpShiftLeftLogical, TypeU32(state), index, ConstantU32(state, 1u));
+			const auto high   = Binary(state, spv::OpIAdd, TypeU32(state), low, ConstantU32(state, 1u));
+			const bool buffer = state.lds_storage_class == spv::StorageClassStorageBuffer;
+			return EmitLockedAtomic64(
+			    state, Binary(state, spv::OpBitwiseXor, TypeU32(state), index, ConstantU32(state, 0x2545f491u)),
+			    EmitMemoryElementPointer(state, access, low), EmitMemoryElementPointer(state, access, high),
+			    buffer ? spv::ScopeDevice : spv::ScopeWorkgroup,
+			    buffer ? spv::MemorySemanticsUniformMemoryMask : spv::MemorySemanticsWorkgroupMemoryMask,
+			    [&](uint32_t old) { return Atomic64Result(ctx, inst, old); });
+		};
+		if (inst.HasUses()) {
+			ctx.Define(inst, EmitValueOrDefaultIfCondition(state, active, TypeU64(state), ConstantU64(state, 0), emit_locked));
+		} else {
+			EmitIfCondition(state, active, emit_locked);
+		}
+		return;
+	}
 	const auto emit = [&]() {
 		auto native_index = index;
 		auto semantics = spv::MemorySemanticsWorkgroupMemoryMask;
