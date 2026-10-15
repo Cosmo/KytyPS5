@@ -99,6 +99,11 @@ namespace {
 	return (view.type == vk::ImageViewType::e2D || view.type == vk::ImageViewType::eCube) && view.base_layer != 0;
 }
 
+// Whether a resource is on the primary resource's memory: the primary one and those that share it (ImageResource::shared).
+[[nodiscard]] bool OnPrimaryMemory(const ImageBacking& backing, uint32_t resource) {
+	return resource == 0 || backing.resources[resource].shared;
+}
+
 // A 96-bit format: its textures are 128-bit resources (D3D12::GetFormatInfo), and copies between them and buffers widen or narrow
 // each texel (RowCopy::texel_mode). The value the fourth channel gets: 1, as the PS5 reads it.
 [[nodiscard]] bool Expanded96(vk::Format format) {
@@ -266,7 +271,7 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 uint64_t Image::GpuBytes() const {
 	uint64_t bytes = 0;
 	for (const auto& resource: backing.resources) {
-		bytes += resource.allocation->GetSize();
+		bytes += resource.allocation != nullptr ? resource.allocation->GetSize() : 0; // (a shared one has none of its own)
 	}
 	for (const auto& view: backing.views) {
 		bytes += view.copy.allocation != nullptr ? view.copy.allocation->GetSize() : 0;
@@ -295,8 +300,13 @@ Image::~Image() {
 			}
 		}
 	}
-	for (auto& resource: backing.resources) {
-		resource.allocation->Release();
+	// (The shared resources first: they are on the primary one's memory.)
+	for (auto resource = backing.resources.rbegin(); resource != backing.resources.rend(); ++resource) {
+		if (resource->shared) {
+			resource->resource->Release();
+		} else {
+			resource->allocation->Release();
+		}
 	}
 }
 
@@ -345,6 +355,32 @@ uint32_t Image::ResourceIndex(vk::Format view_format) {
 	if (resource.cpu_written) {
 		allocation.CustomPool = m_graphics.cpu_texture_pool;
 	}
+	// Config::SharedFormatAliases: the resource of another family is placed on the primary one's memory, with its description but for the
+	// format, where the texel size is the same, the flags this family needs are among the primary one's, and D3D12 takes it (size and
+	// alignment); otherwise it has memory of its own and gets the contents copied over. D3D12 leaves what one format's resource sees of
+	// another's bytes undefined: the same description but for the format gives the same layout where that works (the Xbox).
+	const bool plain_texels = vk::blockSize(view_format) != 0 && vk::blockExtent(view_format)[0] == 1 &&
+	                          vk::blockExtent(view_format)[1] == 1;
+	if (backing.resources.empty()) {
+		if (Config::SharedFormatAliases() && !resource.cpu_written && plain_texels && backing.planes == 1) {
+			allocation.Flags = D3D12MA::ALLOCATION_FLAG_CAN_ALIAS; // (never a committed resource: aliases need its heap)
+		}
+	} else if (auto& primary = backing.resources[0];
+	           Config::SharedFormatAliases() && !resource.cpu_written && !primary.cpu_written && plain_texels && backing.planes == 1 &&
+	           vk::blockSize(view_format) == vk::blockSize(backing.format) && vk::blockExtent(backing.format)[0] == 1 &&
+	           (desc.Flags & ~backing.resource_flags) == 0 && primary.allocation != nullptr && primary.allocation->GetHeap() != nullptr) {
+		auto shared  = desc;
+		shared.Flags = backing.resource_flags;
+		ID3D12Resource* aliased = nullptr;
+		if (SUCCEEDED(m_graphics.allocator->CreateAliasingResource(primary.allocation, 0, &shared, D3D12_RESOURCE_STATE_COMMON, nullptr,
+		                                                           IID_PPV_ARGS(&aliased)))) {
+			resource.resource = aliased;
+			resource.shared   = true;
+			resource.states.assign(backing.SubresourceCount(), D3D12_RESOURCE_STATE_COMMON);
+			backing.resources.push_back(std::move(resource));
+			return static_cast<uint32_t>(backing.resources.size() - 1);
+		}
+	}
 	const auto result = m_graphics.allocator->CreateResource(&allocation, &desc, initial, nullptr,
 	                                                         &resource.allocation, IID_NULL,
 	                                                         nullptr);
@@ -369,6 +405,21 @@ void Image::Transition(CommandBuffer& command, uint32_t resource, uint32_t state
                        std::optional<ImageSubresourceRange> range) {
 	auto&      target = backing.resources[resource];
 	const auto after  = static_cast<D3D12_RESOURCE_STATES>(state);
+	if (OnPrimaryMemory(backing, resource) && backing.active != resource) {
+		// Another resource on the same memory was used last: the GPU finishes with it and flushes its caches first. The primary
+		// resource's first use (its discard) initializes the memory, so it comes before any other one's, which it would throw away.
+		auto& primary = backing.resources[0];
+		if (primary.needs_discard) {
+			command.Handle()->DiscardResource(primary.resource, nullptr);
+			primary.needs_discard = false;
+		}
+		D3D12_RESOURCE_BARRIER barrier {};
+		barrier.Type                     = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+		barrier.Aliasing.pResourceBefore = backing.resources[backing.active].resource;
+		barrier.Aliasing.pResourceAfter  = target.resource;
+		command.Handle()->ResourceBarrier(1, &barrier);
+		backing.active = resource;
+	}
 	if (target.needs_discard) {
 		// Still in its creation state; the first use initializes the placed resource.
 		command.Handle()->DiscardResource(target.resource, nullptr);
@@ -428,6 +479,16 @@ void Image::Transition(CommandBuffer& command, uint32_t resource, uint32_t state
 void Image::Synchronize(CommandBuffer& command, uint32_t resource) {
 	if (backing.resources[resource].version == backing.version) {
 		return;
+	}
+	// On the primary resource's memory with one that holds the contents: nothing to copy (Transition's aliasing barrier hands the
+	// memory over).
+	if (OnPrimaryMemory(backing, resource)) {
+		for (uint32_t holder = 0; holder < backing.resources.size(); holder++) {
+			if (holder != resource && OnPrimaryMemory(backing, holder) && backing.resources[holder].version == backing.version) {
+				backing.resources[resource].version = backing.version;
+				return;
+			}
+		}
 	}
 	const auto source = backing.current;
 	EXIT_IF(source == resource);
