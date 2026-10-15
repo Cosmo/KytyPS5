@@ -704,24 +704,48 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		index_binding   = PrepareIndexBuffer(buffer, indices);
 	}
 
-	// D3D12 has no feedback loops: a depth target the pixel stage also samples is bound
-	// read-only, so it can be a depth-read target and a shader resource at once.
-	// (The reused pixel bindings are the last pixel shader's when this draw has none.)
-	const bool read_only_depth =
-	    state.ps_active && SamplesDepthTarget(state.depth_info, bindings.pixel);
-	if (read_only_depth) {
-		auto& depth = state.depth_info;
-		if (depth.depth_write_enable || depth.stencil_front.writeMask != 0 ||
-		    depth.stencil_back.writeMask != 0) {
-			static std::atomic_bool warned = false;
-			WarnOnce(warned, "a depth target sampled by the same draw is bound read-only; "
-			                 "its depth and stencil writes are dropped");
-		}
-		depth.depth_write_enable      = false;
-		depth.stencil_front.writeMask = 0;
-		depth.stencil_back.writeMask  = 0;
-	}
+	// D3D12 has no feedback loops. A depth target the pixel stage samples while the draw writes neither depth nor stencil (nor clears
+	// them) is bound read-only, so it can be a depth-read target and a shader resource at once. Any other texture the draw samples from
+	// subresources it renders to reads a copy taken now, before the targets are bound: the image as it was before the draw, as each
+	// pixel reads its own before writing it, while the target stays writable. (The reused pixel bindings are the last pixel shader's
+	// when this draw has none.)
+	const bool read_only_depth = state.ps_active && !state.depth_info.AttachmentWriteAspects() &&
+	                             SamplesDepthTarget(state.depth_info, bindings.pixel);
 	m_read_only_depth = read_only_depth ? state.depth_info.image_id : ImageId {};
+	m_snapshots.clear();
+	for (auto* prepared: stages) {
+		for (const auto& binding: prepared->images) {
+			if (!binding.image_id || binding.desc.type != TextureCache::BindingType::Texture) {
+				continue;
+			}
+			const auto& sampled  = binding.desc.view_info;
+			const auto  overlaps = [&](const ImageViewInfo& target) {
+				return ImageRangeOverlaps(sampled.base_level, sampled.level_count, target.base_level, target.level_count) &&
+				       ImageRangeOverlaps(sampled.base_layer, sampled.layer_count, target.base_layer, target.layer_count);
+			};
+			bool rendered = !read_only_depth && binding.image_id == state.depth_info.image_id &&
+			                overlaps(state.depth_info.desc.view_info);
+			for (uint32_t i = 0; i < state.color_count && !rendered; i++) {
+				rendered = binding.image_id == state.color_info[i].image_id && overlaps(state.color_info[i].desc.view_info);
+			}
+			if (!rendered) {
+				continue;
+			}
+			auto& image = m_context.GetTextureCache().GetImage(binding.image_id);
+			// (The copy is a 2D texture or array: Image::UseCopy.)
+			if (image.backing.image_type == vk::ImageType::e3D ||
+			    !(sampled.type == vk::ImageViewType::e2D ||
+			      (image.backing.samples == 1 && (sampled.type == vk::ImageViewType::e2DArray || sampled.type == vk::ImageViewType::eCube)))) {
+				static std::atomic_bool warned = false;
+				WarnOnce(warned, "a draw samples a target it renders to through a kind of view that has no copy; it reads the target itself");
+				continue;
+			}
+			for (const auto view: binding.mip_views.empty() ? std::span {&binding.image_view, 1} : std::span {binding.mip_views}) {
+				image.UseSnapshot(buffer, view, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+			}
+			m_snapshots.push_back(&binding);
+		}
+	}
 
 	if (emulated_mesh) {
 		// What is drawn is the list of triangles the compute shader wrote.
