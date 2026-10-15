@@ -109,6 +109,8 @@ public:
 	[[nodiscard]] bool SupportsDivergentLaneIndex() const noexcept;
 	// Wave operations that include a pixel shader's helper lanes (shader model 6.7 and later).
 	[[nodiscard]] bool SupportsHelperLanesInWaveOps() const noexcept;
+	// Comparison samples with a bias or gradients (SampleCmpBias, SampleCmpGrad: shader model 6.8 and later).
+	[[nodiscard]] bool SupportsCompareBiasGrad() const noexcept;
 
 	// Identifies the translator: saved translations are only valid for the same one.
 	[[nodiscard]] std::string CacheSignature() const;
