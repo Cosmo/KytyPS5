@@ -238,6 +238,9 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 		const auto& program = *prepared->runtime->program;
 		auto&       images  = prepared->images;
 		for (auto& binding: images) {
+			if (std::ranges::find(m_snapshots, &binding) != m_snapshots.end()) {
+				continue; // (it reads its copy, made readable before the targets were bound: ExecutePreparedDraw)
+			}
 			if (!binding.image_id) {
 				continue; // unbound: a null view below
 			}
@@ -330,7 +333,7 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 				const auto view   = texture.mip_views.empty() ? texture.image_view : texture.mip_views[mip];
 				const auto source = texture.desc.type == TextureCache::BindingType::Storage
 				                        ? image.UnorderedAccessView(view)
-				                        : image.ShaderResourceView(view);
+				                        : image.ShaderResourceView(view, std::ranges::find(m_snapshots, &texture) != m_snapshots.end());
 				device->CopyDescriptorsSimple(1, views.Cpu(start + mip), source,
 				                              D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 			}
@@ -403,6 +406,7 @@ void RenderExecutor::RecordDispatch(CommandBuffer& buffer, const PipelineCache::
 		FrameDump::LogDispatch(DescribeDispatch(pipeline, bindings, fmt::format("groups {}x{}x{}", groups_x, groups_y, groups_z)));
 	}
 	MakeRoomForDescriptors({&pipeline});
+	m_snapshots.clear(); // (the last draw's)
 	// spirv_to_dxil's compute runtime data: group counts, padding, base group.
 	const uint32_t    runtime[7] = {groups_x, groups_y, groups_z, 0, 0, 0, 0};
 	PreparedBindings* stage      = &bindings;
@@ -456,6 +460,7 @@ void RenderExecutor::RecordDispatchIndirect(CommandBuffer&                 buffe
 		FrameDump::LogDispatch(DescribeDispatch(pipeline, bindings, "groups from an indirect buffer"));
 	}
 	MakeRoomForDescriptors({&pipeline});
+	m_snapshots.clear(); // (the last draw's)
 	// spirv_to_dxil reads the group counts from its runtime data. The command signature sets
 	// them from arguments that precede the dispatch's own: [x y z][x y z].
 	constexpr uint64_t CountsSize = 3 * sizeof(uint32_t);
