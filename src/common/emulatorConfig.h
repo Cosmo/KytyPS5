@@ -96,6 +96,9 @@ struct ConfigOptions {
 	bool xbox_gpu_limits_enabled = false;
 	// Debugging: which limits of the DXIL compiler apply with xbox_gpu_limits_enabled: bit 0 shader model 6.4, bit 1 16-bit operations lowered.
 	uint32_t xbox_limits_dxil_parts = 3;
+	// D3D12 build (the Xbox, and a PC with xbox_gpu_limits_enabled): an image's resource for views in a format of another family is placed
+	// on the image's own memory, so the two share their bytes instead of copying them over (d3d12/image.cpp).
+	bool shared_format_aliases = false;
 	// Debugging: save the shaders of the pipeline with this number when it is created (0: none).
 	uint32_t dump_pipeline = 0;
 	// Debugging (D3D12 build): a folder whose DXIL files replace shaders of pipelines when they are created: <size>.ps.dxil replaces the pixel stage
@@ -212,6 +215,7 @@ std::filesystem::path UserDataFolder();
 bool RedZoneProtectionEnabled();
 bool XboxGpuLimitsEnabled();
 uint32_t XboxLimitsDxilParts();
+bool SharedFormatAliases();
 uint32_t DumpPipeline();
 std::filesystem::path ShaderOverrideFolder();
 std::filesystem::path FrameDumpFolder();
