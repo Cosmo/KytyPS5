@@ -115,8 +115,8 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 	if (sampler_count != 0) {
 		// The samplers of all stages in binding order. An array that is also used for depth comparison is declared twice (the second at the comparison
 		// space): the first range holds each sampler without comparison, the second with it, as D3D12 requires of the shader's declaration.
-		std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> handles;
-		handles.reserve(sampler_count);
+		auto& handles = m_sampler_handles;
+		handles.clear();
 		for (auto* prepared: stages) {
 			EXIT_IF(prepared == nullptr || prepared->runtime == nullptr || !*prepared->runtime);
 			const auto& program = *prepared->runtime->program;
