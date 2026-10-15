@@ -225,6 +225,9 @@ private:
 	// The depth target of the draw being recorded while the draw also samples it; its state
 	// is then ReadOnlyDepthState for both uses.
 	ImageId                                m_read_only_depth;
+	// The texture bindings of the draw being recorded that sample subresources it renders to: they read a copy taken before the
+	// draw (Image::UseSnapshot), as D3D12 has no feedback loops.
+	std::vector<const TextureBinding*>     m_snapshots;
 	static constexpr D3D12_RESOURCE_STATES ReadOnlyDepthState =
 	    D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
 	    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;

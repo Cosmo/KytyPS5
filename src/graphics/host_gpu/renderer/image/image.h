@@ -89,8 +89,11 @@ public:
 	// used resource the only current one.
 	void Use(CommandBuffer& command, uint32_t state, std::optional<ImageSubresourceRange> range = {},
 	         std::optional<ImageViewHandle> view = {});
+	// A shader read of `view` from the view's copy, taken now when the image changed since: D3D12 has no feedback loops, so a draw that
+	// samples subresources it renders to reads them as they were before it (ShaderResourceView(view, true) is the copy's view).
+	void UseSnapshot(CommandBuffer& command, ImageViewHandle view, uint32_t state);
 	[[nodiscard]] ID3D12Resource*             Resource(ImageViewHandle view) const;
-	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE ShaderResourceView(ImageViewHandle view);
+	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE ShaderResourceView(ImageViewHandle view, bool snapshot = false);
 	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE UnorderedAccessView(ImageViewHandle view);
 	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE RenderTargetView(ImageViewHandle view);
 	// A read-only view lets the image be sampled while it is the depth target.
