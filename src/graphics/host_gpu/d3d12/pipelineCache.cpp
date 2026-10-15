@@ -431,6 +431,10 @@ void RootLayout::Add(const IR::CompiledShaderInfo& program, bool program_runtime
 	if (ShaderRecompiler::GetHostShaderFeatures().image_atomic64_lock) {
 		guest_table = guest_table || std::ranges::any_of(program.info.images, [](const IR::ImageResource& image) { return image.atomic64; });
 	}
+	// (So are those of 64-bit buffer and group shared memory atomics.)
+	if (ShaderRecompiler::GetHostShaderFeatures().int64_atomics_lock) {
+		guest_table = guest_table || program.info.buffer_int64_atomics || program.info.shared_int64_atomics;
+	}
 	// The bindings in kind order, each sized as the SPIR-V emitter's DefineDescriptors declares
 	// it: buffers, images and samplers are arrays, every other kind is a single descriptor.
 	for (auto mask = program.bindings.descriptor_mask; mask != 0; mask &= mask - 1) {
@@ -517,6 +521,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	// 64-bit image atomics under a lock; they would need shader model 6.6 and its typed 64-bit atomics. (The lock words are in the
 	// guest buffer table.)
 	features.image_atomic64_lock = features.guest_pointer_table;
+	features.int64_atomics_lock  = features.guest_pointer_table; // (buffers and group shared memory, likewise)
 	ShaderRecompiler::SetHostShaderFeatures(features);
 #if defined(KYTY_PLATFORM_UWP)
 	// Constant-alpha blend factors fail at pipeline creation on the Xbox (E_INVALIDARG, guard G4): the constant color factors stand in.
