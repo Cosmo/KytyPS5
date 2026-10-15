@@ -37,6 +37,9 @@ struct ImageResource {
 	uint64_t                           version = 0; // contents are current when equal to the image's
 	// In CPU-visible memory, written by the CPU (GraphicContext::cpu_written_block_arrays).
 	bool                               cpu_written = false;
+	// Placed on the memory of resources[0], with its description in another family's format (Config::SharedFormatAliases): the two
+	// hold the same bytes, and switching from one to the other is an aliasing barrier. `allocation` is null; the resource is its own.
+	bool                               shared = false;
 };
 
 // The descriptors of one view, created when first needed. The shared view cache normalizes
@@ -57,7 +60,8 @@ struct ImageViewDescriptors {
 
 // The host resources of an image. D3D12 views must share their resource's format family, so an
 // image viewed in formats of other families keeps one resource per family and copies between
-// them when a different family is used (resources[0] is the primary one).
+// them when a different family is used (resources[0] is the primary one), unless the resource
+// shares the primary one's memory (ImageResource::shared).
 struct ImageBacking {
 	ImageBacking() = default;
 	KYTY_CLASS_NO_COPY(ImageBacking);
@@ -78,6 +82,7 @@ struct ImageBacking {
 	std::vector<ImageViewDescriptors> views;
 	uint64_t                   version = 1; // bumped by every write to the current resource
 	uint32_t                   current = 0; // resource holding the latest contents
+	uint32_t                   active  = 0; // of the resources on the primary one's memory, the one the GPU used last (Image::Transition)
 
 	[[nodiscard]] uint32_t Subresource(uint32_t level, uint32_t layer, uint32_t plane) const {
 		const uint32_t array_size = image_type == vk::ImageType::e3D ? 1u : layers;
