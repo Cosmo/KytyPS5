@@ -359,10 +359,6 @@ uint32_t PackedOffset(ValueEmitContext& ctx, IR::Value value, ImageDimension dim
 	return result;
 }
 
-// Without maintenance8 a sample's texel offset must be a constant (HostShaderFeatures::sample_offset_by_coordinates). An offset the
-// shader computes moves the coordinates instead, by offset / the size of the mip level the sample reads: exact for that level (the
-// second level of a trilinear sample is off by less than half a texel). The level comes from the sample's LOD, or from its gradients.
-// A sample whose level the GPU picks takes the coordinates' own gradients explicitly, so that the moved coordinates keep its level.
 // HostShaderFeatures::unnormalized_samplers_in_shader: texel positions (the sampler's FORCE_UNNORMALIZED) become normalized
 // coordinates, divided by the size of the image's first level; an array layer stays as it is.
 void NormalizeTexelCoordinates(ValueEmitContext& ctx, const IR::Inst& inst, const IR::ImageResource& candidate,
@@ -410,6 +406,36 @@ void NormalizeTexelCoordinates(ValueEmitContext& ctx, const IR::Inst& inst, cons
 	coord = result;
 }
 
+// HostShaderFeatures::sample_compare_without_bias_grad: a comparison sample loses its bias or gradients and samples at the level the
+// hardware picks in a pixel shader, at level 0 elsewhere; its other image operands (offsets) stay.
+void CompareWithoutBiasGrad(EmitterState& state, spv::Op& opcode, std::array<uint32_t, 5>& operands, size_t& count) {
+	constexpr uint32_t Removed = static_cast<uint32_t>(spv::ImageOperandsBiasMask) | static_cast<uint32_t>(spv::ImageOperandsGradMask);
+	if (count == 0 || (operands[0] & Removed) == 0) {
+		return;
+	}
+	const bool              pixel = state.program.stage == ShaderType::Pixel;
+	const uint32_t          mask  = operands[0];
+	std::array<uint32_t, 5> kept {};
+	size_t                  next = 1;
+	kept[0]                      = mask & ~Removed;
+	if (!pixel) {
+		kept[0] |= spv::ImageOperandsLodMask;
+		kept[next++] = ZeroF32(state);
+	}
+	// (The operands follow the mask in the order of its bits: the bias or the two gradients come before the offsets.)
+	for (size_t source = 1 + ((mask & spv::ImageOperandsBiasMask) != 0 ? 1u : 0u) + ((mask & spv::ImageOperandsGradMask) != 0 ? 2u : 0u);
+	     source < count; source++) {
+		kept[next++] = operands[source];
+	}
+	operands = kept;
+	count    = kept[0] == 0 ? 0 : next;
+	opcode   = pixel ? spv::OpImageSampleDrefImplicitLod : spv::OpImageSampleDrefExplicitLod;
+}
+
+// Without maintenance8 a sample's texel offset must be a constant (HostShaderFeatures::sample_offset_by_coordinates). An offset the
+// shader computes moves the coordinates instead, by offset / the size of the mip level the sample reads: exact for that level (the
+// second level of a trilinear sample is off by less than half a texel). The level comes from the sample's LOD, or from its gradients.
+// A sample whose level the GPU picks takes the coordinates' own gradients explicitly, so that the moved coordinates keep its level.
 void MoveCoordinatesByOffset(ValueEmitContext& ctx, const IR::Inst& inst, const IR::ImageResource& candidate,
                              uint32_t resource, uint32_t array_index, IR::Value offset_value, uint32_t& coord,
                              spv::Op& opcode, std::array<uint32_t, 5>& operands, size_t& operand_count) {
@@ -1405,8 +1431,14 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				MoveCoordinatesByOffset(ctx, inst, candidate, resource, array_index, offset_value, coord,
 				                        sample_opcode, sample_operands, sample_operand_count);
 			}
-			// MinLod follows the offset in operand order (after the move above, which keeps only the operands it knows).
-			if (min_lod != 0) {
+			if (dref && GetHostShaderFeatures().sample_compare_without_bias_grad) {
+				CompareWithoutBiasGrad(state, sample_opcode, sample_operands, sample_operand_count);
+			}
+			// MinLod follows the offset in operand order (after the rewrites above, which keep only the operands they know);
+			// an explicit LOD they leave takes the clamp itself.
+			if (min_lod != 0 && sample_operand_count != 0 && (sample_operands[0] & spv::ImageOperandsLodMask) != 0) {
+				sample_operands[1] = EmitGlsl<GLSLstd450FMax, IR::Type::F32>(state, sample_operands[1], min_lod);
+			} else if (min_lod != 0) {
 				state.builder.RequireCapability(spv::CapabilityMinLod);
 				sample_operand_count = std::max(size_t{1}, sample_operand_count);
 				sample_operands[0] |= spv::ImageOperandsMinLodMask;
