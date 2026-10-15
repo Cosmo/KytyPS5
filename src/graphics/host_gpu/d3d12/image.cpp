@@ -286,6 +286,7 @@ Image::~Image() {
 		for (const auto& view: backing.views) {
 			const std::pair<D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_DESCRIPTOR_HEAP_TYPE> descriptors[] {
 			    {view.srv, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV},
+			    {view.copy_srv, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV},
 			    {view.uav, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV},
 			    {view.rtv, D3D12_DESCRIPTOR_HEAP_TYPE_RTV},
 			    {view.dsv, D3D12_DESCRIPTOR_HEAP_TYPE_DSV},
@@ -658,10 +659,17 @@ ID3D12Resource* Image::Resource(ImageViewHandle view) const {
 	return backing.resources[backing.views[view.index].resource].resource;
 }
 
-D3D12_CPU_DESCRIPTOR_HANDLE Image::ShaderResourceView(ImageViewHandle handle) {
+void Image::UseSnapshot(CommandBuffer& command, ImageViewHandle handle, uint32_t state) {
 	auto& view = backing.views[handle.index];
-	if (view.srv.ptr != 0) {
-		return view.srv;
+	Synchronize(command, view.resource);
+	UseCopy(command, view, state);
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE Image::ShaderResourceView(ImageViewHandle handle, bool snapshot) {
+	auto&      view      = backing.views[handle.index];
+	const bool from_copy = snapshot || CopiedView(backing, view.info);
+	if (const auto cached = from_copy ? view.copy_srv : view.srv; cached.ptr != 0) {
+		return cached;
 	}
 	const auto& info       = view.info;
 	const auto  image      = D3D12::GetFormatInfo(backing.format);
@@ -677,7 +685,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE Image::ShaderResourceView(ImageViewHandle handle) {
 	                                                         : format.mapping);
 	const float min_lod = static_cast<float>(info.base_level) + static_cast<float>(info.min_lod) / 256.0f;
 	const UINT  plane   = stencil ? 1 : 0;
-	if (CopiedView(backing, info)) {
+	if (from_copy) {
 		// The view's copy (UseCopy made it before the first draw that reads it): its first level and layer are the view's.
 		EXIT_IF(view.copy.resource == nullptr);
 		const float copy_min_lod = static_cast<float>(info.min_lod) / 256.0f;
@@ -704,9 +712,9 @@ D3D12_CPU_DESCRIPTOR_HANDLE Image::ShaderResourceView(ImageViewHandle handle) {
 				desc.Texture2DArray.ResourceMinLODClamp = copy_min_lod;
 				break;
 		}
-		view.srv = m_scheduler.Context().GetDescriptorHeap().AllocateCpu(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		m_graphics.device->CreateShaderResourceView(view.copy.resource, &desc, view.srv);
-		return view.srv;
+		view.copy_srv = m_scheduler.Context().GetDescriptorHeap().AllocateCpu(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		m_graphics.device->CreateShaderResourceView(view.copy.resource, &desc, view.copy_srv);
+		return view.copy_srv;
 	}
 	switch (info.type) {
 		case vk::ImageViewType::e1D:
