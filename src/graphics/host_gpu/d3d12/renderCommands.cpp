@@ -205,13 +205,12 @@ void SetViewports(const CommandBuffer& buffer, ID3D12GraphicsCommandList* list,
 			w = static_cast<float>(MaxTargetExtent);
 			y_center = y_scale = static_cast<float>(MaxTargetExtent) / 2.0f;
 		}
+		// One Y flip bit per viewport: the last vertex stage takes the bit of the viewport it writes (the spirv_to_dxil patch).
 		const bool flip = y_scale >= 0.0f;
 		if (i == 0) {
-			runtime.yz_flip_mask = flip ? 1u : 0u;
-		} else if (flip != (runtime.yz_flip_mask != 0)) {
-			static std::atomic_bool warned = false;
-			WarnOnce(warned, "viewports with different Y directions are unsupported");
+			runtime.yz_flip_mask = 0;
 		}
+		runtime.yz_flip_mask |= (flip ? 1u : 0u) << i;
 		out.TopLeftX = x;
 		out.Width    = w;
 		out.TopLeftY = flip ? y_center - y_scale : y_center + y_scale;
