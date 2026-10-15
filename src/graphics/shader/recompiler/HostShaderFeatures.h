@@ -47,6 +47,10 @@ struct HostShaderFeatures {
 	// Samplers with unnormalized coordinates (texel positions), which D3D12 has none of: the shader divides the coordinates by the
 	// size of the image's first level (ResourceSpecialization::unnormalized_samplers) and samples with a normalized sampler.
 	bool unnormalized_samplers_in_shader = false;
+	// Comparison samples with a bias or gradients, which D3D12 has from shader model 6.8 only (spirv_to_dxil below it drops the
+	// comparison and returns the depth): pixel shaders sample them at the level the hardware picks, other stages at level 0. Exact for
+	// depth textures of one level, the usual shadow maps; with more levels the bias or gradients no longer move the level.
+	bool sample_compare_without_bias_grad = false;
 };
 
 void                                    SetHostShaderFeatures(const HostShaderFeatures& features);
