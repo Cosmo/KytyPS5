@@ -572,13 +572,11 @@ void PipelineCache::InitializeDiskCache() {
 	// kept, the translated shaders are.
 	if (std::string_view(m_graphics.DeviceName()).starts_with("SraKmd")) {
 		m_cache_file.Log("pipeline library off (this driver removes the device with one)");
-		InitializeBlobs();
 		return;
 	}
 	D3D12::ComPtr<ID3D12Device1> device;
 	if (FAILED(m_graphics.device->QueryInterface(IID_PPV_ARGS(&device)))) {
 		m_cache_file.Log("pipeline libraries are not supported");
-		InitializeBlobs();
 		return;
 	}
 	auto result = device->CreatePipelineLibrary(
@@ -594,121 +592,10 @@ void PipelineCache::InitializeDiskCache() {
 	if (FAILED(result)) {
 		m_cache_file.Log("pipeline library disabled (0x{:08x})", static_cast<uint32_t>(result));
 		m_library.Reset();
-		InitializeBlobs();
 		return;
 	}
 	if (!m_library_data.empty()) {
 		m_cache_file.Log("loaded {} bytes of pipelines", m_library_data.size());
-	}
-}
-
-namespace {
-
-// The blobs in the library's part of the cache file: "KBL1", a u64 count, then per pipeline a u32 name length (UTF-16 units), the
-// name, a u64 size and the blob.
-constexpr uint32_t BlobsMagic = 0x314c424bu;
-
-[[nodiscard]] std::string BlobProbeSignature(const GraphicContext& graphics) {
-	return fmt::format("KytyD3D12BlobProbe1:{}\n", graphics.DeviceName());
-}
-
-} // namespace
-
-void PipelineCache::SetBlobProbe(std::string_view state) {
-	(void)m_probe_file.Save(BlobProbeSignature(m_graphics), {reinterpret_cast<const uint8_t*>(state.data()), state.size()});
-}
-
-void PipelineCache::InitializeBlobs() {
-	m_probe_file = PipelineCacheFile("D3D12 pipeline blobs", ".d3d12probe.bin");
-	const auto data = std::move(m_library_data);
-	m_library_data.clear();
-	if (!m_probe_file.Enabled()) {
-		return;
-	}
-	const auto        probe = m_probe_file.Load(BlobProbeSignature(m_graphics));
-	const std::string state(probe.begin(), probe.end());
-	if (state == "running") {
-		m_probe_file.Log("an earlier start ended while this driver kept a pipeline's compiled code for the first time: kept off");
-		SetBlobProbe("off");
-		return;
-	}
-	if (state == "off") {
-		m_probe_file.Log("off (this driver does not take them)");
-		return;
-	}
-	m_blobs_enabled    = true;
-	m_blobs_known_good = state == "works";
-	size_t     offset  = 0;
-	const auto read    = [&](void* value, size_t size) {
-		if (offset + size > data.size()) {
-			return false;
-		}
-		std::memcpy(value, data.data() + offset, size);
-		offset += size;
-		return true;
-	};
-	uint32_t magic = 0;
-	uint64_t count = 0;
-	if (!read(&magic, sizeof(magic)) || magic != BlobsMagic || !read(&count, sizeof(count))) {
-		return;
-	}
-	for (uint64_t i = 0; i < count; i++) {
-		uint32_t length = 0;
-		uint64_t size   = 0;
-		if (!read(&length, sizeof(length)) || offset + uint64_t {length} * sizeof(wchar_t) > data.size()) {
-			break;
-		}
-		std::wstring name(length, L'\0');
-		(void)read(name.data(), length * sizeof(wchar_t));
-		if (!read(&size, sizeof(size)) || offset + size > data.size()) {
-			break;
-		}
-		m_blobs[name].assign(data.begin() + static_cast<ptrdiff_t>(offset), data.begin() + static_cast<ptrdiff_t>(offset + size));
-		offset += size;
-	}
-	m_probe_file.Log("loaded the compiled code of {} pipelines", m_blobs.size());
-}
-
-ID3D12PipelineState* PipelineCache::CreateWithBlob(const D3D12_PIPELINE_STATE_STREAM_DESC& desc, std::span<const uint8_t> blob) {
-	using CachedPso   = StreamSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO, D3D12_CACHED_PIPELINE_STATE>;
-	const auto offset = (desc.SizeInBytes + alignof(CachedPso) - 1) & ~(alignof(CachedPso) - 1);
-	std::vector<uint64_t> stream((offset + sizeof(CachedPso) + sizeof(uint64_t) - 1) / sizeof(uint64_t)); // (8-byte aligned)
-	std::memcpy(stream.data(), desc.pPipelineStateSubobjectStream, desc.SizeInBytes);
-	CachedPso cached;
-	cached.value = {blob.data(), blob.size()};
-	std::memcpy(reinterpret_cast<uint8_t*>(stream.data()) + offset, &cached, sizeof(cached));
-	const D3D12_PIPELINE_STATE_STREAM_DESC with_blob {offset + sizeof(CachedPso), stream.data()};
-	ID3D12PipelineState* pipeline = nullptr;
-	return SUCCEEDED(m_device->CreatePipelineState(&with_blob, IID_PPV_ARGS(&pipeline))) ? pipeline : nullptr;
-}
-
-void PipelineCache::KeepBlob(const std::wstring& name, const D3D12_PIPELINE_STATE_STREAM_DESC& desc, ID3D12PipelineState* pipeline) {
-	if (!m_blobs_known_good) {
-		// The first time with this driver (its pipeline library removes the Xbox's device): a start that ends here leaves the marker.
-		SetBlobProbe("running");
-	}
-	D3D12::ComPtr<ID3DBlob> blob;
-	const bool              got = SUCCEEDED(pipeline->GetCachedBlob(&blob)) && blob != nullptr && blob->GetBufferSize() != 0;
-	const std::span bytes = got ? std::span {static_cast<const uint8_t*>(blob->GetBufferPointer()), blob->GetBufferSize()}
-	                            : std::span<const uint8_t> {};
-	if (!m_blobs_known_good) {
-		// The round trip: the code back into a new pipeline.
-		auto* check = got ? CreateWithBlob(desc, bytes) : nullptr;
-		const bool works = check != nullptr && SUCCEEDED(m_device->GetDeviceRemovedReason());
-		if (check != nullptr) {
-			check->Release();
-		}
-		SetBlobProbe(works ? "works" : "off");
-		m_probe_file.Log("{}", works ? "this driver takes them" : "off (this driver does not take them)");
-		m_blobs_known_good = works;
-		m_blobs_enabled    = works;
-		if (!works) {
-			m_blobs.clear();
-			return;
-		}
-	}
-	if (got) {
-		m_blobs[name].assign(bytes.begin(), bytes.end());
 	}
 }
 
@@ -734,23 +621,6 @@ void PipelineCache::Save() {
 		if (FAILED(m_library->Serialize(payload.data() + offset, library_size))) {
 			m_cache_file.Log("failed to serialize the pipeline library");
 			payload.resize(offset);
-		}
-	} else if (m_blobs_enabled) {
-		// (InitializeBlobs reads them back.)
-		const auto append = [&](const void* data, size_t bytes) {
-			const auto* begin = static_cast<const uint8_t*>(data);
-			payload.insert(payload.end(), begin, begin + bytes);
-		};
-		const uint64_t count = m_blobs.size();
-		append(&BlobsMagic, sizeof(BlobsMagic));
-		append(&count, sizeof(count));
-		for (const auto& [name, blob]: m_blobs) {
-			const auto     length = static_cast<uint32_t>(name.size());
-			const uint64_t bytes  = blob.size();
-			append(&length, sizeof(length));
-			append(name.data(), name.size() * sizeof(wchar_t));
-			append(&bytes, sizeof(bytes));
-			append(blob.data(), blob.size());
 		}
 	}
 	m_cache_file.Log("saving {} bytes of translated shaders and {} pipelines ({} were loaded)",
@@ -832,14 +702,6 @@ ID3D12PipelineState* PipelineCache::LoadOrCreate(const std::wstring&            
 		m_loaded_pipelines++;
 		return pipeline;
 	}
-	if (const auto found = m_blobs_enabled ? m_blobs.find(name) : m_blobs.end(); found != m_blobs.end()) {
-		pipeline = CreateWithBlob(desc, found->second);
-		if (pipeline != nullptr) {
-			m_loaded_pipelines++;
-			return pipeline;
-		}
-		m_blobs.erase(found); // (e.g. another driver version: compiled and kept anew below)
-	}
 	const HRESULT result = m_device->CreatePipelineState(&desc, IID_PPV_ARGS(&pipeline));
 	if (FAILED(result)) {
 		// The device's limits are the usual reason (the Xbox's UWP games get feature level 11.0). The pipeline is skipped, its shaders' required features
@@ -856,9 +718,6 @@ ID3D12PipelineState* PipelineCache::LoadOrCreate(const std::wstring&            
 		                                      static_cast<uint32_t>(result),
 		                                      D3D12::SaveShaderDump(fmt::format("rejected_pipeline_{}", ++m_rejected_pipelines), dxil, {}), report));
 		return nullptr;
-	}
-	if (m_blobs_enabled) {
-		KeepBlob(name, desc, pipeline);
 	}
 	// Fails only for a name already stored, which then describes another pipeline: the file
 	// wouldn't change, so that's no reason to save it.
