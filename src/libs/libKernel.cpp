@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <random>
 #include <string>
 #include <thread>
@@ -1032,6 +1033,76 @@ static NtQueueApcThreadExFunc GetNtQueueApcThreadEx() {
 	return nt_queue_apc_thread_ex;
 }
 
+// The APC that delivers a signal interrupts its thread anywhere, also inside a Windows lock or wait. Code that waits or allocates there
+// (creating a thread does both) can take the wake-up meant for the interrupted wait, and the thread then sleeps for good: a game whose
+// garbage collector stops all threads waited for such a thread forever. So for a thread in host code the APC only hands the signal over,
+// through a ring of slots and an event, to the dispatcher thread, which runs the handler on a helper thread standing in for it.
+struct SignalRequest {
+	std::atomic<uint32_t>    state {0}; // 0 free, 1 being written, 2 ready, 3 being read
+	Pthread                  thread  = nullptr;
+	int                      signum  = 0;
+	exception_handler_func_t handler = nullptr;
+	SignalUcontext           ctx     = {};
+};
+
+constexpr uint32_t                                   SignalRequestCount = 256;
+static std::array<SignalRequest, SignalRequestCount> g_signal_requests;
+static std::atomic<uint32_t>                         g_signal_request_next {0};
+static HANDLE                                        g_signal_request_event = nullptr;
+
+static void SignalDispatcherThread() {
+	for (;;) {
+		WaitForSingleObject(g_signal_request_event, INFINITE);
+		for (auto& slot: g_signal_requests) {
+			uint32_t expected = 2;
+			if (!slot.state.compare_exchange_strong(expected, 3, std::memory_order_acquire)) {
+				continue;
+			}
+			auto*      thread  = slot.thread;
+			const auto signum  = slot.signum;
+			auto*      handler = slot.handler;
+			auto       ctx     = slot.ctx;
+			slot.state.store(0, std::memory_order_release);
+			std::thread([thread, signum, handler, ctx]() mutable {
+				SignalDispatchScope helper_scope;
+				auto*               previous_self = PthreadSwapSelfForSignal(thread);
+				handler(signum, &ctx);
+				PthreadSwapSelfForSignal(previous_self);
+			}).detach();
+		}
+	}
+}
+
+// Started by the thread that raises the first signal (never in an APC).
+static void StartSignalDispatcher() {
+	static std::once_flag started;
+	std::call_once(started, [] {
+		g_signal_request_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+		EXIT_IF(g_signal_request_event == nullptr);
+		std::thread(SignalDispatcherThread).detach();
+	});
+}
+
+// In the APC: no waits, no allocations.
+static void HandOverSignal(Pthread thread, int signum, exception_handler_func_t handler, const SignalUcontext& ctx) {
+	for (uint32_t tries = 0; tries < SignalRequestCount; tries++) {
+		auto&    slot     = g_signal_requests[g_signal_request_next.fetch_add(1, std::memory_order_relaxed) % SignalRequestCount];
+		uint32_t expected = 0;
+		if (!slot.state.compare_exchange_strong(expected, 1, std::memory_order_acquire)) {
+			continue;
+		}
+		slot.thread  = thread;
+		slot.signum  = signum;
+		slot.handler = handler;
+		slot.ctx     = ctx;
+		slot.state.store(2, std::memory_order_release);
+		SetEvent(g_signal_request_event);
+		return;
+	}
+	// All slots taken: the thread takes the signal at its next poll.
+	PthreadQueuePendingSignal(thread, signum);
+}
+
 static void SignalApcHandler(void* arg1, void* arg2, void* /*arg3*/, PCONTEXT context) {
 	auto*      thread = static_cast<Pthread>(arg1);
 	const auto signum = static_cast<int>(reinterpret_cast<intptr_t>(arg2));
@@ -1046,12 +1117,7 @@ static void SignalApcHandler(void* arg1, void* arg2, void* /*arg3*/, PCONTEXT co
 		auto                guest_context = IsGuestCodeAddress(ctx.uc_mcontext.mc_rip);
 		if (!guest_context) {
 			SanitizeNonGuestSignalUcontext(&ctx, thread);
-			std::thread([thread, signum, handler, ctx]() mutable {
-				SignalDispatchScope helper_scope;
-				auto*               previous_self = PthreadSwapSelfForSignal(thread);
-				handler(signum, &ctx);
-				PthreadSwapSelfForSignal(previous_self);
-			}).detach();
+			HandOverSignal(thread, signum, handler, ctx);
 			return;
 		}
 		handler(signum, &ctx);
@@ -1148,6 +1214,7 @@ static int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum) {
 			return KERNEL_ERROR_EINVAL;
 		}
 
+		StartSignalDispatcher();
 		PthreadQueuePendingSignal(thread, signum);
 		KytyUserApcOption option {};
 		option.UserApcFlags = KytyQueueUserApcFlagsSpecialUserApc;
