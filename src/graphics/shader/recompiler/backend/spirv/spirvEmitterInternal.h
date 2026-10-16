@@ -361,6 +361,12 @@ uint32_t ImageVectorType(EmitterState& state, Prospero::TextureNumericClass nume
 
 uint32_t ImageType(EmitterState& state, const IR::ImageResource& image);
 
+// Whether `image` is declared as an array of its dimension (HostShaderFeatures::storage_images_as_arrays): a 1D or 2D storage
+// image, whose accesses then add layer 0 to their coordinates (StorageCoordinates).
+[[nodiscard]] bool StorageImageAsArray(const IR::ImageResource& image);
+// The coordinates `coord` of an access to the storage image `image` (CoordU32), with layer 0 where it is declared as an array.
+[[nodiscard]] uint32_t StorageCoordinates(EmitterState& state, const IR::ImageResource& image, uint32_t coord);
+
 uint32_t ImageViewSizeType(EmitterState& state, ImageDimension dimension);
 
 uint32_t ImageDescriptorPointer(EmitterState& state, uint32_t resource, uint32_t mip = 0,
