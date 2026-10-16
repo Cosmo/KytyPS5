@@ -519,6 +519,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	features.vertex_formats_as_integers   = true; // scaled and 10:10:10:2 SNORM vertex input (D3D12::VertexFormat)
 	features.unnormalized_samplers_in_shader = true; // D3D12 samplers have no unnormalized coordinates
 	features.sample_compare_without_bias_grad = !m_compiler.SupportsCompareBiasGrad();
+	features.storage_images_as_arrays         = true; // (a 1D or 2D storage view starts at the first layer: Image::UnorderedAccessView)
 	// 64-bit image atomics under a lock; they would need shader model 6.6 and its typed 64-bit atomics. (The lock words are in the
 	// guest buffer table.)
 	features.image_atomic64_lock = features.guest_pointer_table;

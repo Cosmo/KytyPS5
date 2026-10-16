@@ -51,6 +51,10 @@ struct HostShaderFeatures {
 	// comparison and returns the depth): pixel shaders sample them at the level the hardware picks, other stages at level 0. Exact for
 	// depth textures of one level, the usual shadow maps; with more levels the bias or gradients no longer move the level.
 	bool sample_compare_without_bias_grad = false;
+	// Storage images of one or two dimensions are declared as arrays of them and written at layer 0 of the view: a D3D12 storage
+	// view of a plain 1D or 2D image starts at the image's first layer, and games write later layers of arrays through such views
+	// (the host's view is then an array view of the one layer).
+	bool storage_images_as_arrays = false;
 };
 
 void                                    SetHostShaderFeatures(const HostShaderFeatures& features);
