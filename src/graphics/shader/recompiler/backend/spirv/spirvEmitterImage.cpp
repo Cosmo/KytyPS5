@@ -618,7 +618,8 @@ uint32_t EmitLockedImageAtomic64(ValueEmitContext& ctx, const IR::Inst& inst, co
 	EmitLabel(state, locked);
 	const auto texels = LoadImageDescriptor(state, mem.resource);
 	const auto texel  = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpImageRead, TypeU32Vector(state, 4), texel, texels, coord);
+	const auto at     = StorageCoordinates(state, image, coord);
+	state.builder.AddFunction(spv::OpImageRead, TypeU32Vector(state, 4), texel, texels, at);
 	const auto low  = state.builder.AllocateId();
 	const auto high = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low, texel, 0u);
@@ -633,7 +634,7 @@ uint32_t EmitLockedImageAtomic64(ValueEmitContext& ctx, const IR::Inst& inst, co
 	const auto written = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), written, word0, word1,
 	                          ConstantU32(state, 0), ConstantU32(state, 0));
-	state.builder.AddFunction(spv::OpImageWrite, texels, coord, written);
+	state.builder.AddFunction(spv::OpImageWrite, texels, at, written);
 	const auto released = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAtomicExchange, TypeU32(state), released, lock, scope, release, ConstantU32(state, 0));
 	const auto locked_exit = state.current_label;
@@ -1233,7 +1234,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				selected.resource = resource;
 				const auto mip_lod = candidate.mip_mode == IR::ImageMipMode::Dynamic
 				    ? LodU32(ctx, mem, *address, mem.image_dimension) : 0u;
-				const auto coord = CoordU32(ctx, mem, *address, candidate.dimension);
+				const auto coord = StorageCoordinates(state, candidate, CoordU32(ctx, mem, *address, candidate.dimension));
 				const auto texel = StoreTexel(ctx, selected, ctx.Arg(inst, 2),
 				    candidate.numeric_class == Prospero::TextureNumericClass::Uint);
 				EmitStorageImageWrite(state, resource, mip_lod, coord, texel, array_index);
@@ -1424,7 +1425,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			                                  image.atomic64 ? TypeU64(state) : TypeU32(state));
 			           state.builder.AddFunction(spv::OpImageTexelPointer, pointer_type, pointer,
 			                                     ImageDescriptorPointer(state, mem.resource),
-			                                     CoordU32(ctx, mem, *address, dimension),
+			                                     StorageCoordinates(state, image, CoordU32(ctx, mem, *address, dimension)),
 			                                     ConstantU32(state, 0));
 			           if (op == IR::ValueOpcode::ImageAtomicFMin32 ||
 			               op == IR::ValueOpcode::ImageAtomicFMax32) {
