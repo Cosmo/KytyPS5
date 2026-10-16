@@ -92,8 +92,9 @@ void WriteNullImageView(ID3D12Device* device, const IR::ImageResource& resource,
 	if (storage) {
 		D3D12_UNORDERED_ACCESS_VIEW_DESC desc {};
 		desc.Format = format;
+		// (Shaders declare 1D and 2D storage images as arrays: HostShaderFeatures::storage_images_as_arrays.)
 		switch (resource.dimension) {
-			case Dimension::Dim1D: desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1D; break;
+			case Dimension::Dim1D:
 			case Dimension::Dim1DArray:
 				desc.ViewDimension            = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
 				desc.Texture1DArray.ArraySize = 1;
@@ -102,12 +103,10 @@ void WriteNullImageView(ID3D12Device* device, const IR::ImageResource& resource,
 				desc.ViewDimension   = D3D12_UAV_DIMENSION_TEXTURE3D;
 				desc.Texture3D.WSize = 1;
 				break;
-			case Dimension::Dim2DArray:
-			case Dimension::Dim2DMsaaArray:
+			default:
 				desc.ViewDimension            = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
 				desc.Texture2DArray.ArraySize = 1;
 				break;
-			default: desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; break;
 		}
 		device->CreateUnorderedAccessView(nullptr, nullptr, &desc, destination);
 		return;

@@ -132,11 +132,14 @@ uint32_t ImageType(EmitterState& state, const IR::ImageResource& image) {
 	} else {
 		EXIT("invalid image resource class");
 	}
+	const auto  dimension = !StorageImageAsArray(image)                ? image.dimension
+	                        : image.dimension == ImageDimension::Dim1D ? ImageDimension::Dim1DArray
+	                                                                   : ImageDimension::Dim2DArray;
 	if (image.dimension == ImageDimension::Dim1D || image.dimension == ImageDimension::Dim1DArray) {
 		state.builder.RequireCapability(sampled == 1 ? spv::CapabilitySampled1D
 		                                             : spv::CapabilityImage1D);
 	}
-	const auto& info = ImageDimensionInfoFor(image.dimension);
+	const auto& info = ImageDimensionInfoFor(dimension);
 	if (sampled == 2 && info.multisampled != 0u) {
 		state.builder.RequireCapability(spv::CapabilityStorageImageMultisample);
 	}
@@ -146,6 +149,29 @@ uint32_t ImageType(EmitterState& state, const IR::ImageResource& image) {
 	return state.builder.Type(spv::OpTypeImage, scalar_type,
 	                          info.spirv_dimension, image.depth_compare ? 1u : 0u, info.arrayed,
 	                          info.multisampled, sampled, format);
+}
+
+bool StorageImageAsArray(const IR::ImageResource& image) {
+	return GetHostShaderFeatures().storage_images_as_arrays && image.resource_class == IR::ImageResourceClass::Storage &&
+	       (image.dimension == ImageDimension::Dim1D || image.dimension == ImageDimension::Dim2D);
+}
+
+uint32_t StorageCoordinates(EmitterState& state, const IR::ImageResource& image, uint32_t coord) {
+	if (!StorageImageAsArray(image)) {
+		return coord;
+	}
+	const auto zero   = ConstantU32(state, 0);
+	const auto result = state.builder.AllocateId();
+	if (image.dimension == ImageDimension::Dim1D) {
+		state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 2), result, coord, zero);
+		return result;
+	}
+	const auto x = state.builder.AllocateId();
+	const auto y = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), x, coord, 0u);
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), y, coord, 1u);
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 3), result, x, y, zero);
+	return result;
 }
 
 uint32_t ImageViewSizeType(EmitterState& state, ImageDimension dimension) {
