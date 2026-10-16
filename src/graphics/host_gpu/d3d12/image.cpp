@@ -58,9 +58,11 @@ namespace {
 
 [[nodiscard]] D3D12_RESOURCE_FLAGS ResourceFlags(ID3D12Device* device,
                                                  const D3D12::FormatInfo& format, uint32_t samples,
-                                                 bool block) {
+                                                 bool block, vk::ImageType type) {
 	if (format.IsDepth()) {
-		return D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+		// A depth target is 2D (DepthStencilView); a 1D image of a depth format is only sampled, and the Series X removes the device
+		// when a 1D depth-stencil resource is made (and sizes one as 0 bytes, which breaks the allocator).
+		return type == vk::ImageType::e1D ? D3D12_RESOURCE_FLAG_NONE : D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 	}
 	if (block) {
 		return D3D12_RESOURCE_FLAG_NONE;
@@ -253,7 +255,7 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	backing.flags          = info.IsVolume() ? vk::ImageCreateFlagBits::e2DArrayCompatible
 	                                         : vk::ImageCreateFlags {};
 	backing.planes         = format.stencil_view != DXGI_FORMAT_UNKNOWN ? 2u : 1u;
-	backing.resource_flags = ResourceFlags(graphics.device, format, info.samples, info.IsBlock());
+	backing.resource_flags = ResourceFlags(graphics.device, format, info.samples, info.IsBlock(), backing.image_type);
 	(void)ResourceIndex(info.pixel_format);
 	backing.image                = backing.resources[0].resource;
 	backing.resources[0].version = backing.version;
@@ -337,7 +339,8 @@ uint32_t Image::ResourceIndex(vk::Format view_format) {
 	                            ? backing.resource_flags
 	                            : ResourceFlags(m_graphics.device, format, backing.samples,
 	                                            vk::blockSize(view_format) != 0 &&
-	                                                vk::blockExtent(view_format)[0] > 1);
+	                                                vk::blockExtent(view_format)[0] > 1,
+	                                            backing.image_type);
 
 	// Render and depth targets start in their target state, the one a discard requires.
 	const auto initial =
