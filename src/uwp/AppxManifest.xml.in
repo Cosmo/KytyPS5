@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-         IgnorableNamespaces="uap">
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap rescap">
   <Identity Name="@KYTY_UWP_PACKAGE_NAME@" Publisher="CN=KytyPS5" Version="1.0.0.0" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>@KYTY_UWP_DISPLAY_NAME@</DisplayName>
@@ -42,6 +43,9 @@
     <Capability Name="codeGeneration" />
     <!-- USB drives: on the Xbox, games are on one (README.md). -->
     <uap:Capability Name="removableStorage" />
+    <!-- The Xbox's resources for games (what other emulators on the Xbox declare); the Xbox runs the app as a game while the app's type is
+         Game (Device Portal). -->
+    <rescap:Capability Name="expandedResources" />
     <!-- Game folders are read directly: they grant UWP apps read access (README.md). -->
     <!-- The microphone of a headset on the controller, as the DualSense's microphone (a setting; Windows asks the user once). -->
     <DeviceCapability Name="microphone" />
