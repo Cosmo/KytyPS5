@@ -739,7 +739,8 @@ bool SysFileRenameFile(const std::filesystem::path& src, const std::filesystem::
 #if defined(KYTY_PLATFORM_UWP)
 std::FILE* SysFileOpenCStreamR(const std::filesystem::path& file_name) {
 	const auto wide   = file_name.wstring();
-	HANDLE     handle = HostCreateFile(wide.c_str(), GENERIC_READ, OPEN_EXISTING, FILE_FLAG_RANDOM_ACCESS);
+	// Cached as usual: Windows reads ahead while the reads go through the file in order (a `.zar` game reads most blocks one after the other).
+	HANDLE     handle = HostCreateFile(wide.c_str(), GENERIC_READ, OPEN_EXISTING, 0);
 	if (handle == INVALID_HANDLE_VALUE) {
 		return nullptr;
 	}
@@ -751,7 +752,12 @@ std::FILE* SysFileOpenCStreamR(const std::filesystem::path& file_name) {
 	std::FILE* file = _fdopen(descriptor, "rb");
 	if (file == nullptr) {
 		_close(descriptor);
+		return nullptr;
 	}
+	// MSVC's file streams read through the C stream in pieces of 4095 bytes; with the C runtime's 4 KB buffer each piece was a read of the drive
+	// (16 for one 64 KB block of an archive, about half a millisecond each on the Xbox's USB drive). With a buffer of a block, a block is one read.
+	constexpr size_t BufferSize = 64 * 1024;
+	std::setvbuf(file, nullptr, _IOFBF, BufferSize);
 	return file;
 }
 #endif
