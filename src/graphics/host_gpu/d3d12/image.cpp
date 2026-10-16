@@ -801,7 +801,8 @@ D3D12_CPU_DESCRIPTOR_HANDLE Image::UnorderedAccessView(ImageViewHandle handle) {
 		EXIT("D3D12: image format %d cannot be written by shaders\n",
 		     static_cast<int>(info.format));
 	}
-	// The view dimension must match the shader's declared image type.
+	// The view dimension must match the shader's declared image type. Shaders declare 1D and 2D storage images as arrays
+	// (HostShaderFeatures::storage_images_as_arrays), so a view of one layer can start at any layer of the image.
 	D3D12_UNORDERED_ACCESS_VIEW_DESC desc {};
 	desc.Format = format.view;
 	if (backing.image_type == vk::ImageType::e3D) {
@@ -812,20 +813,11 @@ D3D12_CPU_DESCRIPTOR_HANDLE Image::UnorderedAccessView(ImageViewHandle handle) {
 	} else {
 		switch (info.type) {
 			case vk::ImageViewType::e1D:
-				EXIT_NOT_IMPLEMENTED(info.base_layer != 0);
-				desc.ViewDimension      = D3D12_UAV_DIMENSION_TEXTURE1D;
-				desc.Texture1D.MipSlice = info.base_level;
-				break;
 			case vk::ImageViewType::e1DArray:
 				desc.ViewDimension                  = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
 				desc.Texture1DArray.MipSlice        = info.base_level;
 				desc.Texture1DArray.FirstArraySlice = info.base_layer;
 				desc.Texture1DArray.ArraySize       = info.layer_count;
-				break;
-			case vk::ImageViewType::e2D:
-				EXIT_NOT_IMPLEMENTED(info.base_layer != 0);
-				desc.ViewDimension      = D3D12_UAV_DIMENSION_TEXTURE2D;
-				desc.Texture2D.MipSlice = info.base_level;
 				break;
 			default:
 				desc.ViewDimension                  = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
