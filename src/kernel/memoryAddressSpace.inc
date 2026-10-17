@@ -685,6 +685,18 @@ public:
 		});
 	}
 
+	// The biggest part of [begin, end) the guest owns in one piece.
+	[[nodiscard]] uint64_t LargestOwned(uint64_t begin, uint64_t end) {
+		std::shared_lock lock(m_mutex);
+		uint64_t         largest = 0;
+		for (const auto& [start, size]: m_owned) {
+			const auto from = std::max(start, begin);
+			const auto to   = std::min(start + size, end);
+			largest         = std::max(largest, to > from ? to - from : 0);
+		}
+		return largest;
+	}
+
 	[[nodiscard]] bool OverlapsOwned(uint64_t vaddr, uint64_t size) {
 		std::shared_lock lock(m_mutex);
 		return std::any_of(m_owned.begin(), m_owned.end(), [vaddr, size](const auto& range) {
