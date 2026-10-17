@@ -1219,6 +1219,9 @@ void Image::CopyContents(CommandBuffer& command, Image& source, uint32_t source_
 		CopyBlock block;
 		uint64_t  offset = 0;
 		uint32_t  pitch  = 0;
+		// The copy's size in destination texels: a compressed and an uncompressed image copy one source block to one destination block
+		// (Vulkan's size-compatible formats: the copy's extent is in source texels).
+		UINT destination_width = 0, destination_height = 0;
 	};
 	std::vector<Region> regions;
 	uint64_t            scratch_size = 0;
@@ -1230,8 +1233,7 @@ void Image::CopyContents(CommandBuffer& command, Image& source, uint32_t source_
 		const auto block = GetCopyBlock(source.backing.format, copy.srcSubresource.aspectMask);
 		const auto destination_block = GetCopyBlock(backing.format, copy.dstSubresource.aspectMask);
 		EXIT_NOT_IMPLEMENTED(block.bytes != destination_block.bytes ||
-		                     block.width != destination_block.width ||
-		                     block.height != destination_block.height);
+		                     (direct && (block.width != destination_block.width || block.height != destination_block.height)));
 		for (uint32_t i = 0; i < count; i++) {
 			Region region;
 			region.block              = block;
@@ -1250,6 +1252,8 @@ void Image::CopyContents(CommandBuffer& command, Image& source, uint32_t source_
 			region.box = {static_cast<UINT>(copy.srcOffset.x), static_cast<UINT>(copy.srcOffset.y),
 			              source_z, static_cast<UINT>(copy.srcOffset.x) + width,
 			              static_cast<UINT>(copy.srcOffset.y) + height, source_z + depth};
+			region.destination_width  = width / block.width * destination_block.width;
+			region.destination_height = height / block.height * destination_block.height;
 			region.x = static_cast<UINT>(copy.dstOffset.x);
 			region.y = static_cast<UINT>(copy.dstOffset.y);
 			region.z = static_cast<UINT>(copy.dstOffset.z) + (destination_volume && !source_volume ? i : 0);
@@ -1283,14 +1287,14 @@ void Image::CopyContents(CommandBuffer& command, Image& source, uint32_t source_
 	// Different format families cannot be copied directly; the bytes go through a buffer.
 	auto& scratch = ScratchBuffer(m_graphics, m_scheduler, scratch_size);
 	scratch.Use(command, D3D12_RESOURCE_STATE_COPY_DEST);
-	const auto footprint = [&](const Region& region, ID3D12Resource* resource, UINT subresource) {
+	const auto footprint = [&](const Region& region, ID3D12Resource* resource, UINT subresource, bool destination) {
 		D3D12_TEXTURE_COPY_LOCATION location {};
 		location.pResource                          = scratch.Resource();
 		location.Type                               = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
 		location.PlacedFootprint.Offset             = region.offset;
 		location.PlacedFootprint.Footprint.Format   = CopyFormat(m_graphics.device, resource, subresource);
-		location.PlacedFootprint.Footprint.Width    = region.box.right - region.box.left;
-		location.PlacedFootprint.Footprint.Height   = region.box.bottom - region.box.top;
+		location.PlacedFootprint.Footprint.Width    = destination ? region.destination_width : region.box.right - region.box.left;
+		location.PlacedFootprint.Footprint.Height   = destination ? region.destination_height : region.box.bottom - region.box.top;
 		location.PlacedFootprint.Footprint.Depth    = region.box.back - region.box.front;
 		location.PlacedFootprint.Footprint.RowPitch = region.pitch;
 		return location;
@@ -1300,7 +1304,7 @@ void Image::CopyContents(CommandBuffer& command, Image& source, uint32_t source_
 		src.pResource        = from.resource;
 		src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 		src.SubresourceIndex = region.source_subresource;
-		const auto linear    = footprint(region, from.resource, region.source_subresource);
+		const auto linear    = footprint(region, from.resource, region.source_subresource, false);
 		list->CopyTextureRegion(&linear, 0, 0, 0, &src, &region.box);
 	}
 	scratch.Use(command, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -1309,7 +1313,7 @@ void Image::CopyContents(CommandBuffer& command, Image& source, uint32_t source_
 		dst.pResource        = to.resource;
 		dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 		dst.SubresourceIndex = region.destination_subresource;
-		const auto linear    = footprint(region, to.resource, region.destination_subresource);
+		const auto linear    = footprint(region, to.resource, region.destination_subresource, true);
 		list->CopyTextureRegion(&dst, region.x, region.y, region.z, &linear, nullptr);
 	}
 }
