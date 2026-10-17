@@ -1,10 +1,13 @@
 #include "app.h"
 #include "log.h"
+#include "kernel/memory.h"
 
 #include <windows.h>
 
 int __stdcall wWinMain(HINSTANCE /*instance*/, HINSTANCE /*previous*/, PWSTR /*command_line*/,
                        int /*show*/) {
+	// Before any thread of the app exists: their stacks would split the guest's address ranges.
+	Libs::LibKernel::Memory::PreReserveGuestAddressSpace();
 	try {
 		winrt::init_apartment();
 		Kyty::Uwp::Log("KytyPS5 UWP starting\n");
