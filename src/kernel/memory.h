@@ -179,6 +179,10 @@ private:
 void PinGuestStack(uint64_t vaddr, uint64_t size);
 // Xbox fork (T3): after a host copy opened protected guest pages for a moment, set them to what they should be now (the page manager decides for watched pages).
 void RestoreHostProtection(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode old_mode) noexcept;
+// UWP app, first thing at its start (Windows): reserves the guest's address ranges, which the guest address space takes over when the
+// emulator starts. The app's own threads, started before the emulator, could put their stacks into them and split them (a game that
+// reserves 768 GB at once found no room).
+void PreReserveGuestAddressSpace();
 
 int KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags,
                                                const char* name);

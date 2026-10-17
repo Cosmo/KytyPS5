@@ -195,6 +195,18 @@ static std::string GuestPrivateMemorySummary(); // (likewise)
 
 #include "memoryAddressSpace.inc"
 
+void PreReserveGuestAddressSpace() {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	if (!g_pre_reserved_guest_ranges.empty()) {
+		return;
+	}
+	SYSTEM_INFO info {};
+	GetSystemInfo(&info);
+	ReserveFreeGuestRanges(info.dwAllocationGranularity,
+	                       [](uint64_t start, uint64_t size) { g_pre_reserved_guest_ranges.emplace_back(start, size); });
+#endif
+}
+
 enum class VirtualRangeType {
 	Reserved,
 	PoolReserved,
