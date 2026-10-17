@@ -3637,6 +3637,14 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr, size_t len, int flags, 
 	}
 
 	if (out_addr == 0) {
+		// Host memory placed at random when the process started (on the Xbox: the main thread's stack) can split the user range so that a
+		// reservation the whole range would hold fits in no part of it: another start gives another layout (the address collision handler).
+		constexpr uint64_t UserRangeSize = HOST_USER_MAX + 1u - HOST_USER_MIN;
+		if (const auto handler = g_address_collision_handler.load();
+		    handler != nullptr && (flags & GUEST_MAP_FIXED) == 0 && len <= UserRangeSize &&
+		    g_guest_address_space->LargestOwned(HOST_USER_MIN, HOST_USER_MAX + 1u) < len) {
+			handler(in_addr != 0 ? in_addr : HOST_USER_MIN, len);
+		}
 		return KERNEL_ERROR_ENOMEM;
 	}
 
