@@ -68,6 +68,49 @@ static void CopySparseRange(const Regions& regions, uint64_t vaddr, void* data, 
 	    [&](uint64_t start, uint64_t bytes) { gap(start, destination + (start - vaddr), bytes); });
 }
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+// The free parts of the guest's address ranges (at least 16 MB each), reserved as placeholders; `on_reserved(start, size)` for each.
+template <typename OnReserved>
+static void ReserveFreeGuestRanges(uint64_t granularity, OnReserved&& on_reserved) {
+	const std::array<std::pair<uint64_t, uint64_t>, 3> regions {{
+	    {HOST_SYSTEM_MANAGED_MIN, HOST_SYSTEM_RESERVED_MAX + 1u},
+	    {HOST_USER_MIN, HOST_USER_MAX + 1u},
+	    {kExtendedMemoryBase, kExtendedMemoryBase + kExtendedMemorySize},
+	}};
+	constexpr uint64_t MinimumRegionSize = 0x1000000;
+	for (const auto& [guest_start, guest_end]: regions) {
+		auto next_addr = guest_start;
+		while (next_addr < guest_end) {
+			MEMORY_BASIC_INFORMATION info {};
+			if (VirtualQuery(reinterpret_cast<const void*>(next_addr), &info, sizeof(info)) == 0) {
+				EXIT("failed to inspect guest address space at 0x%016" PRIx64 "\n", next_addr);
+			}
+
+			const auto region_base = reinterpret_cast<uint64_t>(info.BaseAddress);
+			const auto region_end  = std::min<uint64_t>(guest_end, region_base + static_cast<uint64_t>(info.RegionSize));
+			const auto reserve_start = (std::max(region_base, guest_start) + granularity - 1) / granularity * granularity;
+			const auto reserve_end   = region_end / granularity * granularity;
+
+			if (info.State == MEM_FREE && reserve_end > reserve_start && reserve_end - reserve_start > MinimumRegionSize) {
+				if (!VirtualMemory::Windows::ReservePlaceholder(reserve_start, reserve_end - reserve_start)) {
+					EXIT("failed to reserve guest address space at 0x%016" PRIx64 ", size 0x%016" PRIx64 "\n", reserve_start,
+					     reserve_end - reserve_start);
+				}
+				on_reserved(reserve_start, reserve_end - reserve_start);
+			}
+
+			if (region_end <= next_addr) {
+				EXIT("guest address-space scan did not advance at 0x%016" PRIx64 "\n", next_addr);
+			}
+			next_addr = region_end;
+		}
+	}
+}
+
+// What PreReserveGuestAddressSpace reserved, until the guest address space takes it over.
+static std::vector<std::pair<uint64_t, uint64_t>> g_pre_reserved_guest_ranges;
+#endif
+
 class GuestBackingStore {
 public:
 	enum class FailureReason {
@@ -2229,47 +2272,27 @@ private:
 	}
 
 	void ReserveGuestRegions() {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		const auto take = [this](uint64_t start, uint64_t size) {
+			AddFreeUnlocked(start, size);
+			m_owned.emplace_back(start, size);
+		};
+		if (!g_pre_reserved_guest_ranges.empty()) {
+			// The UWP app reserved the guest's ranges at its start (PreReserveGuestAddressSpace), before its own threads' stacks could split them.
+			for (const auto& [start, size]: g_pre_reserved_guest_ranges) {
+				take(start, size);
+			}
+			g_pre_reserved_guest_ranges.clear();
+			return;
+		}
+		ReserveFreeGuestRanges(m_granularity, take);
+#else
 		const std::array<std::pair<uint64_t, uint64_t>, 3> regions {{
 		    {HOST_SYSTEM_MANAGED_MIN, HOST_SYSTEM_RESERVED_MAX + 1u},
 		    {HOST_USER_MIN, HOST_USER_MAX + 1u},
 		    {kExtendedMemoryBase, kExtendedMemoryBase + kExtendedMemorySize},
 		}};
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		constexpr uint64_t MinimumRegionSize = 0x1000000;
-		for (const auto& [guest_start, guest_end]: regions) {
-			auto next_addr = guest_start;
-			while (next_addr < guest_end) {
-				MEMORY_BASIC_INFORMATION info {};
-				if (VirtualQuery(reinterpret_cast<const void*>(next_addr), &info, sizeof(info)) == 0) {
-					EXIT("failed to inspect guest address space at 0x%016" PRIx64 "\n", next_addr);
-				}
-
-				const auto region_base = reinterpret_cast<uint64_t>(info.BaseAddress);
-				const auto region_end = std::min<uint64_t>(
-				    guest_end, region_base + static_cast<uint64_t>(info.RegionSize));
-				const auto reserve_start =
-				    AlignUp(std::max(region_base, guest_start), m_granularity);
-				const auto reserve_end = AlignDown(region_end, m_granularity);
-
-				if (info.State == MEM_FREE && reserve_end > reserve_start &&
-				    reserve_end - reserve_start > MinimumRegionSize) {
-					if (!VirtualMemory::Windows::ReservePlaceholder(reserve_start, reserve_end - reserve_start)) {
-						EXIT("failed to reserve guest address space at 0x%016" PRIx64
-						     ", size 0x%016" PRIx64 "\n",
-						     reserve_start, reserve_end - reserve_start);
-					}
-					AddFreeUnlocked(reserve_start, reserve_end - reserve_start);
-					m_owned.emplace_back(reserve_start, reserve_end - reserve_start);
-				}
-
-				if (region_end <= next_addr) {
-					EXIT("guest address-space scan did not advance at 0x%016" PRIx64 "\n", next_addr);
-				}
-				next_addr = region_end;
-			}
-		}
-#else
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
 		std::vector<std::pair<uint64_t, uint64_t>> occupied;
 		FILE*                                      maps = fopen("/proc/self/maps", "r");
