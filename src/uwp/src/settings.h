@@ -8,10 +8,12 @@
 
 namespace Kyty::Uwp {
 
-// AppSettings::overlay_detail: the frame rate alone; with the frame graph, GPU time, RAM and the swap file; everything.
+// AppSettings::overlay_detail: the frame rate alone; with the frame graph, GPU time, RAM and the swap file; everything in one box; everything in
+// panels along the top, grouped as the desktop's performance panel groups it.
 constexpr uint32_t OVERLAY_FRAME_RATE = 0;
 constexpr uint32_t OVERLAY_COMPACT    = 1;
 constexpr uint32_t OVERLAY_FULL       = 2;
+constexpr uint32_t OVERLAY_DETAILED   = 3;
 
 // The app's own data folder (LocalState); it is always readable and writable, on any drive.
 [[nodiscard]] std::filesystem::path LocalStateFolder();
@@ -43,7 +45,7 @@ struct AppSettings {
 	uint32_t overlay_size = 1;
 	// How many of the log's last lines the overlay shows: 2 to 20 (OverlayLogLines in overlay.cpp).
 	uint32_t overlay_log_lines = 20;
-	// What the overlay shows while it is on (OverlayShown): OVERLAY_FRAME_RATE, OVERLAY_COMPACT or OVERLAY_FULL.
+	// What the overlay shows while it is on (OverlayShown): OVERLAY_FRAME_RATE, OVERLAY_COMPACT, OVERLAY_FULL or OVERLAY_DETAILED.
 	uint32_t overlay_detail = 2;
 	// Whether the overlay shows the end of the emulator's log, and the connected controllers.
 	bool overlay_log         = true;
