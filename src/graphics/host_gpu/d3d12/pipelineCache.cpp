@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/d3d12/pipelineCache.h"
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -711,7 +712,12 @@ ID3D12PipelineState* PipelineCache::LoadOrCreate(const std::wstring&            
 		m_loaded_pipelines++;
 		return pipeline;
 	}
-	const HRESULT result = m_device->CreatePipelineState(&desc, IID_PPV_ARGS(&pipeline));
+	const HRESULT result = [&] {
+		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
+		                                         Common::DebugCounters::Counter::PipelineCreateNs,
+		                                         Common::DebugCounters::Peak::PipelineCreateNs);
+		return m_device->CreatePipelineState(&desc, IID_PPV_ARGS(&pipeline));
+	}();
 	if (FAILED(result)) {
 		// The device's limits are the usual reason (the Xbox's UWP games get feature level 11.0). The pipeline is skipped, its shaders' required features
 		// are reported and the shaders saved.
