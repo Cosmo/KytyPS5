@@ -1431,6 +1431,7 @@ public:
 	}
 	void FaultLoop(std::stop_token stop) {
 		t_fault_thread = true;
+		Common::Thread::SetCurrentName("Page faults");
 		std::unique_lock lock(m_fault_mutex);
 		while (!stop.stop_requested()) {
 			m_fault_wake.wait_for(lock, std::chrono::milliseconds(100), [this] { return !m_fault_queue.empty(); });
@@ -1460,6 +1461,7 @@ public:
 	}
 
 	void PagerLoop(std::stop_token stop) {
+		Common::Thread::SetCurrentName("Pager");
 		using Clock                    = std::chrono::steady_clock;
 		constexpr uint64_t kWindow     = Xbox::Lazy::Regions::kWindow;
 		constexpr uint64_t kWindowBits = Xbox::Lazy::Regions::kWindowBits;
