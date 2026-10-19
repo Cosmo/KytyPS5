@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/d3d12/masterSemaphore.h"
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
@@ -48,6 +49,8 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	// Waits in steps: GPU work that doesn't finish for seconds is reported, with the pipeline it
 	// is stuck in, while it still runs (the Xbox ends a game whose GPU hangs, without a device
 	// removal to report).
+	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuWaits,
+	                                         Common::DebugCounters::Counter::GpuWaitNs);
 	HANDLE event = CreateEventExW(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
 	EXIT_IF(event == nullptr);
 	D3D12::Check(m_fence->SetEventOnCompletion(tick, event), "wait for GPU timeline");
