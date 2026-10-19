@@ -15,13 +15,13 @@
 #include "graphics/host_gpu/d3d12/render.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
-#include "graphics/host_gpu/workCounters.h"
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/rectListShader.h"
 #include "kytyGitVersion.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <bit>
 #include <cinttypes>
 #include <cmath>
@@ -43,6 +43,27 @@ namespace Libs::Graphics {
 namespace IR = ShaderRecompiler::IR;
 
 namespace {
+
+// Adds its lifetime to one of upstream's time counters (common/debugCounters.h) without counting another shader or pipeline: the steps D3D12
+// adds to them, the translation of a shader to DXIL and the linking of a pipeline's shaders.
+class CompileStepTimer {
+public:
+	explicit CompileStepTimer(Common::DebugCounters::Counter duration)
+	    : m_duration(duration), m_start(Common::DebugCounters::Enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {}) {}
+	~CompileStepTimer() {
+		if (m_start != std::chrono::steady_clock::time_point {}) {
+			Common::DebugCounters::Add(m_duration, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			                                                                std::chrono::steady_clock::now() - m_start)
+			                                                                .count()));
+		}
+	}
+	CompileStepTimer(const CompileStepTimer&)            = delete;
+	CompileStepTimer& operator=(const CompileStepTimer&) = delete;
+
+private:
+	Common::DebugCounters::Counter        m_duration;
+	std::chrono::steady_clock::time_point m_start;
+};
 
 HostShaderLimits ShaderLimits(const GraphicContext& graphics, const D3D12::DxilCompiler& compiler) {
 	D3D12_FEATURE_DATA_D3D12_OPTIONS1 options {};
@@ -705,7 +726,6 @@ static std::string RequiredFeatures(const std::vector<uint8_t>& dxil) {
 ID3D12PipelineState* PipelineCache::LoadOrCreate(const std::wstring&                    name,
                                                  const D3D12_PIPELINE_STATE_STREAM_DESC& desc,
                                                  std::initializer_list<const D3D12::DxilShader*> shaders) {
-	const CompileTimer   compile_timer;
 	ID3D12PipelineState* pipeline = nullptr;
 	if (m_library != nullptr &&
 	    SUCCEEDED(m_library->LoadPipeline(name.c_str(), &desc, IID_PPV_ARGS(&pipeline)))) {
@@ -775,7 +795,7 @@ const PipelineCache::Shader* PipelineCache::Translate(const CompiledProgram& pro
 	auto [found, inserted] = m_shaders.try_emplace(program.id);
 	if (inserted) {
 		KYTY_PROFILER_BLOCK("D3D12 translate shader");
-		const CompileTimer compile_timer;
+		const CompileStepTimer step_timer(Common::DebugCounters::Counter::ShaderCompileNs);
 		auto shader   = std::make_unique<Shader>();
 		shader->id    = program.id;
 		shader->stage = stage;
@@ -1062,9 +1082,9 @@ const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms&
 		return found->second;
 	}
 	KYTY_PROFILER_BLOCK("D3D12 link shaders");
-	const CompileTimer compile_timer;
+	const CompileStepTimer step_timer(Common::DebugCounters::Counter::PipelineCreateNs);
 	using Kind = D3D12::LinkedStage::Kind;
-	const bool mesh = vertex_info.stage.program->stage == ShaderType::Mesh;
+	const bool mesh = vertex_info.stage.module->info.stage == ShaderType::Mesh;
 	// A mesh program run as a compute shader is drawn by its vertex stage, which reads its records.
 	const bool emulated = mesh && vertex_info.mesh.compute_emulation;
 	EXIT_IF(emulated && vertex.mesh_fetch == nullptr);
