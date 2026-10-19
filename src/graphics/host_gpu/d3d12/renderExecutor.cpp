@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/logging/log.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -415,6 +416,7 @@ void RenderExecutor::RecordDispatch(CommandBuffer& buffer, const PipelineCache::
 	const auto slot  = trace.Begin(buffer.Handle(), &pipeline.trace);
 	buffer.Handle()->SetPipelineState(pipeline.pipeline);
 	buffer.Handle()->Dispatch(groups_x, groups_y, groups_z);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	trace.End(buffer.Handle(), slot);
 	// Later work reads what this dispatch wrote.
 	buffer.GlobalMemoryBarrier();
@@ -484,6 +486,7 @@ void RenderExecutor::RecordDispatchIndirect(CommandBuffer&                 buffe
 	buffer.Handle()->SetPipelineState(pipeline.pipeline);
 	buffer.Handle()->ExecuteIndirect(DispatchSignature(pipeline), 1, m_indirect_args->Resource(), 0,
 	                                 nullptr, 0);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	trace.End(buffer.Handle(), slot);
 	buffer.GlobalMemoryBarrier();
 }

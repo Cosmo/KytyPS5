@@ -1,6 +1,7 @@
 // D3D12 command recording for draws prepared by the shared renderer code (renderer/renderDraw.cpp).
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -544,7 +545,8 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 			trace.End(list, slot);
 		}
 	}
-	GetWorkCounters().draws.fetch_add(1, std::memory_order_relaxed);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, instances);
 }
 
 // As upstream's Vulkan renderer (renderer/renderCommands.cpp): a rect-list draw with copy_depth_to_color copies the depth target's
@@ -923,7 +925,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 	}
 	trace.End(list, slot);
-	GetWorkCounters().draws.fetch_add(1, std::memory_order_relaxed);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
 
 	if (WritesMemory(vs_input_info.stage) ||
 	    (state.ps_active && WritesMemory(state.ps_input_info.stage))) {
