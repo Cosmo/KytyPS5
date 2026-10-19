@@ -5,6 +5,7 @@
 #include "graphics/presentation/window.h"
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/threads.h"
@@ -14,14 +15,17 @@
 #include "graphics/host_gpu/d3d12/windowContext.h"
 #include "graphics/host_gpu/workCounters.h"
 #include "graphics/presentation/presenter.h"
-#include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "log.h"
 
 #include <windows.h>
+#include <tlhelp32.h>
 
+#include <algorithm>
+#include <chrono>
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 namespace Libs::Graphics {
 
@@ -129,7 +133,8 @@ MemoryTotals CurrentMemoryTotals() {
 	                     .swap_wait_ns = guest.swap_wait_ns,
 	                     .pager        = guest.pager};
 	if (const auto* window = Libs::Graphics::g_window.get(); window != nullptr && window->graphic_ctx.CanReportMemoryUsage()) {
-		totals.gpu = window->graphic_ctx.GetLocalMemoryUsage();
+		totals.gpu        = window->graphic_ctx.GetLocalMemoryUsage();
+		totals.gpu_budget = window->graphic_ctx.GetTotalMemoryBudget();
 	}
 	return totals;
 }
@@ -152,13 +157,94 @@ std::optional<ShaderStatistics> CurrentShaderStatistics() {
 }
 
 WorkTotals CurrentWorkTotals() {
+	namespace Counters   = Common::DebugCounters;
 	const auto& counters = Libs::Graphics::GetWorkCounters();
-	return {.draws         = counters.draws.load(std::memory_order_relaxed),
-	        .skipped_draws = counters.skipped_draws.load(std::memory_order_relaxed),
-	        .skip_reason   = counters.skip_reason.load(std::memory_order_relaxed),
-	        .gpu_ns        = counters.gpu_ns.load(std::memory_order_relaxed),
-	        .compile_ns    = counters.compile_ns.load(std::memory_order_relaxed),
-	        .bytes_read    = Libs::LibKernel::FileSystem::BytesRead()};
+	WorkTotals  totals {.skipped_draws    = counters.skipped_draws.load(std::memory_order_relaxed),
+	                    .skip_reason      = counters.skip_reason.load(std::memory_order_relaxed),
+	                    .gpu_ns           = counters.gpu_ns.load(std::memory_order_relaxed),
+	                    .shader_peak_ns   = Counters::Get(Counters::Peak::ShaderCompileNs),
+	                    .pipeline_peak_ns = Counters::Get(Counters::Peak::PipelineCreateNs)};
+	for (size_t i = 0; i < totals.counters.size(); i++) {
+		totals.counters[i] = Counters::Get(static_cast<Counters::Counter>(i));
+	}
+	return totals;
+}
+
+void CountersOn(bool on) {
+	Common::DebugCounters::SetEnabled(on);
+}
+
+std::optional<GameMemoryTotals> CurrentGameMemory() {
+	const auto* window = Libs::Graphics::g_window.get();
+	if (window == nullptr || window->render_context == nullptr) {
+		return std::nullopt;
+	}
+	const auto stats = Libs::LibKernel::Memory::GetDebugStats();
+	return GameMemoryTotals {.direct_total        = stats.direct_total,
+	                         .direct_allocated    = stats.direct_allocated,
+	                         .pooled_allocated    = stats.pooled_allocated,
+	                         .automatic_allocated = stats.automatic_allocated,
+	                         .direct_mapped       = stats.direct_mapped,
+	                         .pool_committed      = stats.pool_committed,
+	                         .flexible_total      = stats.flexible_total,
+	                         .flexible_used       = stats.flexible_used,
+	                         .cpu_page_entries    = stats.cpu_page_entries,
+	                         .gpu_page_entries    = stats.gpu_page_entries,
+	                         .page_entries_total  = stats.page_entries_total};
+}
+
+// Each thread's processor time at the last call, and when that was; a thread that started since counts from 0.
+std::vector<ThreadLoad> BusiestThreads(size_t count) {
+	static std::unordered_map<DWORD, uint64_t> s_last;
+	static auto                                s_last_at = std::chrono::steady_clock::now();
+	const auto                                 now       = std::chrono::steady_clock::now();
+	const double seconds = std::chrono::duration<double>(now - s_last_at).count();
+	std::unordered_map<DWORD, uint64_t> times;
+	std::vector<ThreadLoad>             loads;
+	const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	if (snapshot == INVALID_HANDLE_VALUE) {
+		return loads;
+	}
+	THREADENTRY32 entry {};
+	entry.dwSize          = sizeof(entry);
+	const DWORD process   = GetCurrentProcessId();
+	for (BOOL ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry)) {
+		if (entry.th32OwnerProcessID != process) {
+			continue;
+		}
+		const HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ThreadID);
+		if (thread == nullptr) {
+			continue;
+		}
+		FILETIME created {}, exited {}, kernel {}, user {};
+		if (GetThreadTimes(thread, &created, &exited, &kernel, &user)) {
+			const auto time = [](FILETIME t) { return (static_cast<uint64_t>(t.dwHighDateTime) << 32u) | t.dwLowDateTime; };
+			const uint64_t total = time(kernel) + time(user);
+			times[entry.th32ThreadID] = total;
+			const auto     last   = s_last.find(entry.th32ThreadID);
+			const uint64_t before = last != s_last.end() ? last->second : 0;
+			if (!s_last.empty() && seconds > 0.0 && total > before) {
+				std::wstring name;
+				if (PWSTR description = nullptr; SUCCEEDED(GetThreadDescription(thread, &description)) && description != nullptr) {
+					name = description;
+					LocalFree(description);
+				}
+				if (name.empty()) {
+					name = L"thread " + std::to_wstring(entry.th32ThreadID);
+				}
+				loads.push_back({std::move(name), static_cast<double>(total - before) / 1e7 / seconds * 100.0});
+			}
+		}
+		CloseHandle(thread);
+	}
+	CloseHandle(snapshot);
+	s_last    = std::move(times);
+	s_last_at = now;
+	std::sort(loads.begin(), loads.end(), [](const ThreadLoad& a, const ThreadLoad& b) { return a.percent > b.percent; });
+	if (loads.size() > count) {
+		loads.resize(count);
+	}
+	return loads;
 }
 
 } // namespace Kyty::Uwp
