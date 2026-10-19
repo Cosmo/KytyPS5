@@ -9,6 +9,8 @@
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 
+#include "common/debugCounters.h"
+
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -61,20 +63,52 @@ struct MemoryTotals {
 	uint64_t swap_wait_ns = 0;
 	bool     pager        = false;
 	uint64_t gpu          = 0;
+	uint64_t gpu_budget   = 0; // what the system gives the GPU (0 before the renderer exists)
 };
 [[nodiscard]] MemoryTotals CurrentMemoryTotals();
 
-// The work the overlay shows (window.cpp), since the start: draws made, draws skipped as not supported (and the reason of the last one), the GPU's time,
-// the time spent compiling shaders and making pipelines, and the bytes the game read from its files.
+// The work the overlay shows (window.cpp), since the start: draws skipped as not supported (and the reason of the last one), the GPU's time, and
+// upstream's performance counters (common/debugCounters.h, counting while CountersOn is on: draws, submits, GPU waits, compile times, cache
+// traffic, file reads, flips and more).
 struct WorkTotals {
-	uint64_t    draws         = 0;
 	uint64_t    skipped_draws = 0;
 	const char* skip_reason   = nullptr;
 	uint64_t    gpu_ns        = 0;
-	uint64_t    compile_ns    = 0;
-	uint64_t    bytes_read    = 0;
+	std::array<uint64_t, static_cast<size_t>(Common::DebugCounters::Counter::Count)> counters {};
+	uint64_t shader_peak_ns   = 0; // the longest shader compile and pipeline build so far
+	uint64_t pipeline_peak_ns = 0;
+
+	[[nodiscard]] uint64_t Get(Common::DebugCounters::Counter counter) const { return counters[static_cast<size_t>(counter)]; }
 };
 [[nodiscard]] WorkTotals CurrentWorkTotals();
+// Upstream's counters count only while on (they cost nothing then): the overlay turns them on while it shows.
+void CountersOn(bool on);
+
+// The game's own memory, as the PS5 hands it out (window.cpp, Memory::GetDebugStats): direct memory and its kinds, flexible memory, and the page-table
+// entries in use (2 MB each) and their totals, per side.
+struct GameMemoryTotals {
+	uint64_t direct_total           = 0;
+	uint64_t direct_allocated       = 0;
+	uint64_t pooled_allocated       = 0;
+	uint64_t automatic_allocated    = 0;
+	uint64_t direct_mapped          = 0;
+	uint64_t pool_committed         = 0;
+	uint64_t flexible_total         = 0;
+	uint64_t flexible_used          = 0;
+	uint64_t cpu_page_entries       = 0;
+	uint64_t gpu_page_entries       = 0;
+	uint64_t cpu_page_entries_total = 0;
+	uint64_t gpu_page_entries_total = 0;
+};
+// None before the game's renderer exists (the memory subsystem is up while it does).
+[[nodiscard]] std::optional<GameMemoryTotals> CurrentGameMemory();
+
+// The app's busiest threads since the last call, by name (window.cpp): each one's share of one core.
+struct ThreadLoad {
+	std::wstring name;
+	double       percent = 0.0;
+};
+[[nodiscard]] std::vector<ThreadLoad> BusiestThreads(size_t count);
 
 // Runs the emulator on its own thread inside the app. The XAML page (UI thread) provides the panel
 // frames are presented to and reports its size; the emulator's window (window.cpp) presents to it
