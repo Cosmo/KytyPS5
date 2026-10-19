@@ -74,6 +74,10 @@ static const CoreReservation& GetCoreReservation() {
 }
 #endif
 
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+#include <pthread.h>
+#endif
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #include <windows.h> // IWYU pragma: keep
 // IWYU pragma: no_include <winbase.h>
@@ -245,6 +249,20 @@ void Thread::RestoreProcessAffinity() {
 	}
 }
 #endif
+
+void Thread::SetCurrentName(const std::string& name) {
+	if (name.empty()) {
+		return;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	std::wstring wide(name.begin(), name.end());
+	SetThreadDescription(GetCurrentThread(), wide.c_str());
+#elif defined(__APPLE__)
+	pthread_setname_np(name.substr(0, 63).c_str());
+#else
+	pthread_setname_np(pthread_self(), name.substr(0, 15).c_str());
+#endif
+}
 
 int Thread::GetThreadIdUnique() {
 	static std::atomic<int> counter = 0;
