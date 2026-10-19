@@ -10,7 +10,6 @@
 #include "graphics/host_gpu/drawState.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
-#include "graphics/host_gpu/workCounters.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
@@ -301,7 +300,6 @@ struct ShaderProgramCache::Impl {
 			}
 			if (permutation != nullptr) return bind(*permutation);
 		}
-		const CompileTimer compile_timer;
 
 		const char* label = nullptr;
 		const char* stage_name = nullptr;
