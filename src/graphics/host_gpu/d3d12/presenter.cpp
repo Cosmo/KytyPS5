@@ -1,6 +1,7 @@
 #include "graphics/presentation/presenter.h"
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -215,6 +216,7 @@ public:
 		ReleaseBuffers();
 		D3D12::Check(m_swapchain->ResizeBuffers(BufferCount, width, height, Format, 0), "resize the swap chain");
 		AcquireBuffers(width, height);
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::SwapchainRecreations);
 	}
 
 	[[nodiscard]] uint32_t Width() const noexcept { return m_width; }
