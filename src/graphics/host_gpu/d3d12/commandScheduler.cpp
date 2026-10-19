@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/d3d12/commandScheduler.h"
 
 #include "common/assert.h"
+#include "common/debugCounters.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
@@ -499,6 +500,7 @@ uint64_t CommandScheduler::Submit() {
 		m_graphics.queue->ExecuteCommandLists(1, &lists);
 		D3D12::Check(m_graphics.queue->Signal(m_master.Handle(), tick), "signal GPU timeline");
 	}
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 	if (m_timing_slot) {
 		m_timed_lists.push({tick, *m_timing_slot});
 		m_timing_slot.reset();
