@@ -34,6 +34,8 @@ public:
 	static void SleepMicro(uint32_t micros);
 	static void SleepNano(uint64_t nanos);
 	static bool IsMainThread();
+	// The calling thread's name, as debuggers and the overlay's busiest threads show it (Linux keeps 15 characters).
+	static void SetCurrentName(const std::string& name);
 
 	// Get current thread id
 	// Once a thread has finished, the id may be reused by another thread.
