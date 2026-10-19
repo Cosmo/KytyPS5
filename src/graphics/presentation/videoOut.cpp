@@ -782,6 +782,7 @@ void VideoOutDriver::Impl::VblankEnd() {
 }
 
 void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
+	Common::Thread::SetCurrentName("Present");
 	using Clock       = std::chrono::steady_clock;
 	const auto period = Clock::duration(std::chrono::seconds(1)) / Config::GetVblankFrequency();
 
