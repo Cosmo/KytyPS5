@@ -3,6 +3,8 @@
 
 #include "common/common.h"
 
+#include <string>
+
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
 #include <condition_variable>
 #include <mutex>
@@ -19,6 +21,8 @@ namespace Thread {
 void SleepMicro(uint32_t micros);
 void SleepNano(uint64_t nanos);
 bool IsMainThread();
+// The calling thread's name, as debuggers and the overlay's busiest threads show it (Linux keeps 15 characters).
+void SetCurrentName(const std::string& name);
 // Unique per thread; never reused by another thread.
 int GetThreadIdUnique();
 
