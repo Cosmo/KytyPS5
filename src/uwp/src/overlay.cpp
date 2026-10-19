@@ -8,10 +8,14 @@
 
 #include <windows.h>
 #include <fileapifromapp.h>
+// windows.h's FindText macro breaks Windows.UI.Text.h.
+#undef FindText
 
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.System.h>
+#include <winrt/Windows.UI.h>
+#include <winrt/Windows.UI.Text.h>
 #include <winrt/Windows.UI.Xaml.Documents.h>
 #include <winrt/Windows.UI.Xaml.Markup.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
@@ -21,6 +25,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <deque>
 #include <limits>
@@ -62,7 +67,8 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
   </Grid.RowDefinitions>
 
   <!-- Its parts by AppSettings::overlay_detail: the frame rate alone (in a box that fits it); with the graph and Compact; with the game,
-       the graph and Statistics (Full). -->
+       the graph and Statistics (Full); with the game and the graph, and the Detailed panels beside it (BuildDetailed). -->
+  <StackPanel x:Name="TopRow" Orientation="Horizontal" Spacing="12" HorizontalAlignment="Left" VerticalAlignment="Top">
   <Border x:Name="StatsPanel" Width="300" HorizontalAlignment="Left" VerticalAlignment="Top" Padding="12"
           Background="{StaticResource PanelBrush}">
     <StackPanel Spacing="6">
@@ -218,6 +224,7 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
       </Grid>
     </StackPanel>
   </Border>
+  </StackPanel>
 
   <Border x:Name="ControllersPanel" MinWidth="220" HorizontalAlignment="Right" VerticalAlignment="Top" Padding="12"
           Background="{StaticResource PanelBrush}">
@@ -380,6 +387,155 @@ xaml::Visibility VisibleIf(bool shown) {
 	return shown ? xaml::Visibility::Visible : xaml::Visibility::Collapsed;
 }
 
+// ---- Detailed: panels beside the frame rate's box, grouped as the desktop's performance panel (upstream) groups them.
+
+// The busiest threads Detailed shows.
+constexpr size_t DETAILED_THREADS = 4;
+// Upstream's panel's colours: frame times up to these are green and yellow, longer ones red.
+constexpr double FRAME_TIME_GOOD   = 17.5;
+constexpr double FRAME_TIME_MEDIUM = 34.0;
+// Each panel's label and value columns have fixed widths (the panels keep their size whatever the values say), the gap between them, and the
+// panels' padding: with four panels and their gaps the row fits the TV at the medium overlay size.
+constexpr double DETAILED_LABEL_WIDTH = 105.0;
+constexpr double DETAILED_VALUE_WIDTH = 131.0;
+constexpr double DETAILED_CELL_GAP    = 8.0;
+
+enum Stat : size_t {
+	// Frames: the 1% low (the 99th percentile of the graph's frame times) and the worst frame of the last second; Internal, Scaled and Display as
+	// Full has them; per second, the game's flips, the flips it asked for while the flip queue was full, and the vblanks the present thread was
+	// late for.
+	STAT_LOW,
+	STAT_WORST,
+	STAT_INTERNAL,
+	STAT_SCALED,
+	STAT_DISPLAY,
+	STAT_FLIPS,
+	STAT_QUEUE_FULL,
+	STAT_LATE_VBLANKS,
+	// CPU: the app's share of all processor cores; the busiest threads, each with its share of one core (the labels are their names); per second,
+	// the instructions the host CPU lacks that the emulator does instead, and the game's calls into functions the emulator does not have.
+	STAT_CPU,
+	STAT_THREAD_1,
+	STAT_THREAD_2,
+	STAT_THREAD_3,
+	STAT_THREAD_4,
+	STAT_EMULATED,
+	STAT_MISSING_CALLS,
+	// GPU: draws, instances, dispatches and command lists handed to the GPU; the time the emulator waited for the GPU; the GPU's time per frame;
+	// draws skipped as not supported here (with the last reason); the game's writes into memory the GPU tracks (each one a fault); the shaders and
+	// pipelines so far (as Full has them); the shaders translated and the pipelines built since the overlay showed, with their average and longest
+	// times (D3D12's translation to DXIL and linking count to them).
+	STAT_DRAWS,
+	STAT_INSTANCES,
+	STAT_DISPATCHES,
+	STAT_SUBMITS,
+	STAT_GPU_WAIT,
+	STAT_GPU_TIME,
+	STAT_SKIPPED,
+	STAT_FAULTS,
+	STAT_SHADERS,
+	STAT_PIPELINES,
+	STAT_SHADER_COMPILE,
+	STAT_PIPELINE_COMPILE,
+	// GPU memory: in use of the GPU's budget; per second, textures and buffers written to the GPU and read back, and the ones the caches let go.
+	STAT_GPU_MEMORY,
+	STAT_TEXTURE_TRANSFERS,
+	STAT_TEXTURE_EVICTIONS,
+	STAT_BUFFER_TRANSFERS,
+	STAT_BUFFER_EVICTIONS,
+	// Guest memory, the game's memory as the PS5 hands it out: direct memory taken of all there is, the part of it mapped, the pool's part (and
+	// what of the pool is committed), flexible memory, extended memory, and the page-table entries in use per side (red at the side's total: the game
+	// then sees none left).
+	STAT_DIRECT,
+	STAT_MAPPED,
+	STAT_POOL,
+	STAT_FLEXIBLE,
+	STAT_EXTENDED,
+	STAT_PAGE_TABLE,
+	// App memory: RAM in use (of the app's limit on the Xbox), the game's memory in RAM, and the rest (the emulator and the app; the GPU's memory
+	// is in the GPU panel).
+	STAT_USED,
+	STAT_GAME,
+	STAT_OTHER,
+	// The game's memory in the swap file (not in RAM), written to it and read back from it per second, and the time the game waited for it.
+	STAT_SWAP_SIZE,
+	STAT_SWAP_TRAFFIC,
+	STAT_SWAP_WAIT,
+	// I/O and audio: the game's file reads and writes per second, and the times its sound ran out before it gave more.
+	STAT_FILES,
+	STAT_AUDIO,
+	STAT_COUNT
+};
+
+struct StatRow {
+	const wchar_t* label;
+	Stat           stat;
+};
+struct StatGroup {
+	const wchar_t*       name;
+	std::vector<StatRow> rows;
+};
+// The panels, each a list of groups; the swap file's group shows only where there is a swap file.
+const std::array<std::vector<StatGroup>, 3>& DetailedPanels() {
+	static const std::array<std::vector<StatGroup>, 3> panels {{
+	    {{L"Frames",
+	      {{L"1% low", STAT_LOW}, {L"Worst frame", STAT_WORST}, {L"Internal", STAT_INTERNAL}, {L"Scaled", STAT_SCALED}, {L"Display", STAT_DISPLAY},
+	       {L"Flips", STAT_FLIPS}, {L"Flip queue full", STAT_QUEUE_FULL}, {L"Late vblanks", STAT_LATE_VBLANKS}}},
+	     {L"CPU",
+	      {{L"Emulator", STAT_CPU}, {L"", STAT_THREAD_1}, {L"", STAT_THREAD_2}, {L"", STAT_THREAD_3}, {L"", STAT_THREAD_4},
+	       {L"Emulated instrs", STAT_EMULATED}, {L"Missing HLE calls", STAT_MISSING_CALLS}}}},
+	    {{L"GPU",
+	      {{L"Draw calls", STAT_DRAWS}, {L"Instances", STAT_INSTANCES}, {L"Dispatches", STAT_DISPATCHES}, {L"Queue submits", STAT_SUBMITS},
+	       {L"CPU waiting on GPU", STAT_GPU_WAIT}, {L"GPU time", STAT_GPU_TIME}, {L"Skipped draws", STAT_SKIPPED},
+	       {L"Write-tracking faults", STAT_FAULTS}, {L"Shaders", STAT_SHADERS}, {L"Pipelines", STAT_PIPELINES},
+	       {L"Shader recompiler", STAT_SHADER_COMPILE}, {L"Pipeline compile", STAT_PIPELINE_COMPILE}}},
+	     {L"GPU memory",
+	      {{L"GPU memory", STAT_GPU_MEMORY}, {L"Texture transfers", STAT_TEXTURE_TRANSFERS}, {L"Texture evictions", STAT_TEXTURE_EVICTIONS},
+	       {L"Buffer transfers", STAT_BUFFER_TRANSFERS}, {L"Buffer evictions", STAT_BUFFER_EVICTIONS}}}},
+	    {{L"Guest memory",
+	      {{L"Direct", STAT_DIRECT}, {L"  Mapped", STAT_MAPPED}, {L"  Pool", STAT_POOL}, {L"Flexible", STAT_FLEXIBLE}, {L"Extended", STAT_EXTENDED},
+	       {L"Page table (2 MB)", STAT_PAGE_TABLE}}},
+	     {L"App memory", {{L"Used", STAT_USED}, {L"Game in RAM", STAT_GAME}, {L"Other", STAT_OTHER}}},
+	     {L"Swap file", {{L"Size", STAT_SWAP_SIZE}, {L"Out / in", STAT_SWAP_TRAFFIC}, {L"Waits", STAT_SWAP_WAIT}}},
+	     {L"I/O & audio", {{L"File read / write", STAT_FILES}, {L"Audio underruns", STAT_AUDIO}}}},
+	}};
+	return panels;
+}
+
+bool IsSwapStat(Stat stat) {
+	return stat == STAT_SWAP_SIZE || stat == STAT_SWAP_TRAFFIC || stat == STAT_SWAP_WAIT;
+}
+
+// Upstream's panel's colours: good, look at it, bad.
+enum class Level { None, Good, Medium, Bad };
+Level FrameTimeLevel(double ms) {
+	return ms <= FRAME_TIME_GOOD ? Level::Good : ms <= FRAME_TIME_MEDIUM ? Level::Medium : Level::Bad;
+}
+// Good below `warn`, medium below `bad`, bad above.
+Level LevelOf(double value, double warn, double bad) {
+	return value < warn ? Level::Good : value < bad ? Level::Medium : Level::Bad;
+}
+
+// "1.23 GB" from a GiB on, else "456 MB" (upstream's panel's sizes).
+std::wstring Bytes(uint64_t bytes) {
+	wchar_t text[32];
+	if (bytes >= (uint64_t {1} << 30u)) {
+		swprintf_s(text, L"%.2f GB", static_cast<double>(bytes) / static_cast<double>(uint64_t {1} << 30u));
+	} else {
+		swprintf_s(text, L"%.0f MB", static_cast<double>(bytes) / static_cast<double>(1u << 20u));
+	}
+	return text;
+}
+
+std::wstring Formatted(const wchar_t* pattern, ...) {
+	wchar_t text[96];
+	va_list arguments;
+	va_start(arguments, pattern);
+	vswprintf_s(text, pattern, arguments);
+	va_end(arguments);
+	return text;
+}
+
 } // namespace
 
 struct GameOverlay::State {
@@ -436,6 +592,7 @@ struct GameOverlay::State {
 	std::unique_ptr<LogTail>   log_tail;
 	// The process's CPU time (100 ns units) and the time, at the last update.
 	uint64_t                              cpu_time = 0;
+	double                                cpu_share = -1.0; // of all cores, at the last update (-1: none yet)
 	std::chrono::steady_clock::time_point cpu_time_at;
 	// The totals at the start of the second the rates and the values per frame are over.
 	struct Sample {
@@ -446,7 +603,21 @@ struct GameOverlay::State {
 	};
 	std::optional<Sample> sample;
 	bool                  swap_shown = true;
+	// Detailed (BuildDetailed): its panels, their values and labels, the swap file's group, and the values' colours (the theme's, and upstream's
+	// green, yellow and red).
+	std::vector<xaml::UIElement>                      detailed_panels;
+	std::array<xaml::Controls::TextBlock, STAT_COUNT> detailed_values {};
+	std::array<xaml::Controls::TextBlock, STAT_COUNT> detailed_labels {};
+	std::vector<xaml::UIElement>                      detailed_swap;
+	xaml::Media::Brush                                value_brush {nullptr};
+	xaml::Media::Brush                                good_brush {nullptr};
+	xaml::Media::Brush                                medium_brush {nullptr};
+	xaml::Media::Brush                                bad_brush {nullptr};
 
+	void BuildDetailed(xaml::Controls::Panel const& row, xaml::Media::Brush const& background);
+	void Set(Stat stat, std::wstring const& text, Level level = Level::None);
+	void UpdateDetailed(const std::vector<double>& times, uint64_t used, uint64_t limit, const MemoryTotals& totals);
+	void UpdateDetailedRates(const Sample& current, const Sample& before, double seconds);
 	void Update();
 	void UpdateRates(const MemoryTotals& totals);
 	void UpdateControllers();
@@ -456,6 +627,9 @@ struct GameOverlay::State {
 };
 
 void GameOverlay::State::Update() {
+	// Upstream's counters, which the draws, the compile time, the disk and Detailed come from, count while the overlay shows (again each time: the
+	// emulator sets them from its own setting when a game starts).
+	CountersOn(true);
 	run_time.Text(L"Running  " + Duration(EmulatorHost::Get().RunTimeMs()));
 
 	// Frame rate and frame times, from the frames presented.
@@ -527,6 +701,7 @@ void GameOverlay::State::Update() {
 			const double share = wall > 0.0 ? static_cast<double>(now_cpu - cpu_time) / wall : 0.0;
 			const auto   percent = static_cast<uint64_t>(std::lround(std::min(share, 1.0) * 100.0));
 			cpu.Text(std::to_wstring(percent) + L" %");
+			cpu_share = std::min(share, 1.0);
 		}
 		cpu_time    = now_cpu;
 		cpu_time_at = now;
@@ -539,6 +714,9 @@ void GameOverlay::State::Update() {
 		pipelines.Text(std::to_wstring(statistics->pipelines));
 		new_pipelines.Text(std::to_wstring(statistics->pipelines - std::min(statistics->cached_pipelines, statistics->pipelines)));
 		saved_pipelines.Text(std::to_wstring(statistics->saved_pipelines));
+	}
+	if (detail == OVERLAY_DETAILED) {
+		UpdateDetailed(times, used, limit, totals);
 	}
 	if (detail == OVERLAY_COMPACT) {
 		compact_gpu_time.Text(gpu_time.Text());
@@ -625,6 +803,8 @@ void GameOverlay::State::UpdateRates(const MemoryTotals& totals) {
 		return std::to_wstring(std::lround(static_cast<double>(bytes) / 1048576.0 / seconds)) + L" MB/s";
 	};
 	const auto ms_per_second = [seconds](uint64_t ns) { return std::to_wstring(std::lround(static_cast<double>(ns) / 1e6 / seconds)) + L" ms/s"; };
+	using Counter            = Common::DebugCounters::Counter;
+	const auto counted       = [&](Counter counter) { return delta(current.work.Get(counter), before.work.Get(counter)); };
 
 	// Per frame: none when no frame came in that second (the game loads, or waits).
 	const uint64_t frames = delta(current.frames, before.frames);
@@ -634,7 +814,7 @@ void GameOverlay::State::UpdateRates(const MemoryTotals& totals) {
 		gpu_time.Text(L"–");
 	} else {
 		const auto per_frame = [frames](uint64_t value) { return static_cast<double>(value) / static_cast<double>(frames); };
-		draws.Text(std::to_wstring(std::lround(per_frame(delta(current.work.draws, before.work.draws)))));
+		draws.Text(std::to_wstring(std::lround(per_frame(counted(Counter::Draws)))));
 		const uint64_t skips = delta(current.work.skipped_draws, before.work.skipped_draws);
 		std::wstring   skip_text = skips == 0 ? L"0" : per_frame(skips) < 0.5 ? L"<1" : std::to_wstring(std::lround(per_frame(skips)));
 		if (skips != 0 && current.work.skip_reason != nullptr) {
@@ -646,11 +826,14 @@ void GameOverlay::State::UpdateRates(const MemoryTotals& totals) {
 		swprintf_s(text, L"%.1f ms", per_frame(delta(current.work.gpu_ns, before.work.gpu_ns)) / 1e6);
 		gpu_time.Text(text);
 	}
-	disk.Text(mb_per_second(delta(current.work.bytes_read, before.work.bytes_read)) + L" read");
+	disk.Text(mb_per_second(counted(Counter::GuestFileReadBytes)) + L" read");
 	swap_out.Text(mb_per_second(delta(totals.swapped_out, before.memory.swapped_out)));
 	swap_in.Text(mb_per_second(delta(totals.swapped_in, before.memory.swapped_in)));
-	compile_wait.Text(ms_per_second(delta(current.work.compile_ns, before.work.compile_ns)));
+	compile_wait.Text(ms_per_second(counted(Counter::ShaderCompileNs) + counted(Counter::PipelineCreateNs)));
 	swap_wait.Text(ms_per_second(delta(totals.swap_wait_ns, before.memory.swap_wait_ns)));
+	if (detail == OVERLAY_DETAILED) {
+		UpdateDetailedRates(current, before, seconds);
+	}
 	sample = current;
 }
 
@@ -670,6 +853,240 @@ void GameOverlay::State::ShowSwapFile(bool shown) {
 	statistics.RowDefinitions().GetAt(SWAP_GAP_ROW).Height(xaml::GridLengthHelper::FromPixels(shown ? 8.0 : 0.0));
 	compact_swap_label.Visibility(visibility);
 	compact_swap.Visibility(visibility);
+	for (const auto& element: detailed_swap) {
+		element.Visibility(visibility);
+	}
+}
+
+// ---- Detailed
+
+void GameOverlay::State::Set(Stat stat, std::wstring const& text, Level level) {
+	auto& block = detailed_values[stat];
+	block.Text(text);
+	switch (level) {
+		case Level::Good: block.Foreground(good_brush); break;
+		case Level::Medium: block.Foreground(medium_brush); break;
+		case Level::Bad: block.Foreground(bad_brush); break;
+		default: block.Foreground(value_brush); break;
+	}
+}
+
+// A panel per group list, beside the frame rate's box: each group a heading in bold (with a gap above it), over rows of a label and a value of
+// fixed widths.
+void GameOverlay::State::BuildDetailed(xaml::Controls::Panel const& row, xaml::Media::Brush const& background) {
+	const auto resources = xaml::Application::Current().Resources();
+	const auto caption   = resources.Lookup(winrt::box_value(L"CaptionTextBlockStyle")).as<xaml::Style>();
+	const auto muted     = resources.Lookup(winrt::box_value(L"SystemControlForegroundBaseMediumBrush")).as<xaml::Media::Brush>();
+	const auto color     = [](uint8_t a, uint8_t r, uint8_t g, uint8_t b) {
+		return xaml::Media::SolidColorBrush(winrt::Windows::UI::ColorHelper::FromArgb(a, r, g, b));
+	};
+	good_brush         = color(255, 96, 220, 120);
+	medium_brush       = color(255, 230, 195, 60);
+	bad_brush          = color(255, 235, 80, 70);
+	const auto text    = [&caption](std::wstring_view content, double width) {
+		xaml::Controls::TextBlock block;
+		block.Style(caption);
+		block.TextWrapping(xaml::TextWrapping::NoWrap);
+		block.TextTrimming(xaml::TextTrimming::CharacterEllipsis);
+		block.Width(width);
+		block.Text(content);
+		xaml::Documents::Typography::SetNumeralAlignment(block, xaml::FontNumeralAlignment::Tabular);
+		return block;
+	};
+	for (const auto& groups: DetailedPanels()) {
+		xaml::Controls::Grid grid;
+		grid.ColumnSpacing(DETAILED_CELL_GAP);
+		for (const double width: {DETAILED_LABEL_WIDTH, DETAILED_VALUE_WIDTH}) {
+			xaml::Controls::ColumnDefinition definition;
+			definition.Width(xaml::GridLengthHelper::FromPixels(width));
+			grid.ColumnDefinitions().Append(definition);
+		}
+		const auto add_row = [&grid]() {
+			xaml::Controls::RowDefinition definition;
+			definition.Height(xaml::GridLengthHelper::Auto());
+			grid.RowDefinitions().Append(definition);
+			return static_cast<int32_t>(grid.RowDefinitions().Size()) - 1;
+		};
+		const auto place = [&grid](xaml::FrameworkElement const& element, int32_t at_row, int32_t at_column) {
+			xaml::Controls::Grid::SetRow(element, at_row);
+			xaml::Controls::Grid::SetColumn(element, at_column);
+			grid.Children().Append(element);
+		};
+		for (const auto& group: groups) {
+			const bool swap_group = std::all_of(group.rows.begin(), group.rows.end(), [](const StatRow& r) { return IsSwapStat(r.stat); });
+			// The heading: the group's name in bold, as a title (with a gap above it, but for the first).
+			xaml::Controls::TextBlock heading;
+			heading.Style(caption);
+			heading.FontWeight(winrt::Windows::UI::Text::FontWeights::Bold());
+			heading.Text(group.name);
+			heading.Margin({0, grid.RowDefinitions().Size() != 0 ? 8.0 : 0.0, 0, 2});
+			xaml::Controls::Grid::SetColumnSpan(heading, 2);
+			place(heading, add_row(), 0);
+			if (swap_group) {
+				detailed_swap.push_back(heading);
+			}
+			for (const auto& entry: group.rows) {
+				const int32_t at_row = add_row();
+				detailed_labels[entry.stat] = text(entry.label, DETAILED_LABEL_WIDTH);
+				detailed_labels[entry.stat].Foreground(muted);
+				detailed_values[entry.stat] = text(L"–", DETAILED_VALUE_WIDTH);
+				place(detailed_labels[entry.stat], at_row, 0);
+				place(detailed_values[entry.stat], at_row, 1);
+				if (IsSwapStat(entry.stat)) {
+					detailed_swap.push_back(detailed_labels[entry.stat]);
+					detailed_swap.push_back(detailed_values[entry.stat]);
+				}
+			}
+		}
+		xaml::Controls::Border panel;
+		panel.Background(background);
+		panel.Padding({12, 12, 12, 12});
+		panel.VerticalAlignment(xaml::VerticalAlignment::Top);
+		panel.Child(grid);
+		panel.Visibility(xaml::Visibility::Collapsed);
+		row.Children().Append(panel);
+		detailed_panels.push_back(panel);
+	}
+	value_brush = detailed_values[STAT_LOW].Foreground();
+}
+
+// What Detailed shows that changes each update: the frames, the resolutions, the memory, the CPU, the shaders and the pipelines.
+void GameOverlay::State::UpdateDetailed(const std::vector<double>& times, uint64_t used, uint64_t limit, const MemoryTotals& totals) {
+	if (!times.empty()) {
+		double second = 0.0;
+		double worst  = 0.0;
+		for (auto it = times.rbegin(); it != times.rend() && second < 1000.0; ++it) {
+			second += *it;
+			worst = std::max(worst, *it);
+		}
+		// The 1% low as upstream's panel has it: the 99th percentile of the frame times in the graph.
+		auto       sorted     = times;
+		const auto percentile = sorted.begin() + static_cast<ptrdiff_t>(sorted.size() * 99 / 100);
+		std::nth_element(sorted.begin(), percentile, sorted.end());
+		if (*percentile > 0.0) {
+			Set(STAT_LOW, Formatted(L"%.1f fps", 1000.0 / *percentile), FrameTimeLevel(*percentile));
+		}
+		Set(STAT_WORST, Formatted(L"%.1f ms", std::min(worst, 9999.9)), FrameTimeLevel(worst));
+	}
+	Set(STAT_INTERNAL, render_resolution.Text().c_str());
+	Set(STAT_SCALED, output_resolution.Text().c_str());
+	Set(STAT_DISPLAY, display_resolution.Text().c_str());
+	const bool limited = limit != 0 && limit < (uint64_t {64} << 30);
+	Set(STAT_USED, limited ? Bytes(used) + L" / " + Bytes(limit) : Bytes(used),
+	    limited ? LevelOf(static_cast<double>(used) * 100.0 / static_cast<double>(limit), 85, 95) : Level::None);
+	Set(STAT_GAME, Bytes(totals.game));
+	const uint64_t parts = totals.game + (IsXbox() ? totals.gpu : 0);
+	Set(STAT_OTHER, Bytes(used > parts ? used - parts : 0));
+	if (totals.gpu_budget != 0) {
+		Set(STAT_GPU_MEMORY, Bytes(totals.gpu) + L" / " + Bytes(totals.gpu_budget),
+		    LevelOf(static_cast<double>(totals.gpu) * 100.0 / static_cast<double>(totals.gpu_budget), 80, 95));
+	}
+	Set(STAT_SWAP_SIZE, Bytes(totals.swapped));
+	// The CPU as Full has it, with the cores it makes.
+	if (cpu_share >= 0.0) {
+		const auto cores = std::max(1u, std::thread::hardware_concurrency());
+		Set(STAT_CPU, Formatted(L"%.0f%%  (%.1f of %u cores)", cpu_share * 100.0, cpu_share * cores, cores));
+	}
+	if (const auto statistics = CurrentShaderStatistics()) {
+		Set(STAT_SHADERS, Formatted(L"%llu  (%llu new)", statistics->drawing_shaders + statistics->compute_shaders, statistics->new_shaders));
+		Set(STAT_PIPELINES, Formatted(L"%llu  (%llu new, %llu cached)", statistics->pipelines,
+		                              statistics->pipelines - std::min(statistics->cached_pipelines, statistics->pipelines),
+		                              statistics->saved_pipelines));
+	}
+}
+
+// What Detailed shows per second (and per frame), from the counters over the last second, and what costs more to find out: the game's memory as
+// the PS5 hands it out, and the busiest threads.
+void GameOverlay::State::UpdateDetailedRates(const Sample& current, const Sample& before, double seconds) {
+	using Counter       = Common::DebugCounters::Counter;
+	const auto delta    = [](uint64_t now, uint64_t then) { return now > then ? now - then : 0; };
+	const auto counted  = [&](Counter counter) { return delta(current.work.Get(counter), before.work.Get(counter)); };
+	const auto rate     = [&](Counter counter) { return static_cast<double>(counted(counter)) / seconds; };
+	const auto total    = [&](Counter counter) { return static_cast<unsigned long long>(current.work.Get(counter)); };
+	const auto mb       = [](double bytes_per_second) { return bytes_per_second / static_cast<double>(1u << 20u); };
+	const uint64_t frames    = delta(current.frames, before.frames);
+	const double   per_frame = frames != 0 ? seconds / static_cast<double>(frames) : 0.0; // a rate times this is per frame
+
+	Set(STAT_FLIPS, Formatted(L"%.0f/s requested", rate(Counter::FlipsRequested)));
+	const double rejected = rate(Counter::FlipsRejected);
+	Set(STAT_QUEUE_FULL, Formatted(L"%.0f/s", rejected), rejected > 0.0 ? Level::Bad : Level::Good);
+	const double late = rate(Counter::LateVblanks);
+	Set(STAT_LATE_VBLANKS, Formatted(L"%.0f/s", late), LevelOf(late, 1.0, 10.0));
+	const double emulated = rate(Counter::EmulatedInstructions);
+	Set(STAT_EMULATED, Formatted(L"%.0f/s", emulated), LevelOf(emulated, 1000, 100000));
+	const double unresolved = rate(Counter::UnresolvedImportCalls);
+	Set(STAT_MISSING_CALLS, Formatted(L"%.0f/s  (%llu total)", unresolved, total(Counter::UnresolvedImportCalls)),
+	    unresolved > 0.0 ? Level::Medium : Level::Good);
+
+	// Per frame: none when no frame came in that second (the game loads, or waits).
+	if (frames == 0) {
+		Set(STAT_DRAWS, Formatted(L"%.0f/s", rate(Counter::Draws)));
+		Set(STAT_INSTANCES, L"–");
+		Set(STAT_DISPATCHES, Formatted(L"%.0f/s", rate(Counter::Dispatches)));
+	} else {
+		Set(STAT_DRAWS, Formatted(L"%.0f/frame  %.0f/s", rate(Counter::Draws) * per_frame, rate(Counter::Draws)));
+		Set(STAT_INSTANCES, Formatted(L"%.0f/frame", rate(Counter::DrawInstances) * per_frame));
+		Set(STAT_DISPATCHES, Formatted(L"%.0f/frame  %.0f/s", rate(Counter::Dispatches) * per_frame, rate(Counter::Dispatches)));
+	}
+	// The GPU's time and the skipped draws as Full has them.
+	Set(STAT_GPU_TIME, gpu_time.Text().c_str());
+	const uint64_t skips = delta(current.work.skipped_draws, before.work.skipped_draws);
+	Set(STAT_SKIPPED, skipped.Text().c_str(), skips != 0 ? Level::Medium : Level::Good);
+	Set(STAT_SUBMITS, Formatted(L"%.0f/s", rate(Counter::QueueSubmits)));
+	Set(STAT_GPU_WAIT, Formatted(L"%.0f ms/s  (%.0f waits/s)", rate(Counter::GpuWaitNs) / 1e6, rate(Counter::GpuWaits)));
+	const double faults = rate(Counter::GpuFaults);
+	Set(STAT_FAULTS, Formatted(L"%.0f/s", faults), LevelOf(faults, 20000, 100000));
+	const auto compiles = [&](Stat stat, Counter count_counter, Counter duration_counter, uint64_t peak_ns) {
+		const auto count = total(count_counter);
+		Set(stat,
+		    Formatted(L"%llu, avg %.1f, peak %.0f ms", count,
+		              count != 0 ? static_cast<double>(total(duration_counter)) / 1e6 / static_cast<double>(count) : 0.0,
+		              static_cast<double>(peak_ns) / 1e6),
+		    counted(count_counter) != 0 ? Level::Medium : Level::Good);
+	};
+	compiles(STAT_SHADER_COMPILE, Counter::ShadersCompiled, Counter::ShaderCompileNs, current.work.shader_peak_ns);
+	compiles(STAT_PIPELINE_COMPILE, Counter::PipelinesCreated, Counter::PipelineCreateNs, current.work.pipeline_peak_ns);
+	const auto transfers = [&](Counter up, Counter down) {
+		return Formatted(L"%.1f up / %.1f down MB/s", mb(rate(up)), mb(rate(down)));
+	};
+	Set(STAT_TEXTURE_TRANSFERS, transfers(Counter::TextureUploadBytes, Counter::TextureDownloadBytes));
+	Set(STAT_TEXTURE_EVICTIONS, Formatted(L"%.0f/s", rate(Counter::TextureEvictions)));
+	Set(STAT_BUFFER_TRANSFERS, transfers(Counter::BufferUploadBytes, Counter::BufferDownloadBytes));
+	Set(STAT_BUFFER_EVICTIONS, Formatted(L"%.0f/s", rate(Counter::BufferEvictions)));
+	Set(STAT_SWAP_TRAFFIC, Formatted(L"%.1f / %.1f MB/s", mb(static_cast<double>(delta(current.memory.swapped_out, before.memory.swapped_out)) / seconds),
+	                                 mb(static_cast<double>(delta(current.memory.swapped_in, before.memory.swapped_in)) / seconds)));
+	Set(STAT_SWAP_WAIT, Formatted(L"%.0f ms/s", static_cast<double>(delta(current.memory.swap_wait_ns, before.memory.swap_wait_ns)) / 1e6 / seconds));
+	Set(STAT_FILES, Formatted(L"%.1f / %.1f MB/s", mb(rate(Counter::GuestFileReadBytes)), mb(rate(Counter::GuestFileWriteBytes))));
+	const double underruns = rate(Counter::AudioUnderruns);
+	Set(STAT_AUDIO, Formatted(L"%.0f/s  (%llu total)", underruns, total(Counter::AudioUnderruns)), underruns > 0.0 ? Level::Bad : Level::Good);
+
+	if (const auto game = CurrentGameMemory()) {
+		const uint64_t direct = game->direct_allocated + game->pooled_allocated;
+		Set(STAT_DIRECT, Bytes(direct) + L" / " + Bytes(game->direct_total),
+		    LevelOf(game->direct_total != 0 ? static_cast<double>(direct) * 100.0 / static_cast<double>(game->direct_total) : 0.0, 85, 97));
+		Set(STAT_MAPPED, Bytes(game->direct_mapped));
+		Set(STAT_POOL, Bytes(game->pooled_allocated) + L"  (" + Bytes(game->pool_committed) + L" committed)");
+		Set(STAT_FLEXIBLE, Bytes(game->flexible_used) + L" / " + Bytes(game->flexible_total));
+		Set(STAT_EXTENDED, Bytes(game->automatic_allocated));
+		// Past its total a side sees no page-table entries left.
+		const uint64_t percent = std::max(game->cpu_page_entries * 100 / std::max<uint64_t>(game->cpu_page_entries_total, 1),
+		                                  game->gpu_page_entries * 100 / std::max<uint64_t>(game->gpu_page_entries_total, 1));
+		Set(STAT_PAGE_TABLE,
+		    Formatted(L"CPU %llu / %llu  GPU %llu / %llu", static_cast<unsigned long long>(game->cpu_page_entries),
+		              static_cast<unsigned long long>(game->cpu_page_entries_total), static_cast<unsigned long long>(game->gpu_page_entries),
+		              static_cast<unsigned long long>(game->gpu_page_entries_total)),
+		    LevelOf(static_cast<double>(percent), 90, 100));
+	}
+	const auto threads = BusiestThreads(DETAILED_THREADS);
+	for (size_t i = 0; i < DETAILED_THREADS; i++) {
+		const auto stat = static_cast<Stat>(STAT_THREAD_1 + i);
+		detailed_labels[stat].Text(i < threads.size() ? L"  " + threads[i].name : std::wstring());
+		if (i < threads.size()) {
+			Set(stat, Formatted(L"%.0f%%", threads[i].percent), LevelOf(threads[i].percent, 70, 95));
+		} else {
+			Set(stat, L"");
+		}
+	}
 }
 
 // The overlay's size: below the system's size, laid out over the page enlarged by 1 / scale, then scaled down to fit.
@@ -751,6 +1168,8 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.swap_wait         = find(L"SwapWait").as<xaml::Controls::TextBlock>();
 	state.controllers      = find(L"Controllers").as<xaml::Controls::Grid>();
 	state.log              = find(L"Log").as<xaml::Controls::TextBlock>();
+	state.BuildDetailed(find(L"TopRow").as<xaml::Controls::Panel>(),
+	                    state.root.Resources().Lookup(winrt::box_value(L"PanelBrush")).as<xaml::Media::Brush>());
 	page.Children().InsertAt(index, state.root);
 	page.SizeChanged([weak = std::weak_ptr<State>(m_state)](auto const&, xaml::SizeChangedEventArgs const& args) {
 		if (auto shared = weak.lock()) {
@@ -775,6 +1194,8 @@ GameOverlay::~GameOverlay() {
 void GameOverlay::Show(bool shown) {
 	auto& state = *m_state;
 	state.root.Visibility(shown ? xaml::Visibility::Visible : xaml::Visibility::Collapsed);
+	// Upstream's counters count while the overlay shows.
+	CountersOn(shown);
 	if (shown) {
 		if (state.log_tail == nullptr) {
 			state.log_tail = std::make_unique<LogTail>();
@@ -792,15 +1213,19 @@ bool GameOverlay::Shown() const {
 
 void GameOverlay::Apply(const AppSettings& settings) {
 	auto& state              = *m_state;
-	state.detail             = std::min(settings.overlay_detail, OVERLAY_FULL);
+	state.detail             = std::min(settings.overlay_detail, OVERLAY_DETAILED);
 	state.log_shown          = settings.overlay_log;
 	state.controllers_shown  = settings.overlay_controllers;
 	state.log_lines          = std::clamp<size_t>(settings.overlay_log_lines, 2, LOG_LINES);
 	state.headset_mic_option = settings.headset_mic;
-	state.header.Visibility(VisibleIf(state.detail == OVERLAY_FULL));
+	// Detailed: the box with the game, the frame rate and the graph, and its panels beside it.
+	state.header.Visibility(VisibleIf(state.detail == OVERLAY_FULL || state.detail == OVERLAY_DETAILED));
 	state.graph.Visibility(VisibleIf(state.detail != OVERLAY_FRAME_RATE));
 	state.statistics.Visibility(VisibleIf(state.detail == OVERLAY_FULL));
 	state.compact.Visibility(VisibleIf(state.detail == OVERLAY_COMPACT));
+	for (const auto& panel: state.detailed_panels) {
+		panel.Visibility(VisibleIf(state.detail == OVERLAY_DETAILED));
+	}
 	state.stats_panel.Width(state.detail == OVERLAY_FRAME_RATE ? std::numeric_limits<double>::quiet_NaN() : STATS_WIDTH);
 	state.controllers_panel.Visibility(VisibleIf(state.controllers_shown));
 	state.log_panel.Visibility(VisibleIf(state.log_shown));
@@ -813,8 +1238,8 @@ void GameOverlay::Apply(const AppSettings& settings) {
 void AddOverlaySettings(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, std::shared_ptr<AppSettings> settings,
                         std::function<void()> changed) {
 	AddChoice(
-	    panel, explanation, L"Overlay", {L"Off", L"Frame rate", L"Compact", L"Full"},
-	    OverlayShown() ? 1 + std::min(settings->overlay_detail, OVERLAY_FULL) : 0,
+	    panel, explanation, L"Overlay", {L"Off", L"Frame rate", L"Compact", L"Full", L"Detailed"},
+	    OverlayShown() ? 1 + std::min(settings->overlay_detail, OVERLAY_DETAILED) : 0,
 	    [settings, changed](size_t index) {
 		    SetOverlayShown(index != 0);
 		    if (index != 0) {
@@ -823,9 +1248,8 @@ void AddOverlaySettings(xaml::Controls::Panel const& panel, xaml::Controls::Stac
 		    changed();
 	    },
 	    {L"What the overlay shows over games.",
-	     L"Frame rate: the frames per second and the time per frame. Compact: also a graph of the last frames, the GPU's time per frame, RAM and "
-	     L"the swap file. Full: everything, from the draws to the shaders.",
-	     L"To turn it off and on during a game, pull both triggers while pressing View and Menu together."});
+	     L"Frame rate, Compact and Full show more with each step. Detailed shows everything, in panels along the top.",
+	     L"During a game, both triggers with View and Menu turn it off and on."});
 	// Off, or 2 to 20 lines in steps of 2 (overlay_log and overlay_log_lines; an odd number from the settings file shows as the next even one).
 	{
 		constexpr auto            MAX_LINES = static_cast<uint32_t>(LOG_LINES);
