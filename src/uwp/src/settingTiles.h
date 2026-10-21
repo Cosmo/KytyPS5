@@ -34,6 +34,11 @@ void AddChoice(winrt::Windows::UI::Xaml::Controls::Panel const& panel, winrt::Wi
 void AddSwitch(winrt::Windows::UI::Xaml::Controls::Panel const& panel, winrt::Windows::UI::Xaml::Controls::StackPanel const& explanation,
                const wchar_t* name, bool on, std::function<void(bool)> changed, Paragraphs help = {});
 
+// A tile that opens something: its name, and `detail` under it (none when empty); A runs `clicked`. The tile.
+winrt::Windows::UI::Xaml::Controls::Button AddAction(winrt::Windows::UI::Xaml::Controls::Panel const&      panel,
+                                                     winrt::Windows::UI::Xaml::Controls::StackPanel const& explanation, const wchar_t* name,
+                                                     const wchar_t* detail, std::function<void()> clicked, Paragraphs help = {});
+
 } // namespace Kyty::Uwp
 
 #endif // EMULATOR_SRC_UWP_SETTINGTILES_H_
