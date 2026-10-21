@@ -24,14 +24,14 @@ constexpr wchar_t CHEVRON_DOWN[] = {0xE70D, 0};
 constexpr wchar_t CHECK_MARK[]   = {0xE73E, 0};
 
 // A setting as a tile of the Xbox's Settings: its name, and its current value under it with a chevron (A opens the choices) or a check box at
-// its right (A turns it over).
+// its right (A turns it over); or a tile that opens something, with a line under its name.
 struct SettingTile {
 	xaml::Controls::Button    button {nullptr};
 	xaml::Controls::TextBlock value {nullptr};
 	xaml::UIElement           check {nullptr};
 };
 
-enum class TileKind { Choice, Switch };
+enum class TileKind { Choice, Switch, Action };
 
 xaml::Style AppStyle(const wchar_t* key) {
 	return xaml::Application::Current().Resources().Lookup(winrt::box_value(key)).as<xaml::Style>();
@@ -66,7 +66,7 @@ SettingTile MakeTile(const wchar_t* name, TileKind kind) {
 	title.Text(name);
 	title.TextWrapping(xaml::TextWrapping::Wrap);
 	text.Children().Append(title);
-	if (kind == TileKind::Choice) {
+	if (kind != TileKind::Switch) {
 		tile.value = xaml::Controls::TextBlock();
 		tile.value.Style(AppStyle(L"BodyTextBlockStyle"));
 		tile.value.TextWrapping(xaml::TextWrapping::Wrap);
@@ -84,7 +84,7 @@ SettingTile MakeTile(const wchar_t* name, TileKind kind) {
 		icon.FontSize(12);
 		xaml::Controls::Grid::SetColumn(icon, 1);
 		content.Children().Append(icon);
-	} else {
+	} else if (kind == TileKind::Switch) {
 		// A check box: a white square, with a check mark while the setting is on.
 		xaml::Controls::Border box;
 		box.Width(CHECK_BOX_SIZE);
@@ -165,6 +165,19 @@ void AddSwitch(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel co
 	});
 	Explain(tile.button, explanation, help);
 	panel.Children().Append(tile.button);
+}
+
+xaml::Controls::Button AddAction(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, const wchar_t* name,
+                                 const wchar_t* detail, std::function<void()> clicked, Paragraphs help) {
+	auto tile = MakeTile(name, TileKind::Action);
+	tile.value.Text(detail);
+	if (*detail == 0) {
+		tile.value.Visibility(xaml::Visibility::Collapsed);
+	}
+	tile.button.Click([clicked = std::move(clicked)](auto const&, auto const&) { clicked(); });
+	Explain(tile.button, explanation, help);
+	panel.Children().Append(tile.button);
+	return tile.button;
 }
 
 } // namespace Kyty::Uwp
