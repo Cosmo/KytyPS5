@@ -62,9 +62,11 @@ This lets every UWP app read that folder. To grant this app alone, use its packa
 
 Saves, patches and trophies can live on the USB drive too: choose a folder under **User Data Path** in the settings. The app needs write access to it (`(OI)(CI)M` instead of `RX` in the command above); the settings page says whether it has it. When the folder can't be written as a game starts, that game uses the app's own folder.
 
+A game's cheats are in its options in the library (Menu button › Cheats): the HEN Cheats Collection's files for the game, as the desktop launcher lists them, can be downloaded into the user data folder's `_Patches` and their cheats switched on and off there. They apply when the game starts.
+
 ## Settings
 
-The settings page (the gear at the top right) keeps its choices in `LocalState\kyty-uwp.json`, in categories, as the Xbox's own Settings: Display (TV resolution, V-Sync, the overlay: what it shows, how many log lines or none, its controllers, its size), User (name, console language), Controller (Impulse Triggers, haptics, the headset's speaker and microphone), Game folders, User Data Path, Memory and quality (game memory paging, compact GPU memory, video decoding, and the textures' detail, sharpness and filtering) and Developer (debug layer, detailed log, memory report, GPU crash diagnostics, keeping and removing compiled shaders). Each setting explains itself next to it. Game settings apply to the next game you start. A few settings for debugging exist only in the file (`src/uwp/src/settings.h`).
+The settings page (the gear at the top right) keeps its choices in `LocalState\kyty-uwp.json`, in categories, as the Xbox's own Settings: Display (TV resolution, V-Sync, stretching the picture to the screen, the overlay: what it shows, how many log lines or none, its controllers, its size), User (name, console language), Controller (Impulse Triggers, haptics, the headset's speaker and microphone), Game folders, User Data Path, Memory and quality (game memory paging, compact GPU memory, video decoding, and the textures' detail, sharpness and filtering) and Developer (debug layer, detailed log, memory report, GPU crash diagnostics, keeping and removing compiled shaders). Each setting explains itself next to it. Game settings apply to the next game you start. A few settings for debugging exist only in the file (`src/uwp/src/settings.h`).
 
 ## Building
 

@@ -49,6 +49,35 @@ std::optional<std::vector<uint8_t>> ReadBinaryFile(const std::filesystem::path& 
 	return ReadWholeFile<std::vector<uint8_t>>(path, int64_t {32} << 20);
 }
 
+uint32_t WriteFileReplacing(const std::filesystem::path& path, std::string_view data) {
+	if (!CreateDirectoryFromAppW(path.parent_path().c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+		return GetLastError();
+	}
+	auto   temporary = path;
+	temporary += L".tmp";
+	HANDLE file      = CreateFile2FromAppW(temporary.c_str(), GENERIC_WRITE, 0, CREATE_ALWAYS, nullptr);
+	if (file == INVALID_HANDLE_VALUE) {
+		return GetLastError();
+	}
+	DWORD written = 0;
+	const bool ok = WriteFile(file, data.data(), static_cast<DWORD>(data.size()), &written, nullptr) && written == data.size() &&
+	                FlushFileBuffers(file);
+	uint32_t error = ok ? 0 : GetLastError();
+	if (!ok && error == 0) {
+		error = ERROR_WRITE_FAULT; // a short write
+	}
+	CloseHandle(file);
+	if (error == 0) {
+		const bool replaced = IsFile(path) ? ReplaceFileFromAppW(path.c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr)
+		                                   : MoveFileFromAppW(temporary.c_str(), path.c_str());
+		error = replaced ? 0 : GetLastError();
+	}
+	if (error != 0) {
+		DeleteFileFromAppW(temporary.c_str());
+	}
+	return error;
+}
+
 namespace {
 
 // ListError without the log line.
