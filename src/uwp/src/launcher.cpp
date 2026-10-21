@@ -205,7 +205,7 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
       <Border x:Name="Hints" Grid.Row="5" Style="{StaticResource HintBarStyle}" Margin="48,16,48,0" />
     </Grid>
 
-  <!-- A game's options (Menu button, right click), in the system's look: its details, play, hide. -->
+  <!-- A game's options (Menu button, right click), in the system's look: its details, play, cheats, hide. -->
   <Grid x:Name="Options" Visibility="Collapsed">
     <Rectangle Fill="{ThemeResource SystemControlPageBackgroundMediumAltMediumBrush}" />
     <Grid Width="360" HorizontalAlignment="Right" Padding="24,32,24,32"
@@ -273,8 +273,9 @@ struct Launcher {
 	size_t                    options_index = 0;
 };
 
-constexpr wchar_t OPTION_PLAY[] = L"Play";
-constexpr wchar_t OPTION_HIDE[] = L"Hide game";
+constexpr wchar_t OPTION_PLAY[]   = L"Play";
+constexpr wchar_t OPTION_CHEATS[] = L"Cheats";
+constexpr wchar_t OPTION_HIDE[]   = L"Hide game";
 
 bool OptionsOpen(const Launcher& launcher) {
 	return launcher.options.Visibility() == xaml::Visibility::Visible;
@@ -309,7 +310,7 @@ void OpenOptions(const std::shared_ptr<Launcher>& launcher, size_t index) {
 	}
 }
 
-xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<size_t> select);
+xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<size_t> select, const std::filesystem::path& select_game = {});
 
 // Fades to the background of the game selected now; waits a moment first, so moving quickly
 // along the row doesn't load every background on the way.
@@ -521,7 +522,7 @@ namespace {
 
 // The launcher page. `scan`: scan the game folders (showing hidden games again) instead of
 // using the last scan. `select`: the game to start on (by position), else the one played last.
-xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<size_t> select) {
+xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<size_t> select, const std::filesystem::path& select_game) {
 	auto page = xaml::Markup::XamlReader::Load(LauncherMarkup).as<xaml::Controls::Grid>();
 	const auto find = [&page](const wchar_t* name) { return page.FindName(name); };
 
@@ -564,12 +565,15 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	         {{XboxButton::A, L"Play"}, {XboxButton::Y, L"Scan again"}, {XboxButton::Menu, L"Options"}});
 	SetHints(find(L"OptionsHints").as<xaml::Controls::Border>(), {{XboxButton::A, L"Select"}, {XboxButton::B, L"Back"}});
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_PLAY));
+	launcher->options_items.Items().Append(winrt::box_value(OPTION_CHEATS));
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_HIDE));
 	launcher->options_items.ItemClick([launcher](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
 		const auto  item = winrt::unbox_value<winrt::hstring>(args.ClickedItem());
 		const auto& game = launcher->games[launcher->options_index];
 		if (item == OPTION_PLAY) {
 			launcher->actions.play(game);
+		} else if (item == OPTION_CHEATS) {
+			launcher->actions.open_cheats(game);
 		} else {
 			HideGame(game.folder);
 			xaml::Window::Current().Content(CreatePage(launcher->actions, false, launcher->options_index));
@@ -635,9 +639,13 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	const auto style    = page.Resources().Lookup(winrt::box_value(L"CoverStyle")).as<xaml::Style>();
 	const auto last     = LastPlayed();
 	size_t     selected = 0;
+	bool       found    = false;
 	for (size_t index = 0; index < count; index++) {
 		covers.Children().Append(CreateCover(launcher, index, style));
-		if (!last.empty() && launcher->games[index].title_id == last) {
+		if (!select_game.empty() && launcher->games[index].folder == select_game) {
+			selected = index;
+			found    = true;
+		} else if (!found && !last.empty() && launcher->games[index].title_id == last) {
 			selected = index;
 		}
 	}
@@ -684,8 +692,8 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 
 } // namespace
 
-xaml::UIElement CreateLauncherPage(LauncherActions actions, bool scan) {
-	return CreatePage(std::move(actions), scan, std::nullopt);
+xaml::UIElement CreateLauncherPage(LauncherActions actions, bool scan, const std::filesystem::path& select) {
+	return CreatePage(std::move(actions), scan, std::nullopt, select);
 }
 
 } // namespace Kyty::Uwp
