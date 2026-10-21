@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include "cheatsPage.h"
 #include "emulatorHost.h"
 #include "fileAccess.h"
 #include "gameImages.h"
@@ -708,7 +709,7 @@ xaml::UIElement CreateTitlePage(std::string title_id) {
 	                         [title_id] { return CreateTitlePage(title_id); });
 }
 
-xaml::UIElement CreateLibraryPage(bool scan = false) {
+xaml::UIElement CreateLibraryPage(bool scan = false, const std::filesystem::path& select = {}) {
 	LauncherActions actions;
 	actions.play = [](const GameEntry& game) {
 		SetLastPlayed(game.title_id);
@@ -725,7 +726,12 @@ xaml::UIElement CreateLibraryPage(bool scan = false) {
 	actions.open_controls = [] {
 		xaml::Window::Current().Content(CreateControlsPage([] { xaml::Window::Current().Content(CreateLibraryPage()); }));
 	};
-	return CreateLauncherPage(std::move(actions), scan);
+	actions.open_cheats = [](const GameEntry& game) {
+		// Back at the game the cheats are for, not the one played last.
+		xaml::Window::Current().Content(
+		    CreateCheatsPage(game, [folder = game.folder] { xaml::Window::Current().Content(CreateLibraryPage(false, folder)); }));
+	};
+	return CreateLauncherPage(std::move(actions), scan, select);
 }
 
 } // namespace

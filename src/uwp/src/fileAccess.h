@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Small file helpers for the app's own code, on the *FromApp functions like the emulator's file
@@ -15,6 +16,9 @@ namespace Kyty::Uwp {
 [[nodiscard]] std::optional<std::string> ReadTextFile(const std::filesystem::path& path);
 // A file of up to 32 MB (a game's images), or nothing when it can't be read.
 [[nodiscard]] std::optional<std::vector<uint8_t>> ReadBinaryFile(const std::filesystem::path& path);
+// Writes `data` to `path` as a whole: into a file next to it first, which then takes its place, so that a reader never sees half of it. Makes
+// the folder when it's missing. A Windows error, or 0.
+[[nodiscard]] uint32_t WriteFileReplacing(const std::filesystem::path& path, std::string_view data);
 // Why the app may not list `folder` (a Windows error, also logged), or 0 when it may: it exists
 // and grants the app read access.
 [[nodiscard]] uint32_t ListError(const std::filesystem::path& folder);
