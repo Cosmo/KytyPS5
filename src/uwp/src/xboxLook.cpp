@@ -29,7 +29,7 @@ constexpr wchar_t ResourcesMarkup[] = LR"xaml(
     <Setter Property="Background" Value="#050505" />
     <Setter Property="CornerRadius" Value="2" />
     <Setter Property="Height" Value="28" />
-    <Setter Property="Padding" Value="10,0,16,0" />
+    <Setter Property="Padding" Value="12,0,12,0" />
     <Setter Property="HorizontalAlignment" Value="Right" />
     <Setter Property="VerticalAlignment" Value="Bottom" />
   </Style>
