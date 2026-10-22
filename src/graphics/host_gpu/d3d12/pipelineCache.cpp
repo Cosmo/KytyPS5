@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/d3d12/formats.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
 #include "graphics/host_gpu/d3d12/render.h"
+#include "graphics/host_gpu/d3d12/selfTest.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
@@ -65,7 +66,20 @@ private:
 	std::chrono::steady_clock::time_point m_start;
 };
 
-HostShaderLimits ShaderLimits(const GraphicContext& graphics, const D3D12::DxilCompiler& compiler) {
+// As in the Vulkan build, AMD GPUs run the guest's float min/max as their own instructions: vendor 0x1002, and the Xbox, whose adapter reports
+// Microsoft's vendor (0x1414) for its AMD GPU (software adapters are not used). Here the shaders also pass through DXIL, so a check on the device
+// confirms the results first; otherwise the min/max stay emulated.
+bool NativeFloatMinMax(GraphicContext& graphics, const D3D12::DxilCompiler& compiler) {
+	if (graphics.vendor_id != 0x1002u && graphics.vendor_id != 0x1414u) {
+		return false;
+	}
+	const bool exact = D3D12::NativeFloatMinMaxExact(graphics, compiler);
+	Log::WriteToConsoleAndLog(exact ? "D3D12: float min/max run as the GPU's own instructions\n"
+	                                : "D3D12: float min/max stay emulated (the GPU's own instructions differ from the guest's)\n");
+	return exact;
+}
+
+HostShaderLimits ShaderLimits(GraphicContext& graphics, const D3D12::DxilCompiler& compiler) {
 	D3D12_FEATURE_DATA_D3D12_OPTIONS1 options {};
 	D3D12::Check(graphics.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options,
 	                                                  sizeof(options)),
@@ -87,6 +101,7 @@ HostShaderLimits ShaderLimits(const GraphicContext& graphics, const D3D12::DxilC
 	    .max_mesh_shared_memory = 28 * 1024,
 	    // D3D12 allows 32 KiB of group shared memory; a program that needs more keeps its shared memory in a buffer.
 	    .max_compute_shared_memory = D3D12_CS_TGSM_REGISTER_COUNT * sizeof(uint32_t),
+	    .native_float_min_max      = NativeFloatMinMax(graphics, compiler),
 	};
 }
 
