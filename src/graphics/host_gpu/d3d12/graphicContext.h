@@ -69,6 +69,7 @@ struct GraphicContext {
 	D3D12MA::Pool*      cpu_texture_pool         = nullptr;
 	Common::Mutex       queue_mutex;
 	std::string         device_name;
+	uint32_t            vendor_id = 0; // PCI vendor of the adapter (AMD: 0x1002)
 	bool                debug_layer = false;
 	// The device runs mesh shaders (tier 1); they also need shader model 6.5 (DxilCompiler).
 	bool                mesh_shaders = false;
