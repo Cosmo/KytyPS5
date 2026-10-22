@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/d3d12/dxilCompiler.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
 #include "graphics/host_gpu/d3d12/textureArrayTest.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 
 #include <D3D12MemAlloc.h>
 
@@ -18,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -456,6 +458,151 @@ struct Kernel {
 
 bool BlockArrayCopiesWork(GraphicContext& graphics) {
 	return RunTextureArrayCase(graphics, {ArrayKind::Bc7, 16, 3, 32, Upload::CopyFromBuffer, false}, true);
+}
+
+bool NativeFloatMinMaxExact(GraphicContext& graphics, const DxilCompiler& compiler) {
+	const auto say = [](const std::string& text) { Log::WriteToConsoleAndLog("D3D12: float min/max check: " + text + "\n"); };
+	// The guest's V_MIN_F32 and V_MAX_F32 (the emulated rules, tests/ShaderRecompilerComputeTests.cpp).
+	const auto nan   = [](uint32_t v) { return (v & 0x7fffffffu) > 0x7f800000u; };
+	const auto zero  = [](uint32_t v) { return (v & 0x7fffffffu) == 0u; };
+	const auto value = [](uint32_t v) { return std::bit_cast<float>(v); };
+	const auto guest = [&](uint32_t a, uint32_t b, bool max) {
+		if (nan(b)) {
+			return a;
+		}
+		if (nan(a)) {
+			return b;
+		}
+		if (zero(a) && zero(b)) {
+			return max ? (a & b) : (a | b);
+		}
+		return (max ? value(a) >= value(b) : value(a) < value(b)) ? a : b;
+	};
+	// Upstream's VectorMinMaxF32RuntimeEdges; each row gives the pairs (a, b) and (b, c).
+	constexpr uint32_t Cases[][3] = {
+	    {0x40000000u, 0x40400000u, 0x3f800000u}, {0x7fc00000u, 0x40000000u, 0xbf800000u}, {0x40000000u, 0x7fc00000u, 0x3f800000u},
+	    {0x7fa00001u, 0x40000000u, 0x40400000u}, {0x40000000u, 0x7fa00001u, 0xc0000000u}, {0x80000000u, 0x00000000u, 0x80000000u},
+	    {0x00000000u, 0x80000000u, 0x00000000u}, {0x80000000u, 0x80000000u, 0x00000000u}, {0xff800000u, 0x7f800000u, 0x00000000u},
+	    {0x7fc00000u, 0x00000000u, 0x80000000u}, {0xffc05678u, 0x3f800000u, 0x7fa00001u}, {0xbf800000u, 0xc0000000u, 0x7fc01234u},
+	    {0x7fc01234u, 0xffc05678u, 0x7fa00001u}, {0xffc05678u, 0x7fc01234u, 0x3f800000u}};
+	constexpr uint32_t Lanes = 64; // the program's group; lanes past the cases repeat the first pair
+	std::array<uint32_t, Lanes * 2> operands {};
+	uint32_t                        pairs = 0;
+	for (const auto& row: Cases) {
+		for (uint32_t i = 0; i < 2; i++, pairs++) {
+			operands[pairs * 2]     = row[i];
+			operands[pairs * 2 + 1] = row[i + 1];
+		}
+	}
+	for (uint32_t i = pairs; i < Lanes; i++) {
+		operands[i * 2]     = operands[0];
+		operands[i * 2 + 1] = operands[1];
+	}
+
+	auto*      device = graphics.device;
+	const auto dxil   = compiler.Compile(ShaderRecompiler::Spirv::EmitFloatMinMaxCheckProgram(), ShaderType::Compute, 0, false);
+	if (!dxil.IsValid()) {
+		say("the program could not be translated");
+		return false;
+	}
+	const auto                        root_signature = CreateRootSignature(device);
+	D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_desc {};
+	pipeline_desc.pRootSignature     = root_signature.Get();
+	pipeline_desc.CS.pShaderBytecode = dxil.bytecode.data();
+	pipeline_desc.CS.BytecodeLength  = dxil.bytecode.size();
+	ComPtr<ID3D12PipelineState> pipeline;
+	if (FAILED(device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&pipeline)))) {
+		say("CreateComputePipelineState failed");
+		return false;
+	}
+
+	// The upload buffer holds the operands and, 256-byte aligned behind them, zeros for the translator's runtime data.
+	constexpr UINT64       OperandBytes = sizeof(operands);
+	constexpr UINT64       RuntimeData  = (OperandBytes + 255) & ~UINT64 {255};
+	D3D12_HEAP_PROPERTIES  upload_heap {D3D12_HEAP_TYPE_UPLOAD};
+	D3D12_HEAP_PROPERTIES  default_heap {D3D12_HEAP_TYPE_DEFAULT};
+	D3D12_HEAP_PROPERTIES  readback_heap {D3D12_HEAP_TYPE_READBACK};
+	const auto             upload_desc   = BufferDesc(RuntimeData + 256, D3D12_RESOURCE_FLAG_NONE);
+	const auto             results_desc  = BufferDesc(OperandBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+	const auto             readback_desc = BufferDesc(OperandBytes, D3D12_RESOURCE_FLAG_NONE);
+	ComPtr<ID3D12Resource> upload;
+	ComPtr<ID3D12Resource> results;
+	ComPtr<ID3D12Resource> readback;
+	Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+	                                      IID_PPV_ARGS(&upload)),
+	      "float min/max check: upload buffer");
+	Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &results_desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+	                                      IID_PPV_ARGS(&results)),
+	      "float min/max check: results buffer");
+	Check(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+	                                      IID_PPV_ARGS(&readback)),
+	      "float min/max check: readback buffer");
+	uint8_t* mapped = nullptr;
+	Check(upload->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "float min/max check: map upload");
+	std::memset(mapped, 0, static_cast<size_t>(upload_desc.Width));
+	std::memcpy(mapped, operands.data(), OperandBytes);
+	upload->Unmap(0, nullptr);
+
+	ComPtr<ID3D12CommandAllocator>    command_allocator;
+	ComPtr<ID3D12GraphicsCommandList> list;
+	Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&command_allocator)), "float min/max check: command allocator");
+	Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, command_allocator.Get(), nullptr, IID_PPV_ARGS(&list)),
+	      "float min/max check: command list");
+	list->SetComputeRootSignature(root_signature.Get());
+	list->SetPipelineState(pipeline.Get());
+	list->SetComputeRootConstantBufferView(1, upload->GetGPUVirtualAddress() + RuntimeData);
+	list->SetComputeRootShaderResourceView(2, upload->GetGPUVirtualAddress());
+	list->SetComputeRootUnorderedAccessView(3, results->GetGPUVirtualAddress());
+	list->Dispatch(1, 1, 1);
+	D3D12_RESOURCE_BARRIER barrier {};
+	barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	barrier.Transition.pResource   = results.Get();
+	barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+	barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+	list->ResourceBarrier(1, &barrier);
+	list->CopyBufferRegion(readback.Get(), 0, results.Get(), 0, OperandBytes);
+	Check(list->Close(), "float min/max check: close");
+
+	ComPtr<ID3D12Fence> fence;
+	Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "float min/max check: fence");
+	{
+		Common::LockGuard  lock(graphics.queue_mutex);
+		ID3D12CommandList* lists[] = {list.Get()};
+		graphics.queue->ExecuteCommandLists(1, lists);
+		Check(graphics.queue->Signal(fence.Get(), 1), "float min/max check: signal");
+	}
+	HANDLE event = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+	Check(fence->SetEventOnCompletion(1, event), "float min/max check: wait");
+	WaitForSingleObject(event, 10000);
+	CloseHandle(event);
+	if (FAILED(device->GetDeviceRemovedReason()) || fence->GetCompletedValue() < 1) {
+		say("the program did not finish");
+		return false;
+	}
+
+	void* mapped_results = nullptr;
+	Check(readback->Map(0, nullptr, &mapped_results), "float min/max check: map readback");
+	const auto* got   = static_cast<const uint32_t*>(mapped_results);
+	uint32_t    wrong = 0;
+	std::string first_wrong;
+	for (uint32_t pair = 0; pair < pairs; pair++) {
+		const auto a = operands[pair * 2];
+		const auto b = operands[pair * 2 + 1];
+		for (uint32_t max = 0; max < 2; max++) {
+			const auto expected = guest(a, b, max != 0);
+			const auto result   = got[pair * 2 + max];
+			if (result != expected && wrong++ == 0) {
+				first_wrong = fmt::format("{}(0x{:08x}, 0x{:08x}) gave 0x{:08x}, the guest gives 0x{:08x}", max != 0 ? "max" : "min", a, b, result,
+				                          expected);
+			}
+		}
+	}
+	readback->Unmap(0, nullptr);
+	if (wrong != 0) {
+		say(fmt::format("{} of {} results differ from the guest's; first: {}", wrong, pairs * 2, first_wrong));
+	}
+	return wrong == 0;
 }
 
 bool RunShaderSelfTest(bool debug_layer) {
