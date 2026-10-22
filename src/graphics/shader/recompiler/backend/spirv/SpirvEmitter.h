@@ -32,6 +32,11 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 std::vector<uint32_t> EmitMeshFetchProgram(std::span<const IR::StageOutput> outputs,
                                            uint32_t                         user_clip_planes = 0);
 
+// A compute program that checks Profile::native_float_min_max on a device: 64 lanes; lane i
+// reads two floats at dwords 2i and 2i + 1 of a read-only buffer (set 0, binding 0) and writes
+// their NMin and NMax, as the emitter uses them, to the same dwords of a buffer (set 0, binding 1).
+std::vector<uint32_t> EmitFloatMinMaxCheckProgram();
+
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_SPIRVEMITTER_H_ */
