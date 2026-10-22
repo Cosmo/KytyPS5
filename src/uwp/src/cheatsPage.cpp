@@ -353,6 +353,8 @@ void Switch(const std::shared_ptr<Page>& page, size_t index, bool on) {
 	page->local_data     = Cheats::Text(document);
 }
 
+void SwitchAll(const std::shared_ptr<Page>& page, bool on, size_t focus);
+
 // Takes what the file on this console holds now: `data` (empty when there is none).
 void TakeLocal(const std::shared_ptr<Page>& page, std::string data) {
 	page->local_data     = std::move(data);
@@ -370,6 +372,22 @@ void TakeLocal(const std::shared_ptr<Page>& page, std::string data) {
 	}
 	const auto cheats = Cheats::CheatsOf(page->local_document);
 	page->local_caption.Text(Count(cheats.size(), L"cheat", L"cheats") + L". Switched-on ones apply when the game starts.");
+	if (cheats.size() > 1) {
+		const auto add_all = [&](const wchar_t* name, bool on, Paragraphs help) {
+			const auto focus = static_cast<size_t>(page->local_tiles.Children().Size());
+			AddAction(
+			    page->local_tiles, page->explanation, name, L"",
+			    [weak = std::weak_ptr<Page>(page), on, focus] {
+				    if (auto shared = weak.lock()) {
+					    SwitchAll(shared, on, focus);
+				    }
+			    },
+			    std::move(help));
+		};
+		add_all(L"Turn all on", true, {L"Switches every cheat of this game on. They apply the next time the game starts.",
+		                               L"Cheats change the game's code: one that doesn't fit can crash the game."});
+		add_all(L"Turn all off", false, {L"Switches every cheat of this game off. The game starts without them."});
+	}
 	for (size_t index = 0; index < cheats.size(); index++) {
 		AddSwitch(page->local_tiles, page->explanation, Wide(cheats[index].name).c_str(), cheats[index].enabled,
 		          [weak = std::weak_ptr<Page>(page), index](bool on) {
@@ -379,6 +397,24 @@ void TakeLocal(const std::shared_ptr<Page>& page, std::string data) {
 		          },
 		          {L"A switches it on or off. It applies the next time the game starts.",
 		           L"Cheats change the game's code: one that doesn't fit can crash the game."});
+	}
+}
+
+// Switches every cheat on or off and saves the file, as Switch does for one; the new tiles keep the focus on the tile at `focus`.
+void SwitchAll(const std::shared_ptr<Page>& page, bool on, size_t focus) {
+	const auto cheats = Cheats::CheatsOf(page->local_document);
+	if (cheats.empty() || page->path.empty()) {
+		return;
+	}
+	const auto document = Cheats::WithSelection(page->local_document, std::vector<bool>(cheats.size(), on));
+	if (const auto error = Cheats::Save(page->path, document, page->local_data); !error.empty()) {
+		ShowExplanation(page->explanation, {error});
+		LoadLocal(page);
+		return;
+	}
+	TakeLocal(page, Cheats::Text(document));
+	if (focus < page->local_tiles.Children().Size()) {
+		page->local_tiles.Children().GetAt(static_cast<uint32_t>(focus)).as<xaml::Controls::Control>().Focus(xaml::FocusState::Keyboard);
 	}
 }
 
