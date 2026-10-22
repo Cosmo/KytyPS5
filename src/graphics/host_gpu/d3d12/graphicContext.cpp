@@ -304,6 +304,7 @@ void GraphicContext::Create(bool enable_debug_layer) {
 		if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0,
 		                                IID_PPV_ARGS(&device)))) {
 			device_name = Utf8(desc.Description);
+			vendor_id   = desc.VendorId;
 			// Budget queries are optional; without IDXGIAdapter3 the caches use fixed limits.
 			(void)adapter->QueryInterface(IID_PPV_ARGS(&this->adapter));
 			break;
@@ -357,7 +358,7 @@ void GraphicContext::Create(bool enable_debug_layer) {
 		}
 	}
 
-	Log::WriteToConsoleAndLog(fmt::format("D3D12 device: {} (debug layer {})\n", device_name,
+	Log::WriteToConsoleAndLog(fmt::format("D3D12 device: {} (vendor 0x{:04x}, debug layer {})\n", device_name, vendor_id,
 	                                      debug_layer ? "on" : "off"));
 	LogCapabilities(device);
 	D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3 {};
