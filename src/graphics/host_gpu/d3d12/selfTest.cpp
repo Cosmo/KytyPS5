@@ -460,6 +460,138 @@ bool BlockArrayCopiesWork(GraphicContext& graphics) {
 	return RunTextureArrayCase(graphics, {ArrayKind::Bc7, 16, 3, 32, Upload::CopyFromBuffer, false}, true);
 }
 
+bool PredicatedClearsWork(GraphicContext& graphics) {
+	const auto say    = [](const std::string& text) { Log::WriteToConsoleAndLog("D3D12: predicated clear check: " + text + "\n"); };
+	auto*      device = graphics.device;
+	// Two layers of a small target, both cleared to black; then layer 0 is cleared to red behind a predicate of 0 (to be skipped) and
+	// layer 1 to green behind a predicate of 1 (to be made).
+	constexpr UINT        Size   = 4;
+	constexpr UINT        Layers = 2;
+	D3D12_HEAP_PROPERTIES upload_heap {D3D12_HEAP_TYPE_UPLOAD};
+	D3D12_HEAP_PROPERTIES default_heap {D3D12_HEAP_TYPE_DEFAULT};
+	D3D12_HEAP_PROPERTIES readback_heap {D3D12_HEAP_TYPE_READBACK};
+	const auto            upload_desc    = BufferDesc(256, D3D12_RESOURCE_FLAG_NONE);
+	const auto            predicate_desc = BufferDesc(256, D3D12_RESOURCE_FLAG_NONE);
+	auto                  target_desc    = ArrayDesc(Size, Size, 1, Layers, DXGI_FORMAT_R8G8B8A8_UNORM);
+	target_desc.Flags                    = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+	constexpr UINT64 RowPitch   = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+	constexpr UINT64 LayerBytes = (RowPitch * Size + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) &
+	                              ~UINT64 {D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1};
+	const auto             readback_desc = BufferDesc(LayerBytes * Layers, D3D12_RESOURCE_FLAG_NONE);
+	ComPtr<ID3D12Resource> upload;
+	ComPtr<ID3D12Resource> predicates;
+	ComPtr<ID3D12Resource> target;
+	ComPtr<ID3D12Resource> readback;
+	Check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+	                                      IID_PPV_ARGS(&upload)),
+	      "predicated clear check: upload buffer");
+	Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &predicate_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+	                                      IID_PPV_ARGS(&predicates)),
+	      "predicated clear check: predicates");
+	Check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &target_desc, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+	                                      IID_PPV_ARGS(&target)),
+	      "predicated clear check: target");
+	Check(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+	                                      IID_PPV_ARGS(&readback)),
+	      "predicated clear check: readback buffer");
+	uint64_t* values = nullptr;
+	Check(upload->Map(0, nullptr, reinterpret_cast<void**>(&values)), "predicated clear check: map upload");
+	values[0] = 0;
+	values[1] = 1;
+	upload->Unmap(0, nullptr);
+
+	ComPtr<ID3D12DescriptorHeap> rtv_heap;
+	D3D12_DESCRIPTOR_HEAP_DESC   heap_desc {D3D12_DESCRIPTOR_HEAP_TYPE_RTV, Layers, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+	Check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&rtv_heap)), "predicated clear check: RTV heap");
+	const auto                  rtv_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+	D3D12_CPU_DESCRIPTOR_HANDLE rtvs[Layers] {};
+	for (UINT layer = 0; layer < Layers; layer++) {
+		D3D12_RENDER_TARGET_VIEW_DESC view {};
+		view.Format                         = DXGI_FORMAT_R8G8B8A8_UNORM;
+		view.ViewDimension                  = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+		view.Texture2DArray.FirstArraySlice = layer;
+		view.Texture2DArray.ArraySize       = 1;
+		rtvs[layer]                         = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+		rtvs[layer].ptr += SIZE_T {layer} * rtv_size;
+		device->CreateRenderTargetView(target.Get(), &view, rtvs[layer]);
+	}
+
+	ComPtr<ID3D12CommandAllocator>    command_allocator;
+	ComPtr<ID3D12GraphicsCommandList> list;
+	Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&command_allocator)), "predicated clear check: command allocator");
+	Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, command_allocator.Get(), nullptr, IID_PPV_ARGS(&list)),
+	      "predicated clear check: command list");
+	list->CopyBufferRegion(predicates.Get(), 0, upload.Get(), 0, 2 * sizeof(uint64_t));
+	D3D12_RESOURCE_BARRIER barrier {};
+	barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	barrier.Transition.pResource   = predicates.Get();
+	barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+	barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PREDICATION;
+	list->ResourceBarrier(1, &barrier);
+	constexpr float Black[4] {0.0f, 0.0f, 0.0f, 1.0f};
+	constexpr float Red[4] {1.0f, 0.0f, 0.0f, 1.0f};
+	constexpr float Green[4] {0.0f, 1.0f, 0.0f, 1.0f};
+	list->ClearRenderTargetView(rtvs[0], Black, 0, nullptr);
+	list->ClearRenderTargetView(rtvs[1], Black, 0, nullptr);
+	list->SetPredication(predicates.Get(), 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+	list->ClearRenderTargetView(rtvs[0], Red, 0, nullptr);
+	list->SetPredication(predicates.Get(), sizeof(uint64_t), D3D12_PREDICATION_OP_EQUAL_ZERO);
+	list->ClearRenderTargetView(rtvs[1], Green, 0, nullptr);
+	list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+	barrier.Transition.pResource   = target.Get();
+	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+	barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+	list->ResourceBarrier(1, &barrier);
+	for (UINT layer = 0; layer < Layers; layer++) {
+		D3D12_TEXTURE_COPY_LOCATION destination {};
+		destination.pResource                          = readback.Get();
+		destination.Type                               = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+		destination.PlacedFootprint.Offset             = LayerBytes * layer;
+		destination.PlacedFootprint.Footprint.Format   = DXGI_FORMAT_R8G8B8A8_UNORM;
+		destination.PlacedFootprint.Footprint.Width    = Size;
+		destination.PlacedFootprint.Footprint.Height   = Size;
+		destination.PlacedFootprint.Footprint.Depth    = 1;
+		destination.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(RowPitch);
+		D3D12_TEXTURE_COPY_LOCATION source {};
+		source.pResource        = target.Get();
+		source.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+		source.SubresourceIndex = layer; // (one mip level)
+		list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+	}
+	Check(list->Close(), "predicated clear check: close");
+
+	ComPtr<ID3D12Fence> fence;
+	Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "predicated clear check: fence");
+	{
+		Common::LockGuard  lock(graphics.queue_mutex);
+		ID3D12CommandList* lists[] = {list.Get()};
+		graphics.queue->ExecuteCommandLists(1, lists);
+		Check(graphics.queue->Signal(fence.Get(), 1), "predicated clear check: signal");
+	}
+	HANDLE event = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+	Check(fence->SetEventOnCompletion(1, event), "predicated clear check: wait");
+	WaitForSingleObject(event, 10000);
+	CloseHandle(event);
+	if (FAILED(device->GetDeviceRemovedReason()) || fence->GetCompletedValue() < 1) {
+		say("the commands did not finish");
+		return false;
+	}
+	uint8_t* texels = nullptr;
+	Check(readback->Map(0, nullptr, reinterpret_cast<void**>(&texels)), "predicated clear check: map readback");
+	uint32_t skipped = 0;
+	uint32_t made    = 0;
+	std::memcpy(&skipped, texels, sizeof(skipped));
+	std::memcpy(&made, texels + LayerBytes, sizeof(made));
+	readback->Unmap(0, nullptr);
+	const bool ok = skipped == 0xff000000u && made == 0xff00ff00u;
+	say(ok ? "passed"
+	       : fmt::format("FAILED: the clear behind a zero predicate gave 0x{:08x} (0xff000000 if skipped), the one behind 1 gave 0x{:08x} "
+	                     "(0xff00ff00 if made)",
+	                     skipped, made));
+	return ok;
+}
+
 bool NativeFloatMinMaxExact(GraphicContext& graphics, const DxilCompiler& compiler) {
 	const auto say = [](const std::string& text) { Log::WriteToConsoleAndLog("D3D12: float min/max check: " + text + "\n"); };
 	// The guest's V_MIN_F32 and V_MAX_F32 (the emulated rules, tests/ShaderRecompilerComputeTests.cpp).

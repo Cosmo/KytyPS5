@@ -19,6 +19,10 @@ bool RunShaderSelfTest(bool debug_layer);
 // layers whose mip level is smaller than 64 KB are packed differently by copies and by the texture unit.
 bool BlockArrayCopiesWork(GraphicContext& graphics);
 
+// Whether the device skips a ClearRenderTargetView behind a D3D12 predicate of zero and makes one behind a predicate that is not (the texture
+// cache's color clears selected on the GPU, Image::ClearSelected): a small two-layer target is cleared behind each and read back.
+bool PredicatedClearsWork(GraphicContext& graphics);
+
 // Whether the device's float min/max, as the translated shaders use them (Profile::native_float_min_max), give the guest's results: a NaN operand
 // yields the other one (the first for two NaNs, with its bits) and -0 orders below +0. Runs the cases of upstream's VectorMinMaxF32RuntimeEdges on
 // runtime operands and logs the first wrong result.
