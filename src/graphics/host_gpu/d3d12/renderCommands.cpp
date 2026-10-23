@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "gpu_tiler_shaders/gpu_tiler_draw_records_spv.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/frameResolution.h"
@@ -703,6 +704,14 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		vertex_bindings = AcquireVertexBuffers(buffer, vs_input_info);
 		index_binding   = PrepareIndexBuffer(buffer, indices);
 	}
+	// Indirect records the GPU reads (DrawEmitInfo::indirect), which have the layout of D3D12's draw arguments.
+	std::pair<Buffer*, uint64_t> indirect_records {};
+	if (emit.indirect.address != 0) {
+		const auto size = static_cast<uint64_t>(emit.indirect.count - 1) * emit.indirect.stride +
+		                  (draw.IsIndexed() ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS) : sizeof(D3D12_DRAW_ARGUMENTS));
+		indirect_records = m_context.GetBufferCache().ObtainBuffer(emit.indirect.address, size, false);
+		EXIT_IF(indirect_records.first == nullptr || (indirect_records.second & 3u) != 0);
+	}
 
 	// D3D12 has no feedback loops. A depth target the pixel stage samples while the draw writes neither depth nor stencil (nor clears
 	// them) is bound read-only, so it can be a depth-read target and a shader resource at once. Any other texture the draw samples from
@@ -916,6 +925,42 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		LogSnapshot(m_context, state);
 		return;
 	}
+	// An indirect draw: ExecuteIndirect reads the guest's records. A pipeline with spirv_to_dxil's runtime data also takes each
+	// draw's first vertex and base instance from them, from a copy where they precede each record (the draw_records kernel).
+	ID3D12CommandSignature* indirect_signature = nullptr;
+	const Buffer*           indirect_buffer    = indirect_records.first;
+	uint64_t                indirect_offset    = indirect_records.second;
+	if (indirect_buffer != nullptr) {
+		const uint32_t words = draw.IsIndexed() ? 5u : 4u;
+		if (pipeline.layout.runtime_data) {
+			const uint64_t size = uint64_t {emit.indirect.count} * (words + 2u) * sizeof(uint32_t);
+			if (m_draw_records == nullptr || m_draw_records->Size() < size) {
+				if (m_draw_records != nullptr) {
+					// (The list may still read the old one.)
+					m_context.GetCommandScheduler().DeferOperation([old = std::move(m_draw_records)]() mutable { old.reset(); });
+				}
+				m_draw_records = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(),
+				                                          MemoryUsage::DeviceLocal, 0, std::max<uint64_t>(size, 4096));
+				m_draw_records->SetName("indirect draw records");
+			}
+			auto&          kernels    = m_context.GetComputeKernels();
+			const auto     base       = indirect_offset & ~uint64_t {15}; // (root descriptor alignment)
+			const uint32_t constants[] {static_cast<uint32_t>((indirect_offset - base) / 4), emit.indirect.count,
+			                            emit.indirect.stride / 4, draw.IsIndexed() ? 1u : 0u};
+			ComputeKernels::Bindings records;
+			records.input        = indirect_buffer;
+			records.input_offset = base;
+			records.output       = m_draw_records.get();
+			records.constants    = constants;
+			kernels.Dispatch(buffer, kernels.Get(GPU_TILER_DRAW_RECORDS_SPV), records, (emit.indirect.count + 63u) / 64u, 1, 1);
+			indirect_buffer = m_draw_records.get();
+			indirect_offset = 0;
+			indirect_signature = DrawSignature(pipeline, draw.IsIndexed(), (words + 2u) * sizeof(uint32_t));
+		} else {
+			indirect_signature = DrawSignature(pipeline, draw.IsIndexed(), emit.indirect.stride);
+		}
+		indirect_buffer->Use(buffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+	}
 	auto&      trace = D3D12::GetGpuTrace();
 	const auto slot  = trace.Begin(list, &pipeline.trace);
 	list->SetPipelineState(pipeline.pipeline);
@@ -925,7 +970,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	} else {
 		list->IASetPrimitiveTopology(PrimitiveTopology(topology));
 		const auto record = [&]() {
-			if (indexed) {
+			if (indirect_signature != nullptr) {
+				list->ExecuteIndirect(indirect_signature, emit.indirect.count, indirect_buffer->Resource(), indirect_offset,
+				                      nullptr, 0);
+			} else if (indexed) {
 				list->DrawIndexedInstanced(count, draw.instance_count, 0, vertex_offset, emit.first_instance);
 			} else {
 				list->DrawInstanced(count, draw.instance_count, static_cast<uint32_t>(vertex_offset), emit.first_instance);

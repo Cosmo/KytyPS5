@@ -475,6 +475,32 @@ ID3D12CommandSignature* RenderExecutor::DispatchSignature(const PipelineCache::P
 	return signature.Get();
 }
 
+ID3D12CommandSignature* RenderExecutor::DrawSignature(const PipelineCache::Pipeline& pipeline, bool indexed,
+                                                     uint32_t stride) {
+	const bool constants = pipeline.layout.runtime_data;
+	auto&      signature = m_draw_signatures[{constants ? pipeline.root_signature : nullptr, indexed, stride}];
+	if (signature == nullptr) {
+		D3D12_INDIRECT_ARGUMENT_DESC arguments[2] {};
+		UINT                         count = 0;
+		if (constants) {
+			arguments[count].Type                             = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+			arguments[count].Constant.RootParameterIndex      = pipeline.layout.RuntimeDataParameter();
+			arguments[count].Constant.DestOffsetIn32BitValues = 0; // first_vertex, base_instance
+			arguments[count].Constant.Num32BitValuesToSet     = 2;
+			count++;
+		}
+		arguments[count++].Type = indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+		D3D12_COMMAND_SIGNATURE_DESC desc {};
+		desc.ByteStride       = stride;
+		desc.NumArgumentDescs = count;
+		desc.pArgumentDescs   = arguments;
+		D3D12::Check(m_context.GetGraphics().device->CreateCommandSignature(
+		                 &desc, constants ? pipeline.root_signature : nullptr, IID_PPV_ARGS(&signature)),
+		             "create draw command signature");
+	}
+	return signature.Get();
+}
+
 void RenderExecutor::RecordDispatchIndirect(CommandBuffer&                 buffer,
                                             const PipelineCache::Pipeline& pipeline,
                                             PreparedBindings&              bindings,
