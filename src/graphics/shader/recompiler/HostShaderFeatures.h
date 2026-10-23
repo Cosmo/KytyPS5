@@ -65,6 +65,10 @@ struct HostShaderFeatures {
 	// The host has no clock shaders can read (DXIL has none): S_MEMREALTIME reads all ones, as it did before the
 	// translator read the host's device clock.
 	bool realtime_clock_placeholder = false;
+	// A mesh program drawn from GPU-read indirect records reads its draw parameters from the push constants, which the host sets per
+	// record (D3D12: ExecuteIndirect), instead of a task shader's payload; such a draw then has no first instance to read
+	// (IR::PushData::MeshTaskPayloadDwordCount), so the program cache keeps the records of packets that patch one on the CPU.
+	bool indirect_mesh_parameters_in_push_data = false;
 };
 
 void                                    SetHostShaderFeatures(const HostShaderFeatures& features);
