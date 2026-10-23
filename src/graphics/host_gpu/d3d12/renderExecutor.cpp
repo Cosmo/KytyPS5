@@ -462,6 +462,51 @@ ID3D12CommandSignature* RenderExecutor::DispatchSignature(const PipelineCache::P
 	return signature.Get();
 }
 
+ID3D12CommandSignature* RenderExecutor::DrawSignature(const PipelineCache::Pipeline& pipeline, bool indexed,
+                                                     uint32_t stride) {
+	const bool constants = pipeline.layout.runtime_data;
+	auto&      signature = m_draw_signatures[{constants ? pipeline.root_signature : nullptr, indexed, stride}];
+	if (signature == nullptr) {
+		D3D12_INDIRECT_ARGUMENT_DESC arguments[2] {};
+		UINT                         count = 0;
+		if (constants) {
+			arguments[count].Type                             = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+			arguments[count].Constant.RootParameterIndex      = pipeline.layout.RuntimeDataParameter();
+			arguments[count].Constant.DestOffsetIn32BitValues = 0; // first_vertex, base_instance
+			arguments[count].Constant.Num32BitValuesToSet     = 2;
+			count++;
+		}
+		arguments[count++].Type = indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+		D3D12_COMMAND_SIGNATURE_DESC desc {};
+		desc.ByteStride       = stride;
+		desc.NumArgumentDescs = count;
+		desc.pArgumentDescs   = arguments;
+		D3D12::Check(m_context.GetGraphics().device->CreateCommandSignature(
+		                 &desc, constants ? pipeline.root_signature : nullptr, IID_PPV_ARGS(&signature)),
+		             "create draw command signature");
+	}
+	return signature.Get();
+}
+
+ID3D12CommandSignature* RenderExecutor::MeshDrawSignature(const PipelineCache::Pipeline& pipeline) {
+	auto& signature = m_mesh_signatures[pipeline.root_signature];
+	if (signature == nullptr) {
+		D3D12_INDIRECT_ARGUMENT_DESC arguments[2] {};
+		arguments[0].Type                             = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+		arguments[0].Constant.RootParameterIndex      = 0; // the push constants, which a mesh program's draw parameters start
+		arguments[0].Constant.DestOffsetIn32BitValues = 0;
+		arguments[0].Constant.Num32BitValuesToSet     = ShaderRecompiler::IR::PushData::MeshDrawDwordCount;
+		arguments[1].Type                             = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+		D3D12_COMMAND_SIGNATURE_DESC desc {};
+		desc.ByteStride       = (ShaderRecompiler::IR::PushData::MeshDrawDwordCount + 3u) * sizeof(uint32_t);
+		desc.NumArgumentDescs = 2;
+		desc.pArgumentDescs   = arguments;
+		D3D12::Check(m_context.GetGraphics().device->CreateCommandSignature(&desc, pipeline.root_signature, IID_PPV_ARGS(&signature)),
+		             "create mesh draw command signature");
+	}
+	return signature.Get();
+}
+
 void RenderExecutor::RecordDispatchIndirect(CommandBuffer&                 buffer,
                                             const PipelineCache::Pipeline& pipeline,
                                             PreparedBindings&              bindings,
