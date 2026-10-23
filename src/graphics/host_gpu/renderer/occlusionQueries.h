@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_OCCLUSIONQUERIES_H_
 
 #include "common/common.h"
+#include "graphics/host_gpu/occlusionCounters.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <cstdint>
@@ -11,21 +12,6 @@ namespace Libs::Graphics {
 
 class CommandScheduler;
 struct GraphicContext;
-
-// The guest's query results (16-byte aligned): a begin/end pair of running z-pass counters per DB,
-// 16 bytes apart; bit 63 marks a written counter. A query's samples are the sum of end - begin.
-constexpr uint32_t OCCLUSION_QUERY_DBS   = 16;
-constexpr uint64_t OCCLUSION_QUERY_READY = 1ull << 63u;
-
-// A dump of the running count, all of it in DB 0. A begin also clears its end counters.
-inline void WriteZPassCounters(volatile uint64_t* results, uint64_t samples, bool begin) {
-	for (uint32_t db = 0; db < OCCLUSION_QUERY_DBS; db++) {
-		results[db * 2] = OCCLUSION_QUERY_READY | (db == 0 ? samples : 0);
-		if (begin) {
-			results[db * 2 + 1] = 0;
-		}
-	}
-}
 
 // The guest's z-pass counters from host occlusion queries: a draw counts its samples while a guest
 // query is open, and the dumps' counters are written before the guest can see the GPU ran them.

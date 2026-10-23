@@ -902,9 +902,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (writes_memory) {
 		buffer.GlobalMemoryBarrier();
 	}
+	auto& occlusion_queries = m_context.GetOcclusionQueries();
 	if (emulated_mesh) {
+		const int32_t occlusion_query = occlusion_queries.Begin(list);
 		RecordEmulatedMeshDraw(buffer, vs_input_info, *mesh_compute, pipeline, draw_data,
 		                       mesh_groups, draw.instance_count);
+		occlusion_queries.End(list, occlusion_query);
 		if (writes_memory) {
 			buffer.GlobalMemoryBarrier();
 		}
@@ -916,6 +919,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	auto&      trace = D3D12::GetGpuTrace();
 	const auto slot  = trace.Begin(list, &pipeline.trace);
 	list->SetPipelineState(pipeline.pipeline);
+	const int32_t occlusion_query = occlusion_queries.Begin(list);
 	if (mesh) {
 		buffer.MeshHandle()->DispatchMesh(mesh_groups, draw.instance_count, 1);
 	} else {
@@ -935,6 +939,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			record();
 		}
 	}
+	occlusion_queries.End(list, occlusion_query);
 	trace.End(list, slot);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
