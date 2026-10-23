@@ -11,9 +11,11 @@
 #include <array>
 #include <cstdint>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -203,6 +205,12 @@ private:
 	                            const Buffer& args, uint64_t args_offset);
 	// The command signature of indirect dispatches of `pipeline`.
 	[[nodiscard]] ID3D12CommandSignature* DispatchSignature(const PipelineCache::Pipeline& pipeline);
+	// The command signature of indirect draws with `pipeline`: one with runtime data sets each draw's first vertex and base
+	// instance from the two dwords before its arguments (records `stride` bytes apart).
+	[[nodiscard]] ID3D12CommandSignature* DrawSignature(const PipelineCache::Pipeline& pipeline, bool indexed, uint32_t stride);
+	// The command signature of indirect mesh draws with `pipeline`: each sets the mesh program's draw parameters (the first push
+	// constants) and launches its groups (the mesh_records kernel's commands).
+	[[nodiscard]] ID3D12CommandSignature* MeshDrawSignature(const PipelineCache::Pipeline& pipeline);
 	// Before work records into the command list: a new list when the descriptor tables of these pipelines might not fit into the
 	// current one (it holds 2048 samplers at most).
 	void MakeRoomForDescriptors(std::initializer_list<const PipelineCache::Pipeline*> pipelines);
@@ -246,6 +254,14 @@ private:
 	// By root signature; null for pipelines without runtime data.
 	std::unordered_map<ID3D12RootSignature*, D3D12::ComPtr<ID3D12CommandSignature>>
 	    m_dispatch_signatures;
+	// The records of the indirect draw being recorded, each after its runtime data (see DrawSignature).
+	std::unique_ptr<Buffer> m_draw_records;
+	// By root signature (null for pipelines without runtime data), indexed, record stride.
+	std::map<std::tuple<ID3D12RootSignature*, bool, uint32_t>, D3D12::ComPtr<ID3D12CommandSignature>>
+	    m_draw_signatures;
+	// The commands of the indirect mesh draw being recorded (see MeshDrawSignature), and those signatures by root signature.
+	std::unique_ptr<Buffer> m_mesh_draw_commands;
+	std::unordered_map<ID3D12RootSignature*, D3D12::ComPtr<ID3D12CommandSignature>> m_mesh_signatures;
 
 	friend class CommandProcessor;
 };
