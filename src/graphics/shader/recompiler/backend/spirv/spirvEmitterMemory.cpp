@@ -12,6 +12,26 @@
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
 
+// While it lives, loads run for every lane where the host bounds-checks guest buffers itself
+// (HostShaderFeatures::speculative_buffer_loads), or keep their branches (`on` false). Only views of guest buffers at a slot the
+// shader fixes: a slot a lane chooses could be invalid in a lane the branch kept out (an invalid descriptor can hang the GPU), and
+// LDS, scratch and guest addresses (IndirectBuffer reads through them, recording page faults) have no such check.
+class SpeculativeLoads {
+public:
+	SpeculativeLoads(EmitterState& state, bool on): m_state(state), m_saved(state.speculative_loads) {
+		state.speculative_loads = on && GetHostShaderFeatures().speculative_buffer_loads;
+	}
+	SpeculativeLoads(EmitterState& state, IR::ResourceKind kind)
+	    : SpeculativeLoads(state, kind == IR::ResourceKind::Buffer || kind == IR::ResourceKind::ScalarBuffer) {}
+	~SpeculativeLoads() { m_state.speculative_loads = m_saved; }
+	SpeculativeLoads(const SpeculativeLoads&)            = delete;
+	SpeculativeLoads& operator=(const SpeculativeLoads&) = delete;
+
+private:
+	EmitterState& m_state;
+	bool          m_saved;
+};
+
 uint32_t AndCondition(EmitterState& state, uint32_t lhs, uint32_t rhs) {
 	return Binary(state, spv::OpLogicalAnd, TypeBool(state), lhs, rhs);
 }
@@ -320,6 +340,8 @@ auto EmitBufferAccess(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInf
 	    state.program.info.buffers[mem.resource].indirect_root != mem.resource) {
 		return access(mem.resource);
 	}
+	// The buffer a lane chooses keeps its branches: the slot is only valid in lanes the checks let through.
+	const SpeculativeLoads chosen_buffer(state, false);
 	const auto root_resource = mem.resource;
 	const auto& buffer = state.program.info.buffers[root_resource];
 	const auto& handle = *inst.Arg(0).ResolveInstruction();
@@ -1886,6 +1908,7 @@ uint32_t EmitReadConst(ValueEmitContext& ctx, const IR::Inst& inst) {
 void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto mem = ctx.Memory(inst);
 	if (mem.planning_only) return;
+	const SpeculativeLoads speculative(ctx.state, mem.kind != IR::ResourceKind::IndirectBuffer);
 	if (mem.kind == IR::ResourceKind::IndirectBuffer) {
 		ctx.Define(inst, LoadIndirectScalarBuffer(ctx, inst));
 		return;
@@ -1926,6 +1949,7 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto buffer_components = IR::BufferComponentCount(op);
 	const auto shared_components = IR::SharedComponentCount(op);
 	const auto address_info      = IR::AddressOpcodeInfoOf(op);
+	const SpeculativeLoads speculative(ctx.state, mem.kind);
 	uint32_t   value;
 	if (mem.kind == IR::ResourceKind::FlatLocal)
 		value = LoadLocalFlat(ctx, inst);
