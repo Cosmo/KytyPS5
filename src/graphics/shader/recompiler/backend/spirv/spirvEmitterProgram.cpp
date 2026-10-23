@@ -501,7 +501,7 @@ uint32_t ValueEmitContext::FirstLane(uint32_t ballot) {
 		return std::pair {bits, EmitGlsl<GLSLstd450FindILsb, IR::Type::U32>(state, bits)};
 	};
 	const auto [low, low_first] = first(0);
-	if (state.program.wave_size == 32u) {
+	if (state.program.wave_size == 32u && !GetHostShaderFeatures().wave32_in_wider_waves) {
 		return EmitGlsl<GLSLstd450SMax, IR::Type::U32>(state, low_first, ConstantU32(state, 0));
 	}
 	const auto high_first = first(1).second;
