@@ -550,6 +550,15 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	// it, guest memory is read through a table of buffers. (Set before any shader is translated.)
 	auto features                = ShaderRecompiler::GetHostShaderFeatures();
 	features.guest_pointer_table = !m_compiler.SupportsHeapIndexing();
+	{
+		// A program of 32 lanes runs in a wave of up to WaveLaneCountMax lanes (64 on the Series X), where its active lanes can all be
+		// past the first 32: the first active lane then has to be looked for in all of them (a waterfall loop that reads an inactive
+		// lane never ends and hangs the GPU).
+		D3D12_FEATURE_DATA_D3D12_OPTIONS1 options {};
+		features.wave32_in_wider_waves =
+		    FAILED(graphics.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options, sizeof(options))) ||
+		    options.WaveLaneCountMax > 32;
+	}
 	features.lane_shuffle_loop   = !m_compiler.SupportsDivergentLaneIndex(); // (below shader model 6.7 a lane shuffle needs the same lane number in every lane)
 	features.wave_ops_without_helper_lanes = !m_compiler.SupportsHelperLanesInWaveOps();
 	features.sample_offset_by_coordinates = true; // texel offsets the shader computes (Vulkan's maintenance8 is not available here)
