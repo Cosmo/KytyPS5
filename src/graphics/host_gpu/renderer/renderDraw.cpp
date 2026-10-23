@@ -679,16 +679,19 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 		});
 	}
 	if (indirect.address != 0) {
-#if defined(KYTY_GPU_BACKEND_D3D12)
-		// The D3D12 renderer draws the records one by one.
-		return std::nullopt;
-#endif
 		if (!vs.indirect_draw ||
 		    vs.stage.module->info.stage == ShaderType::Mesh ||
 		    ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy ||
 		    vs.indirect_offsets != indirect.offsets) {
 			return std::nullopt;
 		}
+#if defined(KYTY_GPU_BACKEND_D3D12)
+		// The D3D12 renderer draws fans as triangle lists it makes from their vertices on the CPU.
+		if (ucfg.GetPrimType() == Prospero::PrimitiveType::kTriFan ||
+		    ucfg.GetPrimType() == Prospero::PrimitiveType::kPolygon) {
+			return std::nullopt;
+		}
+#endif
 		return DrawEmitInfo {.indirect = indirect};
 	}
 	if (source == DrawOffsetSource::IndirectArgs) {
