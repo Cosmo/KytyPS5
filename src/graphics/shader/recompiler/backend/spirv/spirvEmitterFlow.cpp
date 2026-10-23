@@ -958,30 +958,44 @@ uint32_t EmitReadLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 	return ctx.Shuffle(inst, 0, ctx.Arg(inst, 1), {.uniform = true});
 }
 
-template <spv::Op Reduce, auto Combine>
+// `Identity` leaves the operation's result unchanged.
+template <spv::Op Reduce, auto Combine, uint32_t Identity>
 static uint32_t EmitSubgroupReduceU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto& state = ctx.state;
 	auto value = ctx.Arg(inst, 0);
 	if (ctx.other_half != nullptr) {
 		value = Combine(state, ctx.HalfArg(inst, 0, 0), ctx.HalfArg(inst, 0, 1));
 	}
-	const auto result = state.builder.AllocateId();
-	state.builder.AddFunction(Reduce, TypeU32(state), result,
-	                          ConstantU32(state, spv::ScopeSubgroup), spv::GroupOperationReduce,
-	                          value);
-	return result;
+	const auto reduce = [&](uint32_t operand) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(Reduce, TypeU32(state), result,
+		                          ConstantU32(state, spv::ScopeSubgroup), spv::GroupOperationReduce,
+		                          operand);
+		return result;
+	};
+	if (state.program.wave_size == 32u && GetHostShaderFeatures().wave32_in_wider_waves) {
+		// A host wave of 64 lanes holds two of the program's waves, and DXIL has no reduction over
+		// 32 lanes: each half reduces with the other half's lanes at the identity.
+		const auto upper = Binary(state, spv::OpUGreaterThanEqual, TypeBool(state),
+		                          EmitSubgroupLocalInvocationId(state), ConstantU32(state, 32));
+		const auto identity = ConstantU32(state, Identity);
+		const auto lower_result = reduce(Select(state, TypeU32(state), upper, identity, value));
+		const auto upper_result = reduce(Select(state, TypeU32(state), upper, value, identity));
+		return Select(state, TypeU32(state), upper, upper_result, lower_result);
+	}
+	return reduce(value);
 }
 
 uint32_t EmitSubgroupUMinU32(ValueEmitContext& ctx, const IR::Inst& inst) {
-	return EmitSubgroupReduceU32<spv::OpGroupNonUniformUMin, EmitUMin32>(ctx, inst);
+	return EmitSubgroupReduceU32<spv::OpGroupNonUniformUMin, EmitUMin32, UINT32_MAX>(ctx, inst);
 }
 
 uint32_t EmitSubgroupUMaxU32(ValueEmitContext& ctx, const IR::Inst& inst) {
-	return EmitSubgroupReduceU32<spv::OpGroupNonUniformUMax, EmitUMax32>(ctx, inst);
+	return EmitSubgroupReduceU32<spv::OpGroupNonUniformUMax, EmitUMax32, 0u>(ctx, inst);
 }
 
 uint32_t EmitSubgroupOrU32(ValueEmitContext& ctx, const IR::Inst& inst) {
-	return EmitSubgroupReduceU32<spv::OpGroupNonUniformBitwiseOr, EmitOrU32>(ctx, inst);
+	return EmitSubgroupReduceU32<spv::OpGroupNonUniformBitwiseOr, EmitOrU32, 0u>(ctx, inst);
 }
 
 uint32_t EmitWriteLane(ValueEmitContext& ctx, const IR::Inst& inst) {
