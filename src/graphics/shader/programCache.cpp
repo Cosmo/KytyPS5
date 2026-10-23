@@ -473,6 +473,12 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 				}
 				return {};
 			}
+			// The records' draw parameters come per record (HostShaderFeatures::indirect_mesh_parameters_in_push_data), without
+			// a first instance: a packet that patches one has its records read on the CPU.
+			if (indirect_draw && indirect_offsets.instance == ShaderIndirectOffsets::None) {
+				vertex_info[0].indirect_offsets = indirect_offsets;
+				vertex_info[0].indirect_draw    = true;
+			}
 		}
 	}
 	ShaderParams pixel_params;

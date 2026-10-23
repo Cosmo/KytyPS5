@@ -1,0 +1,34 @@
+#version 450
+
+// The D3D12 renderer's indirect draws (RenderExecutor::ExecutePreparedDraw): copies the guest's
+// draw records, which have the layout of D3D12's draw arguments, each after the two dwords of
+// spirv_to_dxil's runtime data its draw sets (first vertex, base instance), so that ExecuteIndirect
+// sets them per draw.
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Records { uint data[]; } records;
+layout(set = 0, binding = 1, std430) writeonly buffer Commands { uint data[]; } commands;
+
+layout(push_constant, std430) uniform Draws {
+	uint base;   // the first record's dword
+	uint count;
+	uint stride; // in dwords
+	uint indexed;
+} params;
+
+void main() {
+	const uint draw = gl_GlobalInvocationID.x;
+	if (draw >= params.count) {
+		return;
+	}
+	// Indexed: index count, instances, first index, vertex offset, first instance; otherwise
+	// vertex count, instances, first vertex, first instance.
+	const uint words  = params.indexed != 0u ? 5u : 4u;
+	const uint source = params.base + draw * params.stride;
+	const uint target = draw * (words + 2u);
+	commands.data[target]      = records.data[source + words - 2u];
+	commands.data[target + 1u] = records.data[source + words - 1u];
+	for (uint i = 0u; i < words; i++) {
+		commands.data[target + 2u + i] = records.data[source + i];
+	}
+}
