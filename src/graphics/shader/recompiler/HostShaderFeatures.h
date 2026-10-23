@@ -62,6 +62,9 @@ struct HostShaderFeatures {
 	// and their value is chosen afterwards, instead of branching around them on the lane's EXEC bit and the bounds check. Loads
 	// have no side effect, so the result is the same; the shaders get far fewer blocks, which the Xbox's driver compiles much faster.
 	bool speculative_buffer_loads = false;
+	// The host has no clock shaders can read (DXIL has none): S_MEMREALTIME reads all ones, as it did before the
+	// translator read the host's device clock.
+	bool realtime_clock_placeholder = false;
 };
 
 void                                    SetHostShaderFeatures(const HostShaderFeatures& features);
