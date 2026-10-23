@@ -94,6 +94,9 @@ struct EmitterState {
 	IR::Program&                                     program;
 	ShaderStageInputInfo                             input_info;
 	const Profile&                                      profile;
+	// Set while a load from a guest buffer is emitted, where HostShaderFeatures::speculative_buffer_loads lets it run for every lane:
+	// EmitValueOrDefaultIfCondition then selects instead of branching (scalar values).
+	bool                                            speculative_loads = false;
 	uint32_t                                        debug_source = 0;
 	uint32_t                                        void_type = 0;
 	uint32_t                                        bool_type = 0;
@@ -644,6 +647,11 @@ template <typename Fn>
 uint32_t EmitValueOrDefaultIfCondition(EmitterState& state, uint32_t condition, uint32_t type,
                                        uint32_t default_value, Fn&& fn) {
 	if (condition == ConstantBool(state, true)) return fn();
+	if (state.speculative_loads && (type == TypeU32(state) || type == TypeU64(state) || type == TypeF32(state) || type == TypeBool(state))) {
+		// (EmitterState::speculative_loads) the load runs for every lane; out of bounds it reads 0.
+		const auto value = fn();
+		return Select(state, type, condition, value, default_value);
+	}
 	const auto then_label  = state.builder.AllocateId();
 	const auto header     = state.current_label;
 	const auto merge_label = state.builder.AllocateId();
