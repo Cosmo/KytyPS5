@@ -1,0 +1,71 @@
+#version 450
+
+// The D3D12 renderer's indirect mesh draws (RenderExecutor::ExecutePreparedDraw), what upstream's
+// task shader does (gpu_mesh_indirect.task): for each guest draw record, the mesh program's draw
+// parameters (IR::PushData::MeshDrawDwordCount, as push constants) and the groups to launch, with
+// the instances along y, as D3D12's mesh dispatch arguments, so that ExecuteIndirect sets and
+// launches them per record.
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Records { uint data[]; } records;
+layout(set = 0, binding = 1, std430) writeonly buffer Commands { uint data[]; } commands;
+
+layout(push_constant, std430) uniform Draws {
+	uint base;   // the first record's dword
+	uint count;
+	uint stride; // in dwords
+	uint index_size;
+	uint index_limit;
+	uint primitive_size;
+	uint group_step;
+	uint max_groups;
+	uint max_instances;
+	uint max_total;
+	uint index_address_low;
+	uint index_address_high;
+} params;
+
+const uint CommandWords = 8u; // the draw parameters, then the dispatch's x, y and z
+
+void main() {
+	const uint draw = gl_GlobalInvocationID.x;
+	if (draw >= params.count) {
+		return;
+	}
+	// Indexed: index count, instances, first index, vertex offset, first instance; otherwise
+	// vertex count, instances, first vertex, first instance.
+	const uint source    = params.base + draw * params.stride;
+	uint       count     = records.data[source];
+	const uint instances = records.data[source + 1u];
+	uint       low       = params.index_address_low;
+	uint       high      = params.index_address_high;
+	// The base vertex and first instance follow the first index in indexed records.
+	uint base = 2u;
+	if (params.index_size != 0u) {
+		// Indices past INDEX_BUFFER_SIZE are never read.
+		const uint first = records.data[source + 2u];
+		count            = min(count, params.index_limit - min(first, params.index_limit));
+		// (Indices are 2 or 4 bytes.)
+		const uint shift  = params.index_size == 4u ? 2u : 1u;
+		const uint offset = first << shift;
+		const uint sum    = low + offset;
+		high += (first >> (32u - shift)) + (sum < low ? 1u : 0u);
+		low   = sum;
+		base  = 3u;
+	}
+	uint groups = count < params.primitive_size ? 0u : (count - params.primitive_size) / params.group_step + 1u;
+	// Past the host launch limits, where direct draws are skipped, the record draws nothing.
+	if (groups > params.max_groups || instances > params.max_instances ||
+	    (groups != 0u && instances > params.max_total / groups)) {
+		groups = 0u;
+	}
+	const uint target = draw * CommandWords;
+	commands.data[target]      = count;
+	commands.data[target + 1u] = records.data[source + base];
+	commands.data[target + 2u] = params.index_size;
+	commands.data[target + 3u] = low;
+	commands.data[target + 4u] = high;
+	commands.data[target + 5u] = groups;
+	commands.data[target + 6u] = instances;
+	commands.data[target + 7u] = 1u;
+}
