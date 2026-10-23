@@ -55,6 +55,9 @@ struct HostShaderFeatures {
 	// view of a plain 1D or 2D image starts at the image's first layer, and games write later layers of arrays through such views
 	// (the host's view is then an array view of the one layer).
 	bool storage_images_as_arrays = false;
+	// The host's waves have more than 32 lanes also for programs of 32 (D3D12 on the Series X runs them in 64-lane waves): the
+	// active lanes of such a program can all be in the ballot's second word, so the first active lane is searched in both.
+	bool wave32_in_wider_waves = false;
 };
 
 void                                    SetHostShaderFeatures(const HostShaderFeatures& features);
