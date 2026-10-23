@@ -26,6 +26,7 @@ struct GraphicContext;
 //   set 0 binding 0: read-only storage buffer (t0), binding 1: storage buffer (u1),
 //   binding 2: uniform buffer (b2), push constants: root constants (b0, PushConstantSpace),
 //   plus spirv_to_dxil's runtime data (b0, RuntimeDataSpace).
+// A kernel that also writes binding 0 (u0) takes a second root signature (writable_input).
 class ComputeKernels {
 public:
 	ComputeKernels(GraphicContext& graphics, const D3D12::DxilCompiler& compiler);
@@ -37,6 +38,7 @@ public:
 	struct Bindings {
 		const Buffer*             input         = nullptr;
 		uint64_t                  input_offset  = 0;
+		bool                      input_writable = false; // as the pipeline was got
 		const Buffer*             output        = nullptr;
 		uint64_t                  output_offset = 0;
 		const Buffer*             params        = nullptr; // constant buffer, 256-byte aligned
@@ -45,17 +47,32 @@ public:
 	};
 
 	[[nodiscard]] ID3D12PipelineState*
-	Get(std::span<const uint32_t> spirv, std::span<const D3D12::SpecializationConstant> constants = {});
+	Get(std::span<const uint32_t> spirv, std::span<const D3D12::SpecializationConstant> constants = {},
+	    bool writable_input = false);
 	// Records one dispatch; the output range is visible to later reads afterwards.
 	void Dispatch(CommandBuffer& command, ID3D12PipelineState* pipeline, const Bindings& bindings,
 	              uint32_t groups_x, uint32_t groups_y, uint32_t groups_z);
 
+	// Image kernels: set 0 binding 0 a sampled image (t0), binding 1 a storage image (u1), push
+	// constants as above; their own root signature, with the two views in a descriptor table.
+	[[nodiscard]] ID3D12PipelineState* GetImageKernel(std::span<const uint32_t> spirv);
+	// Records one dispatch of an image kernel that reads the shader resource view `input` and
+	// writes the unordered access view `output` (non-shader-visible descriptors, copied for the
+	// dispatch); the output is visible to later reads afterwards.
+	void DispatchImages(CommandBuffer& command, ID3D12PipelineState* pipeline, D3D12_CPU_DESCRIPTOR_HANDLE input,
+	                    D3D12_CPU_DESCRIPTOR_HANDLE output, std::span<const uint32_t> constants, uint32_t groups_x,
+	                    uint32_t groups_y, uint32_t groups_z);
+
 private:
 	using Key = std::pair<const uint32_t*, std::vector<uint32_t>>;
 
+	void CreateRootSignature(bool writable_input);
+	void CreateImageRootSignature();
+
 	GraphicContext&                          m_graphics;
 	const D3D12::DxilCompiler&               m_compiler;
-	ID3D12RootSignature*                     m_root_signature = nullptr;
+	ID3D12RootSignature*                     m_root_signatures[2] {}; // by writable_input
+	ID3D12RootSignature*                     m_image_root_signature = nullptr; // made with the first image kernel
 	std::map<Key, ID3D12PipelineState*>      m_pipelines;
 };
 
