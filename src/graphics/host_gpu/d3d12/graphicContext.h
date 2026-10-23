@@ -66,6 +66,9 @@ struct GraphicContext {
 	// The device's copies place the small layers of BC texture arrays where its texture unit does not read them (the Series X: layers whose
 	// mip level is under 64 KB). Such images live in CPU-visible memory (this pool) and the CPU writes their data (d3d12/image.cpp).
 	bool                cpu_written_block_arrays = false;
+	// The device skips a clear behind a predicate of zero (D3D12::PredicatedClearsWork): the texture cache selects color clears on the GPU
+	// (TextureCache::MaterializeColorClear); otherwise it reads the metadata back as before.
+	bool                predicated_clears = false;
 	D3D12MA::Pool*      cpu_texture_pool         = nullptr;
 	Common::Mutex       queue_mutex;
 	std::string         device_name;
