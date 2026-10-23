@@ -1151,6 +1151,38 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 				return;
 			}
 		}
+#else
+		{
+			std::scoped_lock lock {m_lock};
+			auto&            image = m_slot_images[id];
+			// Compressed images cannot upload, so they must already hold native contents.
+			const bool native_current = (image.usage.render_target || image.IsGpuModified()) &&
+			                            !image.IsBufferModified() && !image.IsCpuDirty();
+			// As the Vulkan renderer, with D3D12 predication: one clear per slice and key, each
+			// predicated on its check.
+			const bool candidate = m_graphics.predicated_clears && count <= D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION &&
+			                       (desc.info.metadata.compression == VideoOutCompression::Uncompressed ||
+			                        native_current);
+			if (candidate) {
+				InitializeImage(id);
+			}
+			if (candidate && image.RendersThrough(view.format, view.base_level, image_first)) {
+				// The GPU selects each slice's clear, so the CPU never waits for the metadata.
+				Common::DebugCounters::Add(Common::DebugCounters::Counter::ColorMetadataChecks);
+				const bool expand = desc.type != BindingType::VideoOut;
+				const auto [buffer, offset] =
+				    m_buffer_cache.ObtainBuffer(viewed.address, viewed.size, expand);
+				const auto predicates = m_tiler.CheckColorClear(
+				    {buffer->Handle(), offset, viewed.size}, count, keys, expand);
+				if (expand) {
+					m_buffer_cache.MarkColorMetadataChecked(viewed.address, viewed.size, keys);
+				}
+				image.ClearSelected(m_scheduler.Current(), view.format, view.base_level, image_first,
+				                    count, keys, clears, *predicates);
+				CommitGpuWrite(image);
+				return;
+			}
+		}
 #endif
 		// Finish native metadata writes before reading backing bytes. This can submit the
 		// scheduler, so discovery runs before final draw uploads and never holds the texture

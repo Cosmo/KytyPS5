@@ -175,4 +175,33 @@ TileManager::Result TileManager::TransformColor(Result input, ColorTransform tra
 	return {output.buffer, 0, input.size};
 }
 
+BufferHandle TileManager::CheckColorClear(Result metadata, uint32_t slices, uint32_t keys,
+                                          bool expand) {
+	// The most slices one clear view of an image selects.
+	constexpr uint32_t MaxSlices = D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION;
+	EXIT_IF(metadata.buffer == nullptr || slices == 0 || slices > MaxSlices ||
+	        metadata.size % (4ull * slices) != 0 || metadata.size / 4 > UINT32_MAX);
+	if (m_clear_predicates == nullptr) {
+		m_clear_predicates = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0,
+		                                              uint64_t {MaxSlices} * ColorClearSlots * sizeof(uint64_t));
+		m_clear_predicates->SetName("color clear predicates");
+	}
+	auto& command = m_scheduler.Current();
+	auto& kernels = command.GetContext().GetComputeKernels();
+	// The kernel rewrites the metadata it expands.
+	auto* const              pipeline = kernels.Get(TileShaders::ColorClearShader(), {}, true);
+	const auto               base     = Common::AlignDown(metadata.offset, RootAlignment);
+	const uint32_t           constants[] {static_cast<uint32_t>(metadata.offset - base),
+                                static_cast<uint32_t>(metadata.size / 4 / slices), keys, expand ? 1u : 0u};
+	ComputeKernels::Bindings bindings;
+	bindings.input          = metadata.buffer;
+	bindings.input_offset   = base;
+	bindings.input_writable = true;
+	bindings.output         = m_clear_predicates.get();
+	bindings.constants      = constants;
+	kernels.Dispatch(command, pipeline, bindings, slices, 1, 1);
+	m_clear_predicates->Use(command, D3D12_RESOURCE_STATE_PREDICATION);
+	return m_clear_predicates.get();
+}
+
 } // namespace Libs::Graphics

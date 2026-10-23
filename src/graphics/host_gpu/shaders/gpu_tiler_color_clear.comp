@@ -14,6 +14,12 @@ layout(push_constant, std430) uniform Check {
 } params;
 
 const uint Slots = 8u; // TileManager::ColorClearSlots
+#if defined(PREDICATE_QWORDS)
+// D3D12 predication reads a 64-bit value per predicate.
+const uint PredicateWords = 2u;
+#else
+const uint PredicateWords = 1u;
+#endif
 
 shared uint key;
 shared uint mismatch;
@@ -39,8 +45,11 @@ void main() {
 	const uint slot = key >> 5u;
 	const bool hit  = mismatch == 0u && (key & 0x1fu) == 0u && (params.keys & (1u << slot)) != 0u;
 	if (gl_LocalInvocationIndex < Slots) {
-		predicates.data[slice * Slots + gl_LocalInvocationIndex] =
-		    uint(hit && slot == gl_LocalInvocationIndex);
+		const uint predicate = (slice * Slots + gl_LocalInvocationIndex) * PredicateWords;
+		predicates.data[predicate] = uint(hit && slot == gl_LocalInvocationIndex);
+#if defined(PREDICATE_QWORDS)
+		predicates.data[predicate + 1u] = 0u;
+#endif
 	}
 	if (hit && params.expand != 0u) {
 		for (uint i = gl_LocalInvocationIndex; i < params.words; i += gl_WorkGroupSize.x) {

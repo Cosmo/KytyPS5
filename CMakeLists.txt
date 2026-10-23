@@ -341,7 +341,7 @@ file(GLOB gpu_tiler_shader_includes CONFIGURE_DEPENDS "${gpu_tiler_shader_dir}/g
 # The D3D12 build de-tiles elements smaller than a dword by gathering whole dwords (gpu_tiler_common.inc).
 set(gpu_tiler_defines "")
 if(KYTY_GPU_BACKEND STREQUAL "D3D12")
-	set(gpu_tiler_defines "-DGATHER_DWORDS=1")
+	set(gpu_tiler_defines "-DGATHER_DWORDS=1" "-DPREDICATE_QWORDS=1")
 endif()
 foreach(shader_name IN LISTS gpu_tiler_shader_names)
 	set(shader_source "${gpu_tiler_shader_dir}/gpu_tiler_${shader_name}.comp")

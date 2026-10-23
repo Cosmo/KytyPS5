@@ -1523,6 +1523,60 @@ void Image::CopySubresources(Image& source, const ImageSubresourceRange& range,
 	CopyContents(command, source, source.backing.current, backing.current, regions);
 }
 
+bool Image::RendersThrough(vk::Format format, uint32_t level, uint32_t layer) {
+	if (info.IsDepth() || backing.image_type == vk::ImageType::e1D || !D3D12::GetFormatInfo(format).Writable()) {
+		return false;
+	}
+	ImageViewInfo view {};
+	view.format      = format;
+	view.type        = vk::ImageViewType::e2DArray;
+	view.aspect      = vk::ImageAspectFlagBits::eColor;
+	view.base_level  = level;
+	view.base_layer  = layer;
+	view.layer_count = 1;
+	const auto handle = FindView(view);
+	return (backing.resources[backing.views[handle.index].resource].resource->GetDesc().Flags &
+	        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
+}
+
+void Image::ClearSelected(CommandBuffer& command, vk::Format format, uint32_t level, uint32_t layer,
+                          uint32_t layers, uint32_t keys, std::span<const vk::ClearAttachment> clears,
+                          const Buffer& predicates) {
+	auto*      list    = command.Handle();
+	const auto numeric = std::string_view(vk::componentNumericFormat(format, 0));
+	for (uint32_t slice = 0; slice < layers; slice++) {
+		ImageViewInfo view {};
+		view.format      = format;
+		view.type        = vk::ImageViewType::e2DArray;
+		view.aspect      = vk::ImageAspectFlagBits::eColor;
+		view.base_level  = level;
+		view.base_layer  = layer + slice;
+		view.layer_count = 1;
+		const auto handle = FindView(view);
+		// Transitions, and copies that bring another format family up to date, are not predicated.
+		Use(command, D3D12_RESOURCE_STATE_RENDER_TARGET, ImageSubresourceRange {level, 1, layer + slice, 1}, handle);
+		const auto target = RenderTargetView(handle);
+		EXIT_IF(target.ptr == 0);
+		for (uint32_t key = 0; key < clears.size(); key++) {
+			if ((keys & (1u << key)) == 0) {
+				continue;
+			}
+			const auto& clear = clears[key].clearValue.color;
+			float       color[4] {};
+			for (int i = 0; i < 4; i++) {
+				color[i] = numeric == "UINT"   ? static_cast<float>(clear.uint32[i])
+				           : numeric == "SINT" ? static_cast<float>(clear.int32[i])
+				                               : clear.float32[i];
+			}
+			// The clear runs where the predicate is not zero.
+			list->SetPredication(predicates.Resource(), (uint64_t {slice} * clears.size() + key) * sizeof(uint64_t),
+			                     D3D12_PREDICATION_OP_EQUAL_ZERO);
+			list->ClearRenderTargetView(target, color, 0, nullptr);
+		}
+	}
+	list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+}
+
 void Image::Clear(CommandBuffer& command, vk::Format format, const vk::ImageSubresourceRange& range,
                   const vk::ClearValue& clear, bool /*full_image*/) {
 	auto* list = command.Handle();
