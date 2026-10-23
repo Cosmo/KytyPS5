@@ -112,6 +112,13 @@ public:
 	// and layer), within `rect`: the copy of a draw with copy_depth_to_color.
 	void CopyDepthToColor(CommandBuffer& command, Image& depth, const ImageSubresourceRange& depth_range,
 	                      const ImageSubresourceRange& range, const D3D12_RECT& rect);
+	// Whether layer `layer` of mip `level` of this color image can be rendered to through a `format` view (ClearSelected).
+	[[nodiscard]] bool RendersThrough(vk::Format format, uint32_t level, uint32_t layer);
+	// Clears each of `layers` layers from `layer` of mip `level`, through a `format` view, with clears[key].clearValue for
+	// each key whose bit `keys` sets, where the 64-bit predicate (slice * clears.size() + key) of `predicates` (in the
+	// predication state) is not zero (D3D12 predication).
+	void ClearSelected(CommandBuffer& command, vk::Format format, uint32_t level, uint32_t layer, uint32_t layers,
+	                   uint32_t keys, std::span<const vk::ClearAttachment> clears, const Buffer& predicates);
 #else
 	using Barriers = std::vector<vk::ImageMemoryBarrier2>;
 	[[nodiscard]] Barriers GetBarriers(vk::ImageLayout                      destination_layout,
