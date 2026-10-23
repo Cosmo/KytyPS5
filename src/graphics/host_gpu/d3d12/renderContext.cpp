@@ -21,7 +21,8 @@ RenderContext::RenderContext(GraphicContext& graphics)
     : m_graphics(graphics), m_render_executor(*this), m_command_scheduler(*this, graphics), m_descriptor_heap(graphics, m_command_scheduler),
       m_pipeline_cache(graphics), m_compute_kernels(graphics, m_pipeline_cache.GetCompiler()), m_sampler_cache(graphics, m_descriptor_heap),
       m_buffer_cache(graphics, m_command_scheduler, m_page_manager, m_texture_cache),
-      m_texture_cache(graphics, m_command_scheduler, m_page_manager, m_buffer_cache) {
+      m_texture_cache(graphics, m_command_scheduler, m_page_manager, m_buffer_cache),
+      m_occlusion_queries(graphics, m_command_scheduler) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 }
 
