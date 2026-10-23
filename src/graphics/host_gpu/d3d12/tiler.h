@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -54,8 +55,14 @@ public:
 	                                const D16Layout& layout);
 	[[nodiscard]] Result TransformColor(Result input, ColorTransform transform, bool to_host);
 	void                 TransformColor(Result input, Result output, ColorTransform transform, bool to_host);
-	// Color-clear keys are multiples of 0x20, so key >> 5 selects one of these slots (the texture cache's clear keys).
+	// Color-clear keys are multiples of 0x20, so key >> 5 selects one of these slots.
 	static constexpr uint32_t ColorClearSlots = 8;
+	// As the Vulkan tile manager's: returns the buffer whose predicate slice * ColorClearSlots +
+	// (key >> 5) is set when every byte of that metadata slice equals a key whose bit `keys`
+	// selects; a hit expands to 0xff when `expand` is set. Each predicate is 64 bits (D3D12's
+	// SetPredication), the buffer in the predication state.
+	[[nodiscard]] BufferHandle CheckColorClear(Result metadata, uint32_t slices, uint32_t keys,
+	                                           bool expand);
 
 private:
 	// One dispatch over all levels of an image, its parameters in the stream buffer.
@@ -72,9 +79,10 @@ private:
 	            uint64_t target_offset, uint64_t target_capacity, const Dispatch& dispatch,
 	            bool clear_target);
 
-	GraphicContext&   m_graphics;
-	CommandScheduler& m_scheduler;
-	StreamBuffer&     m_stream_buffer;
+	GraphicContext&         m_graphics;
+	CommandScheduler&       m_scheduler;
+	StreamBuffer&           m_stream_buffer;
+	std::unique_ptr<Buffer> m_clear_predicates;
 };
 
 } // namespace Libs::Graphics
