@@ -422,6 +422,7 @@ enum Stat : size_t {
 	STAT_EMULATED,
 	STAT_MISSING_CALLS,
 	// GPU: draws, instances, dispatches and command lists handed to the GPU; the time the emulator waited for the GPU; the GPU's time per frame;
+	// color metadata (DCC/CMASK) the CPU waited to read back, and the checks of it the GPU made instead (upstream's rows);
 	// draws skipped as not supported here (with the last reason); the game's writes into memory the GPU tracks (each one a fault); the shaders and
 	// pipelines so far (as Full has them); the shaders translated and the pipelines built since the overlay showed, with their average and longest
 	// times (D3D12's translation to DXIL and linking count to them).
@@ -430,6 +431,8 @@ enum Stat : size_t {
 	STAT_DISPATCHES,
 	STAT_SUBMITS,
 	STAT_GPU_WAIT,
+	STAT_COLOR_READBACKS,
+	STAT_COLOR_CHECKS,
 	STAT_GPU_TIME,
 	STAT_SKIPPED,
 	STAT_FAULTS,
@@ -486,7 +489,8 @@ const std::array<std::vector<StatGroup>, 3>& DetailedPanels() {
 	       {L"Emulated instrs", STAT_EMULATED}, {L"Missing HLE calls", STAT_MISSING_CALLS}}}},
 	    {{L"GPU",
 	      {{L"Draw calls", STAT_DRAWS}, {L"Instances", STAT_INSTANCES}, {L"Dispatches", STAT_DISPATCHES}, {L"Queue submits", STAT_SUBMITS},
-	       {L"CPU waiting on GPU", STAT_GPU_WAIT}, {L"GPU time", STAT_GPU_TIME}, {L"Skipped draws", STAT_SKIPPED},
+	       {L"CPU waiting on GPU", STAT_GPU_WAIT}, {L"DCC/CMASK readbacks", STAT_COLOR_READBACKS},
+	       {L"DCC/CMASK GPU checks", STAT_COLOR_CHECKS}, {L"GPU time", STAT_GPU_TIME}, {L"Skipped draws", STAT_SKIPPED},
 	       {L"Write-tracking faults", STAT_FAULTS}, {L"Shaders", STAT_SHADERS}, {L"Pipelines", STAT_PIPELINES},
 	       {L"Shader recompiler", STAT_SHADER_COMPILE}, {L"Pipeline compile", STAT_PIPELINE_COMPILE}}},
 	     {L"GPU memory",
@@ -1034,6 +1038,9 @@ void GameOverlay::State::UpdateDetailedRates(const Sample& current, const Sample
 	Set(STAT_SKIPPED, skipped.Text().c_str(), skips != 0 ? Level::Medium : Level::Good);
 	Set(STAT_SUBMITS, Formatted(L"%.0f/s", rate(Counter::QueueSubmits)));
 	Set(STAT_GPU_WAIT, Formatted(L"%.0f ms/s  (%.0f waits/s)", rate(Counter::GpuWaitNs) / 1e6, rate(Counter::GpuWaits)));
+	Set(STAT_COLOR_READBACKS, Formatted(L"%.0f ms/s  (%.0f/s)", rate(Counter::ColorMetadataReadbackNs) / 1e6,
+	                                    rate(Counter::ColorMetadataReadbacks)));
+	Set(STAT_COLOR_CHECKS, Formatted(L"%.0f/s", rate(Counter::ColorMetadataChecks)));
 	const double faults = rate(Counter::GpuFaults);
 	Set(STAT_FAULTS, Formatted(L"%.0f/s", faults), LevelOf(faults, 20000, 100000));
 	const auto compiles = [&](Stat stat, Counter count_counter, Counter duration_counter, uint64_t peak_ns) {
