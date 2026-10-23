@@ -103,6 +103,8 @@ struct AppSettings {
 	// The settings page, Testing: upstream's command-line flags --playgo-hack (Config::playgo_hack_enabled) and --vr (Config::vr_enabled). Off.
 	bool playgo_fallback    = false;
 	bool virtual_vr_headset = false;
+	// The settings page, Testing: upstream's --occlusion-queries (Config::occlusion_queries_enabled). Off.
+	bool occlusion_queries = false;
 	// Debugging, only in the file: ask for a frame dump this many seconds after the game started (0: never; the game menu has Save frame dump).
 	uint32_t frame_dump_after_s = 0;
 	// Debugging, only in the file: 1 adds the average color of the large floating-point render targets after each draw to the frame dump's draw log (slow).

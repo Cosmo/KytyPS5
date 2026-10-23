@@ -710,6 +710,14 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    },
 	    {L"Tells games that a VR headset is connected and worn.", L"Only for testing games that need one."});
 	AddSwitch(
+	    testing, explanation, L"Occlusion queries", settings.occlusion_queries,
+	    [state, save](bool on) {
+		    state->settings.occlusion_queries = on;
+		    save();
+	    },
+	    {L"Counts on the GPU what games ask to check for visibility, so hidden lights and objects stay hidden.",
+	     L"When off, games are told that everything is visible. On costs some performance."});
+	AddSwitch(
 	    testing, explanation, L"Keep compiled shaders across app builds", settings.shader_cache_any_build,
 	    [state, save](bool on) {
 		    state->settings.shader_cache_any_build = on;
