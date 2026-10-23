@@ -562,6 +562,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 		    options.WaveLaneCountMax > 32;
 	}
 	features.lane_shuffle_loop   = !m_compiler.SupportsDivergentLaneIndex(); // (below shader model 6.7 a lane shuffle needs the same lane number in every lane)
+	features.indirect_mesh_parameters_in_push_data = true; // (no task shaders: RenderExecutor::ExecutePreparedDraw)
 	features.wave_ops_without_helper_lanes = !m_compiler.SupportsHelperLanesInWaveOps();
 	features.sample_offset_by_coordinates = true; // texel offsets the shader computes (Vulkan's maintenance8 is not available here)
 	features.vertex_formats_as_integers   = true; // scaled and 10:10:10:2 SNORM vertex input (D3D12::VertexFormat)
