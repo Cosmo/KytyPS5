@@ -389,6 +389,7 @@ void GraphicContext::Create(bool enable_debug_layer) {
 		Log::WriteToConsoleAndLog(fmt::format("D3D12: BC texture arrays are written by the CPU ({})\n",
 		                                      copies_work ? "the Xbox's limits apply" : "this device's copies place their small layers wrongly"));
 	}
+	predicated_clears = D3D12::PredicatedClearsWork(*this);
 }
 
 void GraphicContext::Destroy() {
