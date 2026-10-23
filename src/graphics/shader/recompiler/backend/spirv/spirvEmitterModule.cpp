@@ -826,7 +826,8 @@ void DefineModule(EmitterState& state) {
 			                               state.input_info.vertex->mesh.max_vertices);
 			state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeOutputPrimitivesEXT,
 			                               state.input_info.vertex->mesh.max_primitives);
-			if (state.input_info.vertex->indirect_draw) {
+			if (state.input_info.vertex->indirect_draw &&
+			    !GetHostShaderFeatures().indirect_mesh_parameters_in_push_data) {
 				// The task shader's payload (gpu_mesh_indirect.task).
 				const auto count   = ConstantU32(state, IR::PushData::MeshTaskPayloadDwordCount);
 				state.mesh_payload = DefineInterfaceVariable(
