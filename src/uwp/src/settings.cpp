@@ -73,6 +73,7 @@ AppSettings LoadSettings() {
 	read("accurate_texture_sync", settings.accurate_texture_sync);
 	read("playgo_fallback", settings.playgo_fallback);
 	read("virtual_vr_headset", settings.virtual_vr_headset);
+	read("occlusion_queries", settings.occlusion_queries);
 	read("debug_layer", settings.debug_layer);
 	read("game_output", settings.game_output);
 	read("d3d12_selftest", settings.d3d12_selftest);
@@ -141,6 +142,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["accurate_texture_sync"]  = settings.accurate_texture_sync;
 	json["playgo_fallback"]        = settings.playgo_fallback;
 	json["virtual_vr_headset"]     = settings.virtual_vr_headset;
+	json["occlusion_queries"]      = settings.occlusion_queries;
 	json["debug_layer"]      = settings.debug_layer;
 	json["game_output"]      = settings.game_output;
 	json["d3d12_selftest"]   = settings.d3d12_selftest;
