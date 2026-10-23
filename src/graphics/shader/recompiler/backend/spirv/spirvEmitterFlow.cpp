@@ -1000,6 +1000,9 @@ uint32_t EmitReadRealtimeClock(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state  = ctx.state;
 	const auto period = state.profile.device_clock_period_ps;
 	if (period == 0u) {
+		if (GetHostShaderFeatures().realtime_clock_placeholder) {
+			return ctx.Def(IR::Value(UINT64_MAX));
+		}
 		ctx.Fail(inst, "requires shaderDeviceClock");
 	}
 	state.builder.RequireExtension("SPV_KHR_shader_clock");
