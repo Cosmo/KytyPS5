@@ -141,6 +141,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.sync_raw_image_buffers    = settings.accurate_texture_sync;
 		config.playgo_hack_enabled       = settings.playgo_fallback;
 		config.vr_enabled                = settings.virtual_vr_headset;
+		config.occlusion_queries_enabled = settings.occlusion_queries;
 		config.vulkan_validation_enabled = settings.debug_layer; // the D3D12 debug layer
 		config.printf_direction          = settings.game_output ? Config::LogDirection::Console : Config::LogDirection::Silent;
 		// The fonts that stand in for the console's system fonts come with the package (uwp.cmake).
