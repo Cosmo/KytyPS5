@@ -1,6 +1,7 @@
 #include "graphics/shader/programCache.h"
 
 #include "common/assert.h"
+#include "common/compileActivity.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -313,6 +314,8 @@ struct ShaderProgramCache::Impl {
 		options.back_code      = params.back_code;
 		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
 		options.emit_debug_info = Config::GraphicsDebugDumpEnabled();
+		// The compile notice shows the translation from here on.
+		const Common::CompileActivity::Scope activity(Common::CompileActivity::Kind::Shader);
 		DumpShaderOriginal(stage_name, options.shader_hash, params.code);
 		ShaderRecompiler::ShaderSource source;
 		if (entry == programs.end()) source = ShaderRecompiler::PrepareShaderSource(params.code, options);
