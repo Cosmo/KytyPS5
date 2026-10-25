@@ -149,6 +149,17 @@ public:
 	// Any thread: the times between the last presented frames, in milliseconds, oldest first; at
 	// most `count` of them.
 	[[nodiscard]] std::vector<double> RecentFrameTimes(size_t count) const;
+	// Any thread: the milliseconds since the last presented frame (0 before the first one).
+	[[nodiscard]] double MsSinceLastPresent() const;
+	// Any thread: the clock the presents are timed with, in milliseconds.
+	[[nodiscard]] static double ClockMs();
+	// Any thread: the frames presented since `since_ms` (ClockMs; as many as the history holds), oldest first: when each was presented and how
+	// long it took (the time since the one before), in milliseconds.
+	struct RecentFrame {
+		double presented_ms = 0.0;
+		double time_ms      = 0.0;
+	};
+	[[nodiscard]] std::vector<RecentFrame> FramesSince(double since_ms) const;
 	// Any thread: the frames presented since the start.
 	[[nodiscard]] uint64_t FramesPresented() const;
 	// Any thread: goes up when the emulator's log (LocalState\kyty-emulator.txt) starts anew.
@@ -191,7 +202,7 @@ private:
 	bool                     m_game_shown   = false;
 
 	mutable std::mutex        m_presents_mutex;
-	std::array<int64_t, 241> m_present_counters {}; // QueryPerformanceCounter at each present
+	std::array<int64_t, 1201> m_present_counters {}; // QueryPerformanceCounter at each present (10 s at 120 fps)
 	uint64_t                  m_presents = 0;
 };
 

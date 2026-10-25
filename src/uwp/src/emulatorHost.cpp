@@ -343,6 +343,47 @@ std::vector<double> EmulatorHost::RecentFrameTimes(size_t count) const {
 	return times;
 }
 
+double EmulatorHost::MsSinceLastPresent() const {
+	LARGE_INTEGER frequency {};
+	LARGE_INTEGER counter {};
+	QueryPerformanceFrequency(&frequency);
+	QueryPerformanceCounter(&counter);
+	std::lock_guard lock(m_presents_mutex);
+	if (m_presents == 0) {
+		return 0.0;
+	}
+	const auto last = m_present_counters[(m_presents - 1) % m_present_counters.size()];
+	return static_cast<double>(counter.QuadPart - last) * 1000.0 / static_cast<double>(frequency.QuadPart);
+}
+
+double EmulatorHost::ClockMs() {
+	LARGE_INTEGER frequency {};
+	LARGE_INTEGER counter {};
+	QueryPerformanceFrequency(&frequency);
+	QueryPerformanceCounter(&counter);
+	return static_cast<double>(counter.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart);
+}
+
+std::vector<EmulatorHost::RecentFrame> EmulatorHost::FramesSince(double since_ms) const {
+	LARGE_INTEGER frequency {};
+	QueryPerformanceFrequency(&frequency);
+	const double              to_ms = 1000.0 / static_cast<double>(frequency.QuadPart);
+	std::vector<RecentFrame> frames;
+	std::lock_guard          lock(m_presents_mutex);
+	const size_t             ring  = m_present_counters.size();
+	const size_t             count = std::min(ring - 1, m_presents > 0 ? static_cast<size_t>(m_presents - 1) : 0);
+	for (size_t age = 1; age <= count; age++) {
+		const auto newer = m_present_counters[(m_presents - age) % ring];
+		const auto older = m_present_counters[(m_presents - age - 1) % ring];
+		if (static_cast<double>(newer) * to_ms < since_ms) {
+			break;
+		}
+		frames.push_back({static_cast<double>(newer) * to_ms, static_cast<double>(newer - older) * to_ms});
+	}
+	std::reverse(frames.begin(), frames.end());
+	return frames;
+}
+
 void EmulatorHost::SetTitle(std::string text) {
 	// The title changes every frame; the view title is updated a few times a second.
 	const uint64_t now  = GetTickCount64();
