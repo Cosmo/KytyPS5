@@ -7,6 +7,11 @@
 namespace Loader::X64InstructionEmulator {
 
 [[nodiscard]] bool TryEmulate(void* native_context);
+// Makes the faulting store itself: works out what it writes, hands that to `write` (address, bytes, size), sets the flags and resumes
+// after it. Plain stores of a general, XMM or immediate operand, and INC, DEC, ADD, SUB, AND, OR, XOR on memory; false for others. (The
+// UWP app's write-or-execute pages: an instruction that writes into the page it runs from could otherwise never finish.)
+using StoreWriter = bool (*)(uint64_t address, const void* data, size_t size);
+[[nodiscard]] bool EmulateStore(void* native_context, StoreWriter write);
 // Completes a faulting load into EAX with `value` and resumes after it.
 void CompleteLoad(void* native_context, size_t length, uint32_t value);
 
