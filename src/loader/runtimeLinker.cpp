@@ -1789,6 +1789,10 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 	if (!Common::HostException::InstallHandler(KytyExceptionHandler)) {
 		EXIT("Failed to install the required vectored exception handler\n");
 	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// (UWP app) Stores into the write-or-execute page their code runs from are made by the instruction emulator.
+	Common::VirtualMemory::Windows::SetStoreEmulator(Loader::X64InstructionEmulator::EmulateStore);
+#endif
 
 	std::vector<std::pair<uint64_t, uint64_t>> executable_segments;
 	uint64_t                                   eh_frame_header_addr = 0;
