@@ -16,6 +16,8 @@
 #if defined(KYTY_PLATFORM_UWP)
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
@@ -612,7 +614,15 @@ bool ProtectLazy(uint64_t address, uint64_t size, Mode mode) {
 	return HostVirtualProtect(reinterpret_cast<void*>(address), size, GetProtectionFlag(mode));
 }
 
-bool HandleWriteExecuteFault(uint64_t address, bool execute) {
+namespace {
+std::atomic<StoreEmulator> g_store_emulator {nullptr};
+} // namespace
+
+void SetStoreEmulator(StoreEmulator emulator) {
+	g_store_emulator.store(emulator);
+}
+
+bool HandleWriteExecuteFault(uint64_t address, bool execute, void* native_context) {
 #if defined(KYTY_PLATFORM_UWP)
 	constexpr uint64_t PageSize = 0x1000;
 	auto&              ranges   = WriteExecute();
@@ -621,6 +631,39 @@ bool HandleWriteExecuteFault(uint64_t address, bool execute) {
 		return false;
 	}
 	auto* page = reinterpret_cast<void*>(address & ~(PageSize - 1u));
+	// An instruction that writes into the page it runs from (code that keeps its variables next to it, like a cheat's code cave):
+	// the page can only be writable or executable, so the store is made here, through a moment of write access, and the thread
+	// resumes after it. (The other threads' faults on this page wait for the lock meanwhile.)
+	if (!execute && native_context != nullptr) {
+		const auto rip = static_cast<PCONTEXT>(native_context)->Rip;
+		if ((rip & ~(PageSize - 1u)) == reinterpret_cast<uint64_t>(page)) {
+			const auto emulator = g_store_emulator.load();
+			const auto write    = [](uint64_t target, const void* data, size_t size) {
+				const auto target_page = target & ~(PageSize - 1u);
+				if (((target + size - 1) & ~(PageSize - 1u)) != target_page ||
+				    !HostVirtualProtect(reinterpret_cast<void*>(target_page), PageSize, PAGE_READWRITE)) {
+					return false;
+				}
+				std::memcpy(reinterpret_cast<void*>(target), data, size);
+				const bool executable = HostVirtualProtect(reinterpret_cast<void*>(target_page), PageSize, PAGE_EXECUTE_READ);
+				::FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(target_page), PageSize);
+				return executable;
+			};
+			if (emulator != nullptr && emulator(native_context, write)) {
+				static std::atomic<uint32_t> logged {0};
+				if (logged.fetch_add(1, std::memory_order_relaxed) < 4) {
+					std::printf("write-execute page 0x%016llx: a store into the page its code runs from was made by the emulator\n",
+					            static_cast<unsigned long long>(reinterpret_cast<uint64_t>(page)));
+				}
+				return true;
+			}
+			static std::atomic<uint32_t> failed {0};
+			if (failed.fetch_add(1, std::memory_order_relaxed) < 4) {
+				std::printf("write-execute page 0x%016llx: the store at 0x%016llx into its own page could not be emulated\n",
+				            static_cast<unsigned long long>(reinterpret_cast<uint64_t>(page)), static_cast<unsigned long long>(rip));
+			}
+		}
+	}
 	if (!HostVirtualProtect(page, PageSize, execute ? PAGE_EXECUTE_READ : PAGE_READWRITE)) {
 		return false;
 	}
