@@ -47,7 +47,14 @@ namespace Common::VirtualMemory::Windows {
 
 // Called first for every access violation: makes a page that is meant to be writable and
 // executable accessible for the faulting access. False when the fault is not such a page.
-[[nodiscard]] bool HandleWriteExecuteFault(uint64_t address, bool execute);
+// `native_context` (the faulting thread's CONTEXT): an instruction that writes into the page it runs from is made by the store
+// emulator (SetStoreEmulator), as switching that page could never let it finish.
+[[nodiscard]] bool HandleWriteExecuteFault(uint64_t address, bool execute, void* native_context = nullptr);
+
+// Makes a faulting store itself and resumes after it (Loader::X64InstructionEmulator::EmulateStore), writing through `write`.
+using StoreWriter   = bool (*)(uint64_t address, const void* data, size_t size);
+using StoreEmulator = bool (*)(void* native_context, StoreWriter write);
+void SetStoreEmulator(StoreEmulator emulator);
 
 // Makes the pages of [address, address + size) that are meant to be writable and executable executable now, instead of on their first execute
 // fault (a write still makes a page writable again). Code that runs in the middle of a guest function, like the red-zone trampolines, must not

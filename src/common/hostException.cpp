@@ -108,7 +108,8 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
 		// Pages meant to be writable and executable (UWP app) switch access and retry.
 		const auto access = exception_record->ExceptionInformation[0];
 		if ((access == 1 || access == 8) &&
-		    Common::VirtualMemory::Windows::HandleWriteExecuteFault(exception_record->ExceptionInformation[1], access == 8)) {
+		    Common::VirtualMemory::Windows::HandleWriteExecuteFault(exception_record->ExceptionInformation[1], access == 8,
+		                                                           exception->ContextRecord)) {
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 		info.type = ExceptionType::AccessViolation;
