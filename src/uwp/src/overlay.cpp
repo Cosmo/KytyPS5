@@ -6,6 +6,8 @@
 #include "settingTiles.h"
 #include "settings.h"
 
+#include "common/compileActivity.h"
+
 #include <windows.h>
 #include <fileapifromapp.h>
 // windows.h's FindText macro breaks Windows.UI.Text.h.
@@ -23,13 +25,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
+#include <condition_variable>
 #include <cstdio>
 #include <deque>
 #include <limits>
+#include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -41,8 +47,16 @@ namespace {
 
 namespace xaml = winrt::Windows::UI::Xaml;
 
+// The statistics are updated every UPDATE_INTERVAL (from values a thread of their own fetches); the run time, the frame rate and the compile
+// notice every FRAME_INTERVAL; the graph with every frame the app shows.
 constexpr auto   UPDATE_INTERVAL = std::chrono::milliseconds(250);
+constexpr auto   FRAME_INTERVAL  = std::chrono::milliseconds(100);
+// The frames Detailed's 1% low and worst frame are over.
 constexpr size_t GRAPH_FRAMES    = 120;
+// The graph's time span; a game that presents no frame for STALL_MS stalls (the overlay shows it in red).
+constexpr double GRAPH_WINDOW_MS = 10000.0;
+constexpr double GRAPH_SLOT_MS   = 50.0;
+constexpr double STALL_MS        = 250.0;
 // The graph's range: a frame at 60 fps sits at a third of its height.
 constexpr double GRAPH_MAX_MS = 50.0;
 // The log lines kept; the settings choose how many of them show (overlay_log_lines, at least 2).
@@ -52,6 +66,34 @@ constexpr double RATE_SECONDS = 1.0;
 // The rows of the swap file in the statistics (OverlayMarkup): its group and its row in Waiting, and the gap above the group.
 constexpr std::array<int32_t, 4> SWAP_ROWS {16, 17, 18, 29};
 constexpr uint32_t               SWAP_GAP_ROW = 15;
+// The compile notice: how long the emulator has to compile (with gaps shorter than the grace) before it shows, and how long it stays after the
+// last compile.
+constexpr uint64_t NOTICE_DELAY_MS = 500;
+constexpr uint64_t NOTICE_GRACE_MS = 500;
+
+// The compile notice, part of the overlay: at the bottom right over the game (above the overlay's log when that shows). Its width stays, so
+// changing text doesn't move it.
+constexpr wchar_t CompileNoticeMarkup[] = LR"xaml(
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      IsHitTestVisible="False" Padding="24">
+  <Border x:Name="Notice" Width="260" HorizontalAlignment="Right" VerticalAlignment="Bottom" Padding="12,10" Background="#D91F1F1F"
+          Visibility="Collapsed">
+    <Grid ColumnSpacing="12">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="*" />
+      </Grid.ColumnDefinitions>
+      <ProgressRing x:Name="NoticeRing" Width="24" Height="24" VerticalAlignment="Center"
+                    Foreground="{ThemeResource SystemControlForegroundBaseHighBrush}" />
+      <StackPanel Grid.Column="1" VerticalAlignment="Center">
+        <TextBlock x:Name="NoticeTitle" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+        <TextBlock x:Name="NoticeDetail" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                   Typography.NumeralAlignment="Tabular" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+      </StackPanel>
+    </Grid>
+  </Border>
+</Grid>)xaml";
 
 constexpr wchar_t OverlayMarkup[] = LR"xaml(
 <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -85,7 +127,9 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
                    Typography.NumeralAlignment="Tabular"
                    Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
       </StackPanel>
+      <!-- The frame times of the last GRAPH_WINDOW_MS, scrolling with time; stalls as red blocks. -->
       <Grid x:Name="Graph" Height="48" Background="#14FFFFFF">
+        <Canvas x:Name="StallMarks" />
         <Line x:Name="Budget" Stroke="#40FFFFFF" StrokeThickness="1" StrokeDashArray="3,3" />
         <Polyline x:Name="Frames" Stroke="#7CC24D" StrokeThickness="1.5" />
       </Grid>
@@ -564,6 +608,17 @@ struct GameOverlay::State {
 	xaml::Controls::Grid       graph {nullptr};
 	xaml::Shapes::Line         budget {nullptr};
 	xaml::Shapes::Polyline     frames {nullptr};
+	// While the game stalls: the red blocks in the graph, and the frame rate's brushes.
+	xaml::Controls::Canvas     stall_marks {nullptr};
+	xaml::Media::Brush         fps_brush {nullptr};
+	xaml::Media::Brush         stall_brush {nullptr};
+	xaml::Media::Brush         stall_fill_brush {nullptr};
+	bool                       stalled = false;
+	// The graph's red blocks (made once, then moved) and its size when it was last drawn.
+	std::vector<xaml::Shapes::Rectangle> stall_blocks;
+	double                               graph_width  = 0.0;
+	double                               graph_height = 0.0;
+	xaml::DispatcherTimer      frame_timer {nullptr};
 	xaml::Controls::Grid       statistics {nullptr};
 	xaml::Controls::TextBlock  draws {nullptr};
 	xaml::Controls::TextBlock  skipped {nullptr};
@@ -617,6 +672,19 @@ struct GameOverlay::State {
 	xaml::Media::Brush                                good_brush {nullptr};
 	xaml::Media::Brush                                medium_brush {nullptr};
 	xaml::Media::Brush                                bad_brush {nullptr};
+	// The compile notice (CompileNoticeMarkup): its layer and parts; whether the settings show it; when the emulator's current stretch of
+	// compiling began and last compiled (0: none), the compiles started before that stretch and at the last look.
+	xaml::Controls::Grid         notice_layer {nullptr};
+	xaml::Controls::Border       notice {nullptr};
+	xaml::Controls::ProgressRing notice_ring {nullptr};
+	xaml::Controls::TextBlock    notice_title {nullptr};
+	xaml::Controls::TextBlock    notice_detail {nullptr};
+	bool                         notice_enabled = true;
+	bool                         notice_shown   = false;
+	uint64_t                     busy_since_ms  = 0;
+	uint64_t                     last_busy_ms   = 0;
+	uint64_t                     started_before = 0;
+	uint64_t                     last_started   = 0;
 
 	void BuildDetailed(xaml::Controls::Panel const& row, xaml::Media::Brush const& background);
 	void Set(Stat stat, std::wstring const& text, Level level = Level::None);
@@ -625,45 +693,57 @@ struct GameOverlay::State {
 	void Update();
 	void UpdateRates(const MemoryTotals& totals);
 	void UpdateControllers();
+	void UpdateNotice();
+	void UpdateFrame();
+	void DrawGraph();
+	void DrawGraphWhileShown();
+	void Fetch(std::stop_token stop);
 	void ShowSwapFile(bool shown);
 	void SetScale(double value);
 	void Fit(double width, double height);
+
+	// What the overlay shows that the emulator or the driver has to be asked for, fetched by `fetcher` while the overlay shows: a call that
+	// waits (the driver's memory figures while it builds a pipeline, say) then never stops the app's UI. The UI shows the last values it got.
+	struct Fetched {
+		MemoryTotals                    memory;
+		std::optional<ShaderStatistics> shaders;
+		std::optional<GameMemoryTotals> game_memory;
+	};
+	std::mutex                  fetched_mutex;
+	std::optional<Fetched>      fetched;        // the fetcher's latest, under fetched_mutex
+	Fetched                     shown_values;   // the UI's copy
+	std::atomic_bool            fetching {false};
+	std::atomic_bool            fetch_game_memory {false};
+	std::condition_variable_any fetch_wake;
+	// Draws the graph with every frame the app shows (DrawGraphWhileShown); after the parts it draws, so it is revoked before they go.
+	xaml::Media::CompositionTarget::Rendering_revoker graph_rendering;
+	// Last, so it stops before the rest goes.
+	std::jthread fetcher;
+
+	// UI thread: the fetcher's latest values when it isn't storing them, else the last ones.
+	const Fetched& Latest() {
+		std::unique_lock lock(fetched_mutex, std::try_to_lock);
+		if (lock.owns_lock() && fetched) {
+			shown_values = *fetched;
+		}
+		return shown_values;
+	}
 };
 
 void GameOverlay::State::Update() {
 	// Upstream's counters, which the draws, the compile time, the disk and Detailed come from, count while the overlay shows (again each time: the
 	// emulator sets them from its own setting when a game starts).
 	CountersOn(true);
-	run_time.Text(L"Running  " + Duration(EmulatorHost::Get().RunTimeMs()));
+	const auto& values = Latest();
 
-	// Frame rate and frame times, from the frames presented.
-	const auto times = EmulatorHost::Get().RecentFrameTimes(GRAPH_FRAMES);
-	if (!times.empty()) {
-		double second = 0.0;
-		size_t count  = 0;
-		for (auto it = times.rbegin(); it != times.rend() && second < 1000.0; ++it, count++) {
-			second += *it;
+	// Detailed's 1% low and worst frame: the last frames presented, and a frame that takes longer than the last one while it lasts.
+	auto times = EmulatorHost::Get().RecentFrameTimes(GRAPH_FRAMES);
+	if (const double waiting = EmulatorHost::Get().MsSinceLastPresent(); !times.empty() && waiting > times.back()) {
+		if (times.size() == GRAPH_FRAMES) {
+			times.erase(times.begin());
 		}
-		const double average = second / static_cast<double>(count);
-		fps.Text(std::to_wstring(std::lround(1000.0 / average)) + L" fps");
-		wchar_t text[32];
-		swprintf_s(text, L"%.1f", std::min(average, 999.9));
-		frame_time.Text(std::wstring(text) + L" ms");
+		times.push_back(waiting);
 	}
-	const double width  = graph.ActualWidth();
-	const double height = graph.ActualHeight();
-	const double budget_y = height - height * (1000.0 / 60.0) / GRAPH_MAX_MS;
-	budget.X1(0);
-	budget.X2(width);
-	budget.Y1(budget_y);
-	budget.Y2(budget_y);
-	winrt::Windows::UI::Xaml::Media::PointCollection points;
-	for (size_t i = 0; i < times.size(); i++) {
-		const double x = width * static_cast<double>(i + GRAPH_FRAMES - times.size()) / (GRAPH_FRAMES - 1);
-		const double y = height - height * std::min(times[i], GRAPH_MAX_MS) / GRAPH_MAX_MS;
-		points.Append({static_cast<float>(x), static_cast<float>(y)});
-	}
-	frames.Points(points);
 
 	// Resolutions of the last frame: "-" before the first flip, and for render when the frame drew no scene (a menu).
 	const auto resolutions = CurrentFrameResolutions();
@@ -681,7 +761,7 @@ void GameOverlay::State::Update() {
 	            (limit < (uint64_t {64} << 30) ? L" of " + Megabytes(limit) : std::wstring()));
 
 	// Its parts. The GPU's memory is part of RAM on the Xbox; on a PC it is on the graphics card, so the rest is RAM minus the game's memory there.
-	const auto totals = CurrentMemoryTotals();
+	const auto& totals = values.memory;
 	game_memory.Text(Megabytes(totals.game));
 	gpu_memory.Text(Megabytes(totals.gpu) + (IsXbox() ? std::wstring() : std::wstring(L" (graphics card)")));
 	const uint64_t parts = totals.game + (IsXbox() ? totals.gpu : 0);
@@ -711,7 +791,7 @@ void GameOverlay::State::Update() {
 		cpu_time_at = now;
 	}
 
-	if (const auto statistics = CurrentShaderStatistics()) {
+	if (const auto& statistics = values.shaders) {
 		drawing_shaders.Text(std::to_wstring(statistics->drawing_shaders));
 		compute_shaders.Text(std::to_wstring(statistics->compute_shaders));
 		new_shaders.Text(std::to_wstring(statistics->new_shaders));
@@ -786,6 +866,185 @@ void GameOverlay::State::UpdateControllers() {
 			headset.VerticalAlignment(xaml::VerticalAlignment::Center);
 			headset.Opacity(headset_mic_option ? 1.0 : 0.4);
 			place(headset, row, 3);
+		}
+	}
+}
+
+// The run time, the frame rate and the compile notice, from values that never wait for the emulator, so the overlay keeps moving and shows at
+// once when the game stalls (no frame for STALL_MS) and for how long: the frame rate turns red and the frame time counts the stall.
+void GameOverlay::State::UpdateFrame() {
+	run_time.Text(L"Running  " + Duration(EmulatorHost::Get().RunTimeMs()));
+
+	const double waiting = EmulatorHost::Get().MsSinceLastPresent();
+	const bool   stall   = waiting >= STALL_MS;
+	// The frame rate over the last second: while the game stalls the frames presented in it, else from their average time.
+	const auto second = EmulatorHost::Get().FramesSince(EmulatorHost::ClockMs() - 1000.0);
+	if (stall) {
+		fps.Text(std::to_wstring(second.size()) + L" fps");
+		frame_time.Text(Formatted(L"%.1f ms", std::min(waiting, 99999.9)));
+	} else if (!second.empty()) {
+		double total = 0.0;
+		for (const auto& frame: second) {
+			total += frame.time_ms;
+		}
+		const double average = total / static_cast<double>(second.size());
+		fps.Text(std::to_wstring(std::lround(1000.0 / average)) + L" fps");
+		frame_time.Text(Formatted(L"%.1f ms", std::min(average, 999.9)));
+	}
+	if (stall != stalled) {
+		stalled = stall;
+		fps.Foreground(stall ? stall_brush : fps_brush);
+	}
+	UpdateNotice();
+}
+
+// The graph, drawn with every frame the app shows while the overlay does (DrawGraphWhileShown): the last GRAPH_WINDOW_MS up to now at the
+// right, scrolling with time. Frames go into slots of GRAPH_SLOT_MS fixed to the clock, so a slot keeps its frames as it moves; each slot is
+// drawn at its longest frame. Stalls (frames of STALL_MS or more, and the one going on) are red blocks over the time they took.
+void GameOverlay::State::DrawGraph() {
+	const double width  = graph.ActualWidth();
+	const double height = graph.ActualHeight();
+	if (width <= 0.0 || height <= 0.0) {
+		return;
+	}
+	if (width != graph_width || height != graph_height) {
+		graph_width  = width;
+		graph_height = height;
+		xaml::Media::RectangleGeometry clip;
+		clip.Rect({0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)});
+		graph.Clip(clip);
+		const double budget_y = height - height * (1000.0 / 60.0) / GRAPH_MAX_MS;
+		budget.X1(0);
+		budget.X2(width);
+		budget.Y1(budget_y);
+		budget.Y2(budget_y);
+	}
+	const double now     = EmulatorHost::ClockMs();
+	const double waiting = EmulatorHost::Get().MsSinceLastPresent();
+	const auto   recent  = EmulatorHost::Get().FramesSince(now - GRAPH_WINDOW_MS - GRAPH_SLOT_MS);
+	const auto   x_of    = [&](double ms) { return width * (1.0 - (now - ms) / GRAPH_WINDOW_MS); };
+	const auto   y_of    = [&](double time_ms) { return height - height * std::min(time_ms, GRAPH_MAX_MS) / GRAPH_MAX_MS; };
+
+	xaml::Media::PointCollection             points;
+	std::vector<std::pair<double, double>> stalls; // from, to (ClockMs)
+	int64_t                                  slot    = std::numeric_limits<int64_t>::min();
+	double                                   longest = 0.0;
+	const auto                               add_slot = [&] {
+		if (slot != std::numeric_limits<int64_t>::min()) {
+			points.Append({static_cast<float>(x_of((static_cast<double>(slot) + 0.5) * GRAPH_SLOT_MS)), static_cast<float>(y_of(longest))});
+		}
+	};
+	for (const auto& frame: recent) {
+		const auto frame_slot = static_cast<int64_t>(std::floor(frame.presented_ms / GRAPH_SLOT_MS));
+		if (frame_slot != slot) {
+			add_slot();
+			slot    = frame_slot;
+			longest = frame.time_ms;
+		} else {
+			longest = std::max(longest, frame.time_ms);
+		}
+		if (frame.time_ms >= STALL_MS) {
+			stalls.emplace_back(frame.presented_ms - frame.time_ms, frame.presented_ms);
+		}
+	}
+	add_slot();
+	if (waiting >= STALL_MS) {
+		const double last = now - waiting;
+		points.Append({static_cast<float>(x_of(last)), 0.0f});
+		points.Append({static_cast<float>(width), 0.0f});
+		stalls.emplace_back(last, now);
+	}
+	frames.Points(points);
+
+	// The red blocks are made once and moved.
+	for (size_t i = 0; i < stalls.size(); i++) {
+		if (i == stall_blocks.size()) {
+			xaml::Shapes::Rectangle block;
+			block.Fill(stall_fill_brush);
+			stall_marks.Children().Append(block);
+			stall_blocks.push_back(block);
+		}
+		const double left  = std::clamp(x_of(stalls[i].first), 0.0, width);
+		const double right = std::clamp(x_of(stalls[i].second), 0.0, width);
+		auto&        block = stall_blocks[i];
+		block.Width(right - left);
+		block.Height(height);
+		xaml::Controls::Canvas::SetLeft(block, left);
+		block.Visibility(xaml::Visibility::Visible);
+	}
+	for (size_t i = stalls.size(); i < stall_blocks.size(); i++) {
+		stall_blocks[i].Visibility(xaml::Visibility::Collapsed);
+	}
+}
+
+// The graph is drawn with every frame the app shows (CompositionTarget::Rendering) while the overlay shows it.
+void GameOverlay::State::DrawGraphWhileShown() {
+	const bool drawn = root.Visibility() == xaml::Visibility::Visible && detail != OVERLAY_FRAME_RATE;
+	if (drawn && !graph_rendering) {
+		graph_rendering = xaml::Media::CompositionTarget::Rendering(winrt::auto_revoke, [this](auto const&, auto const&) { DrawGraph(); });
+	} else if (!drawn && graph_rendering) {
+		graph_rendering.revoke();
+	}
+}
+
+// The fetcher's thread: the values Fetched holds, every UPDATE_INTERVAL while the overlay shows.
+void GameOverlay::State::Fetch(std::stop_token stop) {
+	std::mutex wait_mutex;
+	while (!stop.stop_requested()) {
+		if (fetching.load()) {
+			Fetched values {CurrentMemoryTotals(), CurrentShaderStatistics(), fetch_game_memory.load() ? CurrentGameMemory() : std::nullopt};
+			std::lock_guard lock(fetched_mutex);
+			fetched = std::move(values);
+		}
+		std::unique_lock lock(wait_mutex);
+		fetch_wake.wait_for(lock, stop, UPDATE_INTERVAL, [] { return false; });
+	}
+}
+
+// The compile notice: it shows once the emulator has compiled for NOTICE_DELAY_MS (gaps shorter than NOTICE_GRACE_MS count as compiling),
+// with what it compiles, for how long and the compiles of the stretch so far, and goes NOTICE_GRACE_MS after the last compile.
+void GameOverlay::State::UpdateNotice() {
+	using Common::CompileActivity::Kind;
+	const auto     activity = Common::CompileActivity::Current();
+	const uint64_t now      = Common::CompileActivity::NowMs();
+	// A compile runs, or one ran since the last look.
+	if (activity.kind != Kind::None || activity.started != last_started) {
+		if (busy_since_ms == 0) {
+			busy_since_ms  = activity.kind != Kind::None ? std::min(activity.start_ms, now) : now;
+			started_before = last_started;
+		}
+		last_busy_ms = now;
+	} else if (busy_since_ms != 0 && now - last_busy_ms >= NOTICE_GRACE_MS) {
+		busy_since_ms = 0;
+	}
+	last_started     = activity.started;
+	// Part of the overlay: only while it shows.
+	const bool shown = notice_enabled && root.Visibility() == xaml::Visibility::Visible && busy_since_ms != 0 &&
+	                   now - busy_since_ms >= NOTICE_DELAY_MS;
+	if (shown) {
+		const auto so_far = static_cast<unsigned long long>(activity.started - started_before);
+		if (activity.kind != Kind::None) {
+			const bool pipeline = activity.kind == Kind::Pipeline;
+			notice_title.Text(pipeline ? L"Building pipeline" : L"Translating shaders");
+			constexpr wchar_t DOT[] = {L' ', 0x00B7, L' ', 0};
+			notice_detail.Text(std::wstring(pipeline ? L"Pipeline" : L"Shader") + DOT +
+			                   Formatted(L"%.1f s", static_cast<double>(now - std::min(activity.start_ms, now)) / 1000.0) + DOT +
+			                   Formatted(L"%llu so far", so_far));
+		} else if (notice_title.Text().empty()) {
+			// Only short compiles since the last look.
+			notice_title.Text(L"Translating shaders");
+			notice_detail.Text(Formatted(L"%llu so far", so_far));
+		}
+		// Above the overlay's log when that shows.
+		const bool over_log = root.Visibility() == xaml::Visibility::Visible && log_shown;
+		notice.Margin({0, 0, 0, over_log ? log_panel.as<xaml::FrameworkElement>().ActualHeight() + 12.0 : 0.0});
+	}
+	if (shown != notice_shown) {
+		notice_shown = shown;
+		notice.Visibility(VisibleIf(shown));
+		notice_ring.IsActive(shown);
+		if (!shown) {
+			notice_title.Text(L"");
 		}
 	}
 }
@@ -991,7 +1250,7 @@ void GameOverlay::State::UpdateDetailed(const std::vector<double>& times, uint64
 		const auto cores = std::max(1u, std::thread::hardware_concurrency());
 		Set(STAT_CPU, Formatted(L"%.0f%%  (%.1f of %u cores)", cpu_share * 100.0, cpu_share * cores, cores));
 	}
-	if (const auto statistics = CurrentShaderStatistics()) {
+	if (const auto& statistics = shown_values.shaders) {
 		Set(STAT_SHADERS, Formatted(L"%llu  (%llu new)", statistics->drawing_shaders + statistics->compute_shaders, statistics->new_shaders));
 		Set(STAT_PIPELINES, Formatted(L"%llu  (%llu new, %llu cached)", statistics->pipelines,
 		                              statistics->pipelines - std::min(statistics->cached_pipelines, statistics->pipelines),
@@ -1067,7 +1326,7 @@ void GameOverlay::State::UpdateDetailedRates(const Sample& current, const Sample
 	const double underruns = rate(Counter::AudioUnderruns);
 	Set(STAT_AUDIO, Formatted(L"%.0f/s  (%llu total)", underruns, total(Counter::AudioUnderruns)), underruns > 0.0 ? Level::Bad : Level::Good);
 
-	if (const auto game = CurrentGameMemory()) {
+	if (const auto& game = shown_values.game_memory) {
 		const uint64_t direct = game->direct_allocated + game->pooled_allocated;
 		Set(STAT_DIRECT, Bytes(direct) + L" / " + Bytes(game->direct_total),
 		    LevelOf(game->direct_total != 0 ? static_cast<double>(direct) * 100.0 / static_cast<double>(game->direct_total) : 0.0, 85, 97));
@@ -1102,27 +1361,34 @@ void GameOverlay::State::SetScale(double value) {
 		return;
 	}
 	scale = value;
-	if (scale == 1.0) {
-		root.RenderTransform(nullptr);
-		root.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
-		root.VerticalAlignment(xaml::VerticalAlignment::Stretch);
-		root.ClearValue(xaml::FrameworkElement::WidthProperty());
-		root.ClearValue(xaml::FrameworkElement::HeightProperty());
-		return;
+	// The overlay and the compile notice have the same size.
+	for (const auto& layer: {root, notice_layer}) {
+		if (scale == 1.0) {
+			layer.RenderTransform(nullptr);
+			layer.HorizontalAlignment(xaml::HorizontalAlignment::Stretch);
+			layer.VerticalAlignment(xaml::VerticalAlignment::Stretch);
+			layer.ClearValue(xaml::FrameworkElement::WidthProperty());
+			layer.ClearValue(xaml::FrameworkElement::HeightProperty());
+			continue;
+		}
+		xaml::Media::ScaleTransform transform;
+		transform.ScaleX(scale);
+		transform.ScaleY(scale);
+		layer.RenderTransform(transform);
+		layer.HorizontalAlignment(xaml::HorizontalAlignment::Left);
+		layer.VerticalAlignment(xaml::VerticalAlignment::Top);
 	}
-	xaml::Media::ScaleTransform transform;
-	transform.ScaleX(scale);
-	transform.ScaleY(scale);
-	root.RenderTransform(transform);
-	root.HorizontalAlignment(xaml::HorizontalAlignment::Left);
-	root.VerticalAlignment(xaml::VerticalAlignment::Top);
-	Fit(page.ActualWidth(), page.ActualHeight());
+	if (scale != 1.0) {
+		Fit(page.ActualWidth(), page.ActualHeight());
+	}
 }
 
 void GameOverlay::State::Fit(double width, double height) {
 	if (scale != 1.0 && width > 0.0 && height > 0.0) {
 		root.Width(width / scale);
 		root.Height(height / scale);
+		notice_layer.Width(width / scale);
+		notice_layer.Height(height / scale);
 	}
 }
 
@@ -1149,6 +1415,10 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.graph            = find(L"Graph").as<xaml::Controls::Grid>();
 	state.budget           = find(L"Budget").as<xaml::Shapes::Line>();
 	state.frames           = find(L"Frames").as<xaml::Shapes::Polyline>();
+	state.stall_marks      = find(L"StallMarks").as<xaml::Controls::Canvas>();
+	state.fps_brush        = state.fps.Foreground();
+	state.stall_brush      = xaml::Media::SolidColorBrush(winrt::Windows::UI::Color {0xFF, 0xF0, 0x95, 0x95});
+	state.stall_fill_brush = xaml::Media::SolidColorBrush(winrt::Windows::UI::Color {0x47, 0xE2, 0x4B, 0x4A});
 	state.statistics        = find(L"Statistics").as<xaml::Controls::Grid>();
 	state.draws             = find(L"Draws").as<xaml::Controls::TextBlock>();
 	state.skipped           = find(L"Skipped").as<xaml::Controls::TextBlock>();
@@ -1178,6 +1448,14 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.BuildDetailed(find(L"TopRow").as<xaml::Controls::Panel>(),
 	                    state.root.Resources().Lookup(winrt::box_value(L"PanelBrush")).as<xaml::Media::Brush>());
 	page.Children().InsertAt(index, state.root);
+	// The compile notice over the overlay (and under the game menu).
+	state.notice_layer  = xaml::Markup::XamlReader::Load(CompileNoticeMarkup).as<xaml::Controls::Grid>();
+	state.notice        = state.notice_layer.FindName(L"Notice").as<xaml::Controls::Border>();
+	state.notice_ring   = state.notice_layer.FindName(L"NoticeRing").as<xaml::Controls::ProgressRing>();
+	state.notice_title  = state.notice_layer.FindName(L"NoticeTitle").as<xaml::Controls::TextBlock>();
+	state.notice_detail = state.notice_layer.FindName(L"NoticeDetail").as<xaml::Controls::TextBlock>();
+	state.last_started  = Common::CompileActivity::Current().started;
+	page.Children().InsertAt(index + 1, state.notice_layer);
 	page.SizeChanged([weak = std::weak_ptr<State>(m_state)](auto const&, xaml::SizeChangedEventArgs const& args) {
 		if (auto shared = weak.lock()) {
 			shared->Fit(args.NewSize().Width, args.NewSize().Height);
@@ -1191,27 +1469,43 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 			shared->Update();
 		}
 	});
+	state.frame_timer = xaml::DispatcherTimer();
+	state.frame_timer.Interval(FRAME_INTERVAL);
+	state.frame_timer.Tick([weak = std::weak_ptr<State>(m_state)](auto const&, auto const&) {
+		if (auto shared = weak.lock()) {
+			shared->UpdateFrame();
+		}
+	});
+	state.fetcher = std::jthread([&state](std::stop_token stop) { state.Fetch(stop); });
 	Apply(LoadSettings());
 }
 
 GameOverlay::~GameOverlay() {
 	m_state->timer.Stop();
+	m_state->frame_timer.Stop();
 }
 
 void GameOverlay::Show(bool shown) {
 	auto& state = *m_state;
 	state.root.Visibility(shown ? xaml::Visibility::Visible : xaml::Visibility::Collapsed);
-	// Upstream's counters count while the overlay shows.
+	// Upstream's counters count while the overlay shows, and the fetcher fetches.
 	CountersOn(shown);
+	state.fetching = shown;
 	if (shown) {
+		state.fetch_wake.notify_all();
 		if (state.log_tail == nullptr) {
 			state.log_tail = std::make_unique<LogTail>();
 		}
 		state.Update();
+		state.UpdateFrame();
 		state.timer.Start();
+		state.frame_timer.Start();
 	} else {
 		state.timer.Stop();
+		state.frame_timer.Stop();
+		state.UpdateNotice();
 	}
+	state.DrawGraphWhileShown();
 }
 
 bool GameOverlay::Shown() const {
@@ -1225,6 +1519,10 @@ void GameOverlay::Apply(const AppSettings& settings) {
 	state.controllers_shown  = settings.overlay_controllers;
 	state.log_lines          = std::clamp<size_t>(settings.overlay_log_lines, 2, LOG_LINES);
 	state.headset_mic_option = settings.headset_mic;
+	state.notice_enabled     = settings.compile_notice;
+	state.fetch_game_memory  = std::min(settings.overlay_detail, OVERLAY_DETAILED) == OVERLAY_DETAILED;
+	state.UpdateNotice();
+	state.DrawGraphWhileShown();
 	// Detailed: the box with the game, the frame rate and the graph, and its panels beside it.
 	state.header.Visibility(VisibleIf(state.detail == OVERLAY_FULL || state.detail == OVERLAY_DETAILED));
 	state.graph.Visibility(VisibleIf(state.detail != OVERLAY_FRAME_RATE));
@@ -1283,6 +1581,15 @@ void AddOverlaySettings(xaml::Controls::Panel const& panel, xaml::Controls::Stac
 		    changed();
 	    },
 	    {L"The connected controllers and their player numbers, at the top right."});
+	AddSwitch(
+	    panel, explanation, L"Compile notice", settings->compile_notice,
+	    [settings, changed](bool on) {
+		    settings->compile_notice = on;
+		    changed();
+	    },
+	    {L"A box at the bottom right while the emulator translates shaders or builds pipelines, so a game that waits for them doesn't look "
+	     L"frozen.",
+	     L"It shows during games, with the overlay on or off."});
 	AddChoice(
 	    panel, explanation, L"Overlay size", {L"Small", L"Medium", L"Large"}, std::min<uint32_t>(settings->overlay_size, 2),
 	    [settings, changed](size_t index) {
