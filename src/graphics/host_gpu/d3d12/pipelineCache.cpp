@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/d3d12/pipelineCache.h"
 
 #include "common/assert.h"
+#include "common/compileActivity.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -47,7 +48,7 @@ namespace IR = ShaderRecompiler::IR;
 namespace {
 
 // Adds its lifetime to one of upstream's time counters (common/debugCounters.h) without counting another shader or pipeline: the steps D3D12
-// adds to them, the translation of a shader to DXIL and the linking of a pipeline's shaders.
+// adds to them, the translation of a shader to DXIL and the linking of a pipeline's shaders. The compile notice shows them as shader work.
 class CompileStepTimer {
 public:
 	explicit CompileStepTimer(Common::DebugCounters::Counter duration)
@@ -65,6 +66,7 @@ public:
 private:
 	Common::DebugCounters::Counter        m_duration;
 	std::chrono::steady_clock::time_point m_start;
+	Common::CompileActivity::Scope        m_activity {Common::CompileActivity::Kind::Shader};
 };
 
 // As in the Vulkan build, AMD GPUs run the guest's float min/max as their own instructions: vendor 0x1002, and the Xbox, whose adapter reports
@@ -763,6 +765,7 @@ ID3D12PipelineState* PipelineCache::LoadOrCreate(const std::wstring&            
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
+		const Common::CompileActivity::Scope activity(Common::CompileActivity::Kind::Pipeline);
 		return m_device->CreatePipelineState(&desc, IID_PPV_ARGS(&pipeline));
 	}();
 	if (FAILED(result)) {
