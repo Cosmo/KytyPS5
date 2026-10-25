@@ -51,6 +51,8 @@ struct AppSettings {
 	// Whether the overlay shows the end of the emulator's log, and the connected controllers.
 	bool overlay_log         = true;
 	bool overlay_controllers = true;
+	// A notice at the bottom right while the emulator translates shaders or builds pipelines, overlay or not. On.
+	bool compile_notice = true;
 	// The settings page, Controller (ControllerOptions in input.h): the games' adaptive trigger effects rumble the triggers' motors. On.
 	bool impulse_triggers = true;
 	// The settings page, Controller: the DualSense's haptic feedback as gentle rumble. On.
