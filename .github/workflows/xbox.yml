@@ -1,13 +1,13 @@
 name: Xbox build
 
-# Builds the UWP app's package for the Xbox Series X|S in Developer Mode (src/uwp/README.md) and publishes it as a pre-release
+# Builds the UWP app's package for the Xbox Series X|S in Developer Mode (src/uwp/README.md) and publishes it as a release
 # with the install steps, and a title and a What's new section when given. It runs only when started: Actions > Xbox build > Run
 # workflow, on a branch.
 on:
   workflow_dispatch:
     inputs:
       release:
-        description: Publish the package as a pre-release (otherwise it is only a download of this run)
+        description: Publish the package as a release (otherwise it is only a download of this run)
         type: boolean
         default: true
       title:
@@ -183,4 +183,4 @@ jobs:
             $title = "KytyPS5 for Xbox $env:VERSION"
           }
           Set-Content "$env:RUNNER_TEMP\notes.md" $notes -Encoding utf8NoBOM
-          gh release create "xbox-$env:VERSION" $env:ZIP --target $env:GITHUB_SHA --prerelease --title $title --notes-file "$env:RUNNER_TEMP\notes.md"
+          gh release create "xbox-$env:VERSION" $env:ZIP --target $env:GITHUB_SHA --title $title --notes-file "$env:RUNNER_TEMP\notes.md"
