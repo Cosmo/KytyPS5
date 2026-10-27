@@ -1,10 +1,12 @@
 // The emulator's audio input in the UWP app (libs/audioInput.h): WASAPI on the microphone of the headset plugged into player 1's controller
 // (input.h, ControllerMicrophoneDevice), as the DualSense's microphone. A thread per stream captures into a buffer the guest's reads take from;
-// WASAPI converts to the stream's format. Without a microphone the stream stays silent and looks for one every second.
+// WASAPI converts to the stream's format. Without a microphone the stream stays silent and looks for one every second. A DualSense over the
+// network (dsu.h) that sends its microphone comes first: its samples go into the buffer, converted here.
 
 #include "libs/audioInput.h"
 
 #include "common/logging/log.h"
+#include "dsu.h"
 #include "input.h"
 #include "log.h"
 
@@ -19,10 +21,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace Libs::Audio::Input {
 
@@ -85,24 +89,108 @@ public:
 	std::mutex          mutex;
 	std::deque<uint8_t> buffer; // guarded by mutex
 
+	// Takes the network DualSense's microphone (PushNetwork) while it sends it.
+	std::atomic_bool network = false;
+
 	void Run();
 	// Captures from the microphone until it goes away, another one is to be used, or the stream closes.
 	void Capture(const std::wstring& id);
+	// Takes the network DualSense's microphone until it stops or the stream closes.
+	void CaptureNetwork();
 	void Push(const BYTE* data, uint32_t bytes, bool silent);
+	// The network DualSense's 16-bit mono samples at `rate`, into the stream's format (linear interpolation; the client's thread only).
+	void PushNetwork(const int16_t* samples, uint32_t frames, uint32_t rate);
 
 private:
 	std::wstring failed_id; // the microphone that failed last: logged once
+	// Where the next sample lies in the next block, -1 being the previous block's last sample, which is kept.
+	double resample_position = 0.0;
+	float  resample_last     = 0.0f;
 };
+
+namespace {
+
+// The open streams, for the network DualSense's microphone (dsu.h): it is asked for while there are any.
+std::mutex           g_streams_mutex;
+std::vector<Stream*> g_streams;
+
+void NetworkMicrophone(const int16_t* samples, uint32_t frames, uint32_t rate) {
+	std::lock_guard lock(g_streams_mutex);
+	for (auto* stream: g_streams) {
+		if (stream->network) {
+			stream->PushNetwork(samples, frames, rate);
+		}
+	}
+}
+
+} // namespace
 
 void Stream::Run() {
 	winrt::init_apartment();
 	while (!stop) {
-		if (const auto id = Kyty::Uwp::ControllerMicrophoneDevice(); !id.empty()) {
+		if (Kyty::Uwp::Dsu::MicrophoneLive()) {
+			CaptureNetwork();
+		} else if (const auto id = Kyty::Uwp::ControllerMicrophoneDevice(); !id.empty()) {
 			Capture(id);
 		}
 		WaitForSingleObject(stop_event.get(), CHECK_MS);
 	}
 	winrt::uninit_apartment();
+}
+
+void Stream::CaptureNetwork() {
+	{
+		std::lock_guard lock(g_streams_mutex);
+		resample_position = 0.0;
+		resample_last     = 0.0f;
+		network           = true;
+	}
+	capturing = true;
+	Kyty::Uwp::Log("microphone: the DualSense's over the network\n");
+	while (!stop && Kyty::Uwp::Dsu::MicrophoneLive()) {
+		WaitForSingleObject(stop_event.get(), 100);
+	}
+	network   = false;
+	capturing = false;
+	{
+		std::lock_guard lock(mutex);
+		buffer.clear();
+	}
+	Kyty::Uwp::Log("microphone: stopped (%s)\n", stop ? "closed" : "the DualSense over the network sends none any more");
+}
+
+void Stream::PushNetwork(const int16_t* samples, uint32_t frames, uint32_t rate) {
+	if (frames == 0 || rate == 0) {
+		return;
+	}
+	const double       step = static_cast<double>(rate) / format.nSamplesPerSec;
+	std::vector<float> resampled;
+	while (resample_position < static_cast<double>(frames) - 1.0) {
+		const auto   index = static_cast<int64_t>(std::floor(resample_position));
+		const double t     = resample_position - static_cast<double>(index);
+		const float  a     = index < 0 ? resample_last : samples[index] / 32768.0f;
+		const float  b     = samples[index + 1] / 32768.0f;
+		resampled.push_back(static_cast<float>(a + (b - a) * t));
+		resample_position += step;
+	}
+	resample_position -= frames;
+	resample_last = samples[frames - 1] / 32768.0f;
+
+	const bool           is_float = format.wFormatTag == WAVE_FORMAT_IEEE_FLOAT;
+	std::vector<uint8_t> bytes(resampled.size() * format.nBlockAlign);
+	for (size_t frame = 0; frame < resampled.size(); frame++) {
+		for (uint32_t channel = 0; channel < format.nChannels; channel++) {
+			auto* out = bytes.data() + frame * format.nBlockAlign;
+			if (is_float) {
+				reinterpret_cast<float*>(out)[channel] = resampled[frame];
+			} else {
+				reinterpret_cast<int16_t*>(out)[channel] = static_cast<int16_t>(std::lround(std::clamp(resampled[frame], -1.0f, 1.0f) * 32767.0f));
+			}
+		}
+	}
+	if (!bytes.empty()) {
+		Push(bytes.data(), static_cast<uint32_t>(bytes.size()), false);
+	}
 }
 
 void Stream::Capture(const std::wstring& id) {
@@ -158,7 +246,7 @@ void Stream::Capture(const std::wstring& id) {
 		}
 		if (const auto now = GetTickCount64(); now - checked >= CHECK_MS) {
 			checked = now;
-			if (Kyty::Uwp::ControllerMicrophoneDevice() != id) {
+			if (Kyty::Uwp::ControllerMicrophoneDevice() != id || Kyty::Uwp::Dsu::MicrophoneLive()) {
 				break;
 			}
 		}
@@ -198,13 +286,25 @@ Stream* Open(uint32_t freq, uint32_t channels, bool is_float) {
 	format.nBlockAlign     = static_cast<WORD>(channels * format.wBitsPerSample / 8);
 	format.nAvgBytesPerSec = freq * format.nBlockAlign;
 	stream->max_bytes      = freq * BUFFER_MS / 1000 * format.nBlockAlign;
-	stream->thread         = std::thread([stream] { stream->Run(); });
+	{
+		std::lock_guard lock(g_streams_mutex);
+		g_streams.push_back(stream);
+		Kyty::Uwp::Dsu::SetMicrophoneSink(NetworkMicrophone);
+	}
+	stream->thread = std::thread([stream] { stream->Run(); });
 	return stream;
 }
 
 void Close(Stream* stream) {
 	if (stream == nullptr) {
 		return;
+	}
+	{
+		std::lock_guard lock(g_streams_mutex);
+		std::erase(g_streams, stream);
+		if (g_streams.empty()) {
+			Kyty::Uwp::Dsu::SetMicrophoneSink(nullptr);
+		}
 	}
 	stream->stop = true;
 	SetEvent(stream->stop_event.get());
