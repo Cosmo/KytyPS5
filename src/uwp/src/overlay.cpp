@@ -1542,10 +1542,10 @@ void GameOverlay::Apply(const AppSettings& settings) {
 	}
 }
 
-void AddOverlaySettings(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, std::shared_ptr<AppSettings> settings,
-                        std::function<void()> changed) {
+void AddOverlaySettings(xaml::Controls::Panel const& overlay, xaml::Controls::Panel const& on_screen, xaml::Controls::StackPanel const& explanation,
+                        std::shared_ptr<AppSettings> settings, std::function<void()> changed) {
 	AddChoice(
-	    panel, explanation, L"Overlay", {L"Off", L"Frame rate", L"Compact", L"Full", L"Detailed"},
+	    overlay, explanation, L"Overlay", {L"Off", L"Frame rate", L"Compact", L"Full", L"Detailed"},
 	    OverlayShown() ? 1 + std::min(settings->overlay_detail, OVERLAY_DETAILED) : 0,
 	    [settings, changed](size_t index) {
 		    SetOverlayShown(index != 0);
@@ -1554,9 +1554,17 @@ void AddOverlaySettings(xaml::Controls::Panel const& panel, xaml::Controls::Stac
 		    }
 		    changed();
 	    },
-	    {L"What the overlay shows over games.",
-	     L"Frame rate, Compact and Full show more with each step. Detailed shows everything, in panels along the top.",
-	     L"During a game, both triggers with View and Menu turn it off and on."});
+	    {L"Each step shows more, from just the frame rate up to details for finding performance problems.",
+	     L"During a game, hold both triggers and press [View] + [Menu] to show or hide it."});
+	AddChoice(overlay, explanation, L"Overlay size", {L"Small", L"Medium", L"Large"}, std::min<uint32_t>(settings->overlay_size, 2),
+	          [settings, changed](size_t index) {
+		          settings->overlay_size = static_cast<uint32_t>(index);
+		          changed();
+	          });
+	AddSwitch(on_screen, explanation, L"Controllers on screen", settings->overlay_controllers, [settings, changed](bool on) {
+		settings->overlay_controllers = on;
+		changed();
+	});
 	// Off, or 2 to 20 lines in steps of 2 (overlay_log and overlay_log_lines; an odd number from the settings file shows as the next even one).
 	{
 		constexpr auto            MAX_LINES = static_cast<uint32_t>(LOG_LINES);
@@ -1565,40 +1573,21 @@ void AddOverlaySettings(xaml::Controls::Panel const& panel, xaml::Controls::Stac
 			lines.push_back(std::to_wstring(count) + L" lines");
 		}
 		const size_t selected = settings->overlay_log ? (std::clamp<uint32_t>(settings->overlay_log_lines, 2, MAX_LINES) + 1) / 2 : 0;
-		AddChoice(
-		    panel, explanation, L"Log on screen", std::move(lines), selected,
-		    [settings, changed](size_t index) {
-			    settings->overlay_log = index != 0;
-			    if (index != 0) {
-				    settings->overlay_log_lines = static_cast<uint32_t>(index) * 2;
-			    }
-			    changed();
-		    },
-		    {L"The latest lines of the emulator's log, under the game.", L"The log file is written either way."});
+		AddChoice(on_screen, explanation, L"Log on screen", std::move(lines), selected, [settings, changed](size_t index) {
+			settings->overlay_log = index != 0;
+			if (index != 0) {
+				settings->overlay_log_lines = static_cast<uint32_t>(index) * 2;
+			}
+			changed();
+		});
 	}
 	AddSwitch(
-	    panel, explanation, L"Controllers on screen", settings->overlay_controllers,
-	    [settings, changed](bool on) {
-		    settings->overlay_controllers = on;
-		    changed();
-	    },
-	    {L"The connected controllers and their player numbers, at the top right."});
-	AddSwitch(
-	    panel, explanation, L"Compile notice", settings->compile_notice,
+	    on_screen, explanation, L"Compile notice", settings->compile_notice,
 	    [settings, changed](bool on) {
 		    settings->compile_notice = on;
 		    changed();
 	    },
-	    {L"A box at the bottom right while the emulator translates shaders or builds pipelines, so a game that waits for them doesn't look "
-	     L"frozen.",
-	     L"It shows during games, with the overlay on or off."});
-	AddChoice(
-	    panel, explanation, L"Overlay size", {L"Small", L"Medium", L"Large"}, std::min<uint32_t>(settings->overlay_size, 2),
-	    [settings, changed](size_t index) {
-		    settings->overlay_size = static_cast<uint32_t>(index);
-		    changed();
-	    },
-	    {L"The size of the overlay over games."});
+	    {L"Shows a notice while a game waits for its graphics to be prepared, so you know it hasn't frozen."});
 }
 
 } // namespace Kyty::Uwp
