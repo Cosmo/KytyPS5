@@ -471,7 +471,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		tiles.Children().Clear();
 		explanation.Children().Clear();
 		auto values = std::make_shared<AppSettings>(LoadSettings());
-		AddOverlaySettings(tiles, explanation, values, [values, overlay] {
+		AddOverlaySettings(tiles, tiles, explanation, values, [values, overlay] {
 			SaveSettings(*values);
 			overlay->Apply(*values);
 			overlay->Show(OverlayShown());
