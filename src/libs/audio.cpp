@@ -664,6 +664,19 @@ uint32_t Audio::AudioOutOutputs(OutputParam* params, uint32_t num, bool blocking
 			controller_uses_bluetooth =
 			    Controller::DualSenseHaptics::UsesBluetooth(port.haptics);
 		}
+#if defined(KYTY_PLATFORM_UWP)
+		// A player's pad speaker and vibration ports play on the player's DualSenses over the network when the app has any: then the speaker
+		// is not on the TV, and the sample clock paces the batch, as with a DualSense on Bluetooth.
+		if (port.type == AUDIO_OUT_PORT_TYPE_PADSPK || port.type == AUDIO_OUT_PORT_TYPE_VIBRATION) {
+			if (const auto queued_us = Output::QueueNetworkController(port.player, port.type == AUDIO_OUT_PORT_TYPE_PADSPK, params[i].data,
+			                                                          port.samples_num, port.freq, static_cast<uint32_t>(port.channels_num),
+			                                                          FormatIsFloat(port.format), port.volume, gain, params[i].gains);
+			    queued_us != 0) {
+				controller_queued_us      = queued_us;
+				controller_uses_bluetooth = true;
+			}
+		}
+#endif
 		if (controller_queued_us == 0) {
 			// No DualSense took it (e.g. it was unplugged); a pad speaker port plays on the main
 			// output instead, and a vibration port has none.
