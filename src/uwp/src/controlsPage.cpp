@@ -1,6 +1,7 @@
 #include "controlsPage.h"
 
 #include "input.h"
+#include "settingTiles.h"
 #include "settings.h"
 #include "xboxLook.h"
 
@@ -16,6 +17,7 @@
 #include <winrt/Windows.UI.Xaml.Media.h>
 #include <winrt/Windows.UI.h>
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <string>
@@ -40,7 +42,7 @@ constexpr wchar_t PageMarkup[] = LR"xaml(
       <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
 
-    <TextBlock Text="Controller" Style="{StaticResource PageTitleTextBlockStyle}" Margin="48,0" />
+    <TextBlock x:Name="Title" Style="{StaticResource PageTitleTextBlockStyle}" Margin="48,0" />
 
     <ScrollViewer Grid.Row="1" Margin="0,24,0,0" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Hidden"
                   VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled">
@@ -83,6 +85,8 @@ struct Mapping {
 constexpr double CARD_WIDTH         = 400;
 constexpr double NAME_COLUMN_WIDTH  = 170;
 constexpr double BUTTON_SYMBOL_SIZE = 16;
+// How far up or down scrolls a card that is taller than the page: about two lines.
+constexpr double SCROLL_STEP = 40;
 
 xaml::Style AppStyle(const wchar_t* key) {
 	return xaml::Application::Current().Resources().Lookup(winrt::box_value(key)).as<xaml::Style>();
@@ -159,10 +163,16 @@ xaml::Controls::ContentControl Card(const wchar_t* title, const wchar_t* about, 
 		content.Children().Append(separated);
 	}
 
+	// Taller than the page, a card scrolls inside itself; its scroll bar shows that there is more.
+	xaml::Controls::ScrollViewer scroller;
+	scroller.VerticalScrollMode(xaml::Controls::ScrollMode::Enabled);
+	scroller.VerticalScrollBarVisibility(xaml::Controls::ScrollBarVisibility::Auto);
+	scroller.IsTabStop(false);
+	scroller.Content(content);
 	xaml::Controls::Border frame;
 	frame.Background(normal);
 	frame.Padding(xaml::ThicknessHelper::FromLengths(20, 16, 20, 16));
-	frame.Child(content);
+	frame.Child(scroller);
 	xaml::Controls::ContentControl card;
 	card.Width(CARD_WIDTH);
 	card.IsTabStop(true);
@@ -172,6 +182,21 @@ xaml::Controls::ContentControl Card(const wchar_t* title, const wchar_t* about, 
 	card.Content(frame);
 	card.GotFocus([frame, focused](auto const&, auto const&) { frame.Background(focused); });
 	card.LostFocus([frame, normal](auto const&, auto const&) { frame.Background(normal); });
+	// Up and down scroll a card that is taller than the page; at its ends they go on as usual.
+	card.KeyDown([scroller](auto const&, xaml::Input::KeyRoutedEventArgs const& args) {
+		using winrt::Windows::System::VirtualKey;
+		const auto key  = args.Key();
+		const bool down = key == VirtualKey::GamepadDPadDown || key == VirtualKey::GamepadLeftThumbstickDown || key == VirtualKey::Down;
+		const bool up   = key == VirtualKey::GamepadDPadUp || key == VirtualKey::GamepadLeftThumbstickUp || key == VirtualKey::Up;
+		const double offset = scroller.VerticalOffset();
+		if (down && offset < scroller.ScrollableHeight()) {
+			scroller.ChangeView(nullptr, std::min(offset + SCROLL_STEP, scroller.ScrollableHeight()), nullptr);
+			args.Handled(true);
+		} else if (up && offset > 0) {
+			scroller.ChangeView(nullptr, std::max(offset - SCROLL_STEP, 0.0), nullptr);
+			args.Handled(true);
+		}
+	});
 	return card;
 }
 
@@ -191,12 +216,18 @@ struct Page {
 
 } // namespace
 
-xaml::UIElement CreateControlsPage(std::function<void()> back) {
+xaml::UIElement CreateControlsPage(std::function<void()> back, const wchar_t* place) {
 	auto page  = std::make_shared<Page>();
 	page->back = std::move(back);
 	page->root = xaml::Markup::XamlReader::Load(PageMarkup).as<xaml::Controls::Grid>();
 	const auto& root = page->root;
 	SetHints(root.FindName(L"Hints").as<xaml::Controls::Border>(), {{XboxButton::B, L"Back"}});
+	const auto title = root.FindName(L"Title").as<xaml::Controls::TextBlock>();
+	if (place != nullptr) {
+		SetPageTitle(title, place, L"Button layout");
+	} else {
+		title.Text(L"Button layout");
+	}
 
 	// The mapping of input.cpp (BUTTONS, MapReading, the chords), the headset of the settings page's controller options, and the app's own
 	// shortcuts.
@@ -213,28 +244,29 @@ xaml::UIElement CreateControlsPage(std::function<void()> back) {
 	                             }));
 	cards.Children().Append(Card(L"Sticks, bumpers and triggers", L"They work as on a DualSense.",
 	                             {
-	                                 {{Name(L"Left stick"), Button(B::LeftStick)}, L"Left stick. Pressed in, L3."},
-	                                 {{Name(L"Right stick"), Button(B::RightStick)}, L"Right stick. Pressed in, R3."},
+	                                 {{Name(L"Left stick"), Button(B::LeftStick)}, L"Left stick. Press the stick in for L3."},
+	                                 {{Name(L"Right stick"), Button(B::RightStick)}, L"Right stick. Press the stick in for R3."},
 	                                 {{Name(L"Left/right bumper"), Button(B::LeftBumper), Word(L"/"), Button(B::RightBumper)}, L"L1 / R1"},
 	                                 {{Name(L"Left/right trigger"), Button(B::LeftTrigger), Word(L"/"), Button(B::RightTrigger)}, L"L2 / R2"},
 	                             }));
 	cards.Children().Append(Card(L"DualSense extras", L"What the Xbox controller does not have. Hold View for the touchpad and the motion sensors.",
 	                             {
 	                                 {{Name(L"View"), Button(B::View), Word(L"+"), Name(L"left stick"), Button(B::LeftStick)},
-	                                  L"Touchpad. Move the stick or press it in to touch and click it. Let go of View to lift the finger."},
+	                                  L"Touchpad. Move the stick to slide a finger across the touchpad, and press the stick in to click the touchpad. Let go of View to lift "
+	                                  L"the finger."},
 	                                 {{Name(L"View"), Button(B::View), Word(L"+"), Name(L"right stick"), Button(B::RightStick)},
-	                                  L"Motion sensors. Up and down tip the controller, left and right lean it."},
+	                                  L"Motion sensors. Up and down tip the controller forward and back, left and right lean it to the side."},
 	                                 {{Name(L"View"), Button(B::View), Word(L"+"), Name(L"right stick pressed in"), Button(B::RightStick)},
 	                                  L"Motion sensors. Left and right turn the controller as it lies flat. Up and down still tip it."},
-	                                 {{Name(L"Headset speaker"), Headset()}, L"Player 1's DualSense speaker"},
-	                                 {{Name(L"Headset microphone"), Headset()}, L"Player 1's DualSense microphone. Turn it on in Settings, Controller."},
+	                                 {{Name(L"Headset speaker"), Headset()}, L"Plays the sound of player 1's DualSense speaker."},
+	                                 {{Name(L"Headset microphone"), Headset()}, L"Works as player 1's DualSense microphone. Turn it on in Settings › Controller › Feedback and audio."},
 	                             }));
-	cards.Children().Append(Card(L"KytyPS5", L"Shortcuts while a game runs.",
+	cards.Children().Append(Card(L"KytyPS5", L"Shortcuts during a game.",
 	                             {
-	                                 {{Name(L"View"), Button(B::View), Word(L"+"), Name(L"Menu"), Button(B::Menu)}, L"Game menu"},
+	                                 {{Name(L"View"), Button(B::View), Word(L"+"), Name(L"Menu"), Button(B::Menu)}, L"Opens the game menu."},
 	                                 {{Name(L"View"), Button(B::View), Word(L"+"), Name(L"Menu"), Button(B::Menu), Word(L"+"), Button(B::LeftTrigger),
 	                                   Word(L"+"), Button(B::RightTrigger)},
-	                                  L"Overlay on or off"},
+	                                  L"Shows or hides the overlay."},
 	                             }));
 
 	// Back: B, Escape or the window's back button (shown while the page is open).
