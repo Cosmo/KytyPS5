@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include "cheatsPage.h"
+#include "controllerSettings.h"
 #include "emulatorHost.h"
 #include "fileAccess.h"
 #include "gameImages.h"
@@ -37,6 +38,7 @@
 #include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
+#include <winrt/Windows.UI.Xaml.Shapes.h>
 
 #include <cctype>
 #include <chrono>
@@ -96,36 +98,26 @@ constexpr wchar_t GameMarkup[] = LR"xaml(
     </Grid>
   </Grid>
 
-  <!-- The game menu (View + Menu, or Escape), in the system's look: the game keeps running behind
-       it. -->
+  <!-- The game menu (View + Menu, or Escape): the game keeps running behind it, dimmed. The menu is a panel on the left (Overlay's on the
+       right); the text of the item with the focus floats next to it, always at the height of the panel's first item. No hint bar. -->
   <Grid x:Name="Menu" Visibility="Collapsed">
-    <Rectangle x:Name="MenuDim" Fill="{ThemeResource SystemControlPageBackgroundMediumAltMediumBrush}" />
-    <!-- On the left; Settings on the right and without the dimming, so that the overlay at the top left shows each change. -->
-    <Grid x:Name="MenuPanel" Width="320" HorizontalAlignment="Left" Padding="24,32,24,32"
-          Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
+    <Rectangle x:Name="MenuDim" Fill="Black" Opacity="0.8" />
+    <Grid x:Name="MenuPanel" Width="320" HorizontalAlignment="Left" Padding="24,32,24,24" Background="#1F1F1F">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />
         <RowDefinition Height="Auto" />
         <RowDefinition Height="*" />
-        <RowDefinition Height="Auto" />
       </Grid.RowDefinitions>
       <TextBlock x:Name="MenuCaption" Text="Game menu" Style="{StaticResource CaptionTextBlockStyle}"
                  Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
       <TextBlock x:Name="MenuTitle" Grid.Row="1" Style="{StaticResource SubtitleTextBlockStyle}"
-                 MaxLines="3" TextTrimming="CharacterEllipsis" Margin="0,4,0,24" />
-      <!-- Game menu › Settings: tiles as on the settings page, and under them the explanation of the one with the focus. -->
-      <Grid x:Name="MenuSettings" Grid.Row="2" RowSpacing="16" Margin="0,0,0,16" Visibility="Collapsed">
-        <Grid.RowDefinitions>
-          <RowDefinition Height="*" />
-          <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
-        <ScrollViewer VerticalScrollBarVisibility="Hidden">
-          <StackPanel x:Name="MenuTiles" Spacing="8" />
-        </ScrollViewer>
-        <StackPanel x:Name="MenuExplanation" Grid.Row="1" Spacing="12" />
-      </Grid>
-      <!-- Game menu › Trophies: the running game's progress and trophies (ShowGameTrophies). -->
-      <Grid x:Name="MenuTrophies" Grid.Row="2" Margin="0,0,0,16" Visibility="Collapsed" />
+                 MaxLines="2" TextTrimming="CharacterEllipsis" Margin="0,4,0,20" />
+      <!-- Overlay, Controllers and its DSU servers: tiles as on the settings page. -->
+      <ScrollViewer x:Name="MenuSettings" Grid.Row="2" VerticalScrollBarVisibility="Hidden" Visibility="Collapsed">
+        <StackPanel x:Name="MenuTiles" Spacing="8" />
+      </ScrollViewer>
+      <!-- Trophies: the running game's progress and trophies (ShowGameTrophies). -->
+      <Grid x:Name="MenuTrophies" Grid.Row="2" Visibility="Collapsed" />
       <StackPanel x:Name="MenuList" Grid.Row="2">
         <ListView x:Name="MenuItems" SelectionMode="None" IsItemClickEnabled="True" Margin="-12,0">
           <ListView.ItemContainerStyle>
@@ -138,8 +130,8 @@ constexpr wchar_t GameMarkup[] = LR"xaml(
                    Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" Visibility="Collapsed"
                    Text="Saving, then back to the library..." />
       </StackPanel>
-      <Border x:Name="MenuHints" Grid.Row="3" Style="{StaticResource HintBarStyle}" />
     </Grid>
+    <StackPanel x:Name="MenuText" HorizontalAlignment="Left" VerticalAlignment="Top" Spacing="12" />
   </Grid>
 </Grid>)xaml";
 
@@ -412,24 +404,32 @@ void FocusControl(xaml::DependencyObject const& target) {
 	}
 }
 
-// The game menu's views: its entries, Game menu › Settings and Game menu › Trophies.
-enum class MenuView { Entries, Settings, Trophies };
+// The game menu's views: its entries, Overlay, Controllers (and its DSU servers) and Trophies.
+enum class MenuView { Entries, Overlay, Controllers, Servers, Trophies };
+
+// The game menu's panel is 320 wide; the text of the item with the focus starts 28 beside it, level with the panel's first item.
+constexpr double MENU_PANEL_WIDTH = 320;
+constexpr double MENU_TEXT_GAP    = 28;
+constexpr double MENU_TEXT_TOP    = 100;
+constexpr double MENU_TEXT_WIDTH  = 310;
+// The game is dimmed so that the text reads well; less with Overlay, whose changes show in the overlay.
+constexpr double MENU_DIM         = 0.8;
+constexpr double MENU_OVERLAY_DIM = 0.72;
 
 // Sets up the game menu and the overlay of the page of `game`.
 void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winrt::hstring const& title) {
-	page.FindName(L"MenuTitle").as<xaml::Controls::TextBlock>().Text(title);
+	auto menu_title    = page.FindName(L"MenuTitle").as<xaml::Controls::TextBlock>();
 	auto menu          = page.FindName(L"Menu").as<xaml::UIElement>();
 	auto dim           = page.FindName(L"MenuDim").as<xaml::UIElement>();
 	auto panel         = page.FindName(L"MenuPanel").as<xaml::FrameworkElement>();
-	auto caption       = page.FindName(L"MenuCaption").as<xaml::Controls::TextBlock>();
 	auto list          = page.FindName(L"MenuList").as<xaml::UIElement>();
 	auto items         = page.FindName(L"MenuItems").as<xaml::Controls::ListView>();
 	auto status        = page.FindName(L"MenuStatus").as<xaml::UIElement>();
 	auto settings_view = page.FindName(L"MenuSettings").as<xaml::UIElement>();
 	auto tiles         = page.FindName(L"MenuTiles").as<xaml::Controls::StackPanel>();
-	auto explanation   = page.FindName(L"MenuExplanation").as<xaml::Controls::StackPanel>();
+	auto text          = page.FindName(L"MenuText").as<xaml::Controls::StackPanel>();
 	auto trophies_view = page.FindName(L"MenuTrophies").as<xaml::Controls::Grid>();
-	SetHints(page.FindName(L"MenuHints").as<xaml::Controls::Border>(), {{XboxButton::A, L"Select"}, {XboxButton::B, L"Back"}});
+	menu_title.Text(title);
 
 	// The overlay goes under the menu, over the launch screen: its log shows the start too.
 	uint32_t menu_index = 0;
@@ -442,36 +442,87 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		SetOverlayShown(shown);
 	};
 
-	const auto resume   = MenuEntry(L"Resume");
-	const auto settings = MenuEntry(L"Settings", true);
-	const auto trophies = MenuEntry(L"Trophies", true);
-	const auto dump     = MenuEntry(L"Save frame dump");
-	const auto quit     = MenuEntry(L"Quit to library");
-	for (const auto& entry: {resume, settings, trophies, dump, quit}) {
+	const auto resume      = MenuEntry(L"Resume");
+	const auto settings    = MenuEntry(L"Overlay", true);
+	const auto controllers = MenuEntry(L"Controllers", true);
+	const auto trophies    = MenuEntry(L"Trophies", true);
+	const auto dump        = MenuEntry(L"Save frame dump");
+	const auto quit        = MenuEntry(L"Quit to library");
+	// The tools under a line.
+	xaml::Controls::ListViewItem line;
+	{
+		xaml::Shapes::Rectangle rule;
+		rule.Height(1);
+		rule.Fill(xaml::Media::SolidColorBrush(winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x3A, 0x3A, 0x3A)));
+		line.Content(rule);
+		line.HorizontalContentAlignment(xaml::HorizontalAlignment::Stretch);
+		line.MinHeight(0);
+		line.Padding(xaml::ThicknessHelper::FromLengths(12, 6, 12, 6));
+		line.IsEnabled(false);
+		line.IsTabStop(false);
+	}
+	for (const auto& entry: {resume, settings, controllers, trophies, line, dump, quit}) {
 		items.Items().Append(entry);
 	}
+	// What each entry does, next to the panel while it has the focus.
+	struct EntryText {
+		xaml::Controls::ListViewItem entry;
+		const wchar_t*               name;
+		Paragraphs                   text;
+	};
+	const std::vector<EntryText> entry_texts = {
+	    {resume, L"Resume", {L"Closes the menu and goes back to the game.", L"While the menu is open, the game keeps running, but its controls pause."}},
+	    {settings, L"Overlay", {L"Choose what the overlay shows over the game. The game stays in view, so you see each change right away."}},
+	    {controllers,
+	     L"Controllers",
+	     {LoadSettings().dsu_enabled
+	          ? L"Choose which controllers play, and as which player. Add Remote Controllers to use controllers that DSU-compatible apps share "
+	            L"over your network."
+	          : L"Choose which controllers play, and as which player."}},
+	    {trophies, L"Trophies", {L"See this game's trophies and which ones you've earned."}},
+	    {dump, L"Save frame dump", {L"Saves the next frame's render targets as PNG files, to help find graphics problems."}},
+	    {quit, L"Quit to library", {L"Closes the game and goes back to the library. Progress the game hasn't saved is lost."}},
+	};
+	items.GotFocus([text, entry_texts](auto const&, xaml::RoutedEventArgs const& args) {
+		const auto focused = args.OriginalSource().try_as<xaml::Controls::ListViewItem>();
+		for (const auto& entry: entry_texts) {
+			if (focused == entry.entry) {
+				ShowExplanation(text, entry.name, {}, entry.text);
+				return;
+			}
+		}
+	});
 
-	// Settings show on the right and without the dimming, so that the overlay at the top left shows each change.
-	const auto set_view = [dim, panel, caption, list, settings_view, trophies_view](MenuView view) {
+	// Overlay's panel goes to the right and its text to the left of it, the game a little less dim: the overlay at the top left stays in view.
+	// The tiles go when another view shows (Controllers' follow the controllers while they are there).
+	auto       current_view = std::make_shared<MenuView>(MenuView::Entries);
+	const auto set_view     = [dim, panel, menu_title, title, list, settings_view, trophies_view, tiles, text, current_view](MenuView view) {
+		*current_view       = view;
 		const auto shown_if = [](bool shown) { return shown ? xaml::Visibility::Visible : xaml::Visibility::Collapsed; };
-		dim.Visibility(shown_if(view != MenuView::Settings));
-		panel.HorizontalAlignment(view == MenuView::Settings ? xaml::HorizontalAlignment::Right : xaml::HorizontalAlignment::Left);
+		const bool overlay_view = view == MenuView::Overlay;
+		panel.HorizontalAlignment(overlay_view ? xaml::HorizontalAlignment::Right : xaml::HorizontalAlignment::Left);
+		text.HorizontalAlignment(overlay_view ? xaml::HorizontalAlignment::Right : xaml::HorizontalAlignment::Left);
+		text.Margin(overlay_view ? xaml::ThicknessHelper::FromLengths(0, MENU_TEXT_TOP, MENU_PANEL_WIDTH + MENU_TEXT_GAP, 0)
+		                    : xaml::ThicknessHelper::FromLengths(MENU_PANEL_WIDTH + MENU_TEXT_GAP, MENU_TEXT_TOP, 0, 0));
+		text.Width(MENU_TEXT_WIDTH);
+		dim.Opacity(overlay_view ? MENU_OVERLAY_DIM : MENU_DIM);
 		list.Visibility(shown_if(view == MenuView::Entries));
-		settings_view.Visibility(shown_if(view == MenuView::Settings));
+		settings_view.Visibility(shown_if(overlay_view || view == MenuView::Controllers || view == MenuView::Servers));
 		trophies_view.Visibility(shown_if(view == MenuView::Trophies));
-		const std::wstring prefix = std::wstring(L"Game menu ") + wchar_t {0x203A};
-		caption.Text(view == MenuView::Settings ? prefix + L" Settings" : view == MenuView::Trophies ? prefix + L" Trophies" : std::wstring(L"Game menu"));
-	};
-	const auto in_subview = [settings_view, trophies_view] {
-		return settings_view.Visibility() == xaml::Visibility::Visible || trophies_view.Visibility() == xaml::Visibility::Visible;
-	};
-	// The overlay's tiles, made anew each time so that they show the current values; a change shows at once.
-	const auto open_settings = [set_view, tiles, explanation, overlay] {
-		set_view(MenuView::Settings);
 		tiles.Children().Clear();
-		explanation.Children().Clear();
+		text.Children().Clear();
+		menu_title.Text(overlay_view                    ? winrt::hstring(L"Overlay")
+		                : view == MenuView::Controllers ? winrt::hstring(L"Controllers")
+		                : view == MenuView::Servers     ? winrt::hstring(L"Remote Controllers")
+		                : view == MenuView::Trophies    ? winrt::hstring(L"Trophies")
+		                                                : title);
+	};
+	const auto in_subview = [current_view] { return *current_view != MenuView::Entries; };
+	// The overlay's tiles, made anew each time so that they show the current values; a change shows at once.
+	const auto open_settings = [set_view, tiles, text, overlay] {
+		set_view(MenuView::Overlay);
 		auto values = std::make_shared<AppSettings>(LoadSettings());
-		AddOverlaySettings(tiles, tiles, explanation, values, [values, overlay] {
+		AddOverlaySettings(tiles, tiles, text, values, [values, overlay] {
 			SaveSettings(*values);
 			overlay->Apply(*values);
 			overlay->Show(OverlayShown());
@@ -479,20 +530,44 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		tiles.UpdateLayout();
 		FocusControl(tiles.Children().GetAt(0));
 	};
-	// The running game's trophies, read anew each time so that the ones earned in this session show.
-	const auto open_trophies = [set_view, trophies_view, game] {
-		set_view(MenuView::Trophies);
-		ShowGameTrophies(trophies_view, game);
+	// The DSU servers, as on the settings page (Settings › Controller › Remote Controllers); a change applies at once.
+	const auto open_servers = [set_view, tiles, text] {
+		set_view(MenuView::Servers);
+		auto values = std::make_shared<AppSettings>(LoadSettings());
+		AddServerTiles(tiles, text, values, [values] { SaveSettings(*values); });
+		tiles.UpdateLayout();
+		FocusFirst(tiles);
 	};
-	// Back to the entries, with the focus on the one the view was opened with.
-	const auto close_subview = [set_view, items, trophies_view] {
-		const int32_t from = trophies_view.Visibility() == xaml::Visibility::Visible ? 2 : 1;
+	// The controllers and their players, as on the settings page (Settings › Controller › Players); a change applies at once.
+	const auto open_controllers = [set_view, tiles, text, open_servers] {
+		set_view(MenuView::Controllers);
+		auto values = std::make_shared<AppSettings>(LoadSettings());
+		AddPlayersTiles(tiles, text, values, [values] { SaveSettings(*values); }, open_servers);
+		tiles.UpdateLayout();
+		FocusFirst(tiles);
+	};
+	// The running game's trophies, read anew each time so that the ones earned in this session show.
+	const auto open_trophies = [set_view, trophies_view, text, game] {
+		set_view(MenuView::Trophies);
+		ShowGameTrophies(trophies_view, game, text);
+	};
+	// Back to the entries, with the focus on the one the view was opened with; from the DSU servers back to the controllers.
+	const auto close_subview = [set_view, items, current_view, open_controllers, tiles] {
+		if (*current_view == MenuView::Servers) {
+			open_controllers();
+			FocusFirst(tiles, L"servers");
+			return;
+		}
+		const int32_t from = *current_view == MenuView::Trophies ? 3 : *current_view == MenuView::Controllers ? 2 : 1;
 		set_view(MenuView::Entries);
 		items.UpdateLayout();
 		FocusControl(items.ContainerFromIndex(from));
 	};
 
 	const auto show = [menu, items, set_view](bool open) {
+		if (!open) {
+			set_view(MenuView::Entries);
+		}
 		menu.Visibility(open ? xaml::Visibility::Visible : xaml::Visibility::Collapsed);
 		PauseGameInput(open || GameKeyboardShown());
 		if (open) {
@@ -518,7 +593,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		});
 	};
 
-	items.ItemClick([show, open_settings, open_trophies, status, items, resume, settings, trophies, dump,
+	items.ItemClick([show, open_settings, open_controllers, open_trophies, status, items, resume, settings, controllers, trophies, dump,
 	                 quit](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
 		// The entry, or its content: an entry is its own container, and the list may report either.
 		const auto clicked = args.ClickedItem();
@@ -529,6 +604,10 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		}
 		if (is(settings)) {
 			open_settings();
+			return;
+		}
+		if (is(controllers)) {
+			open_controllers();
 			return;
 		}
 		if (is(trophies)) {
