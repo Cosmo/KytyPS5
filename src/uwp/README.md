@@ -1,6 +1,6 @@
 # UWP app (Windows and Xbox Dev Mode)
 
-`src/uwp` is the KytyPS5 app for UWP: the launcher, the game menu, the settings, the trophies, the controller page, the overlay and the controller input. It runs on Windows with Developer Mode and is packaged for Xbox Dev Mode.
+`src/uwp` is the KytyPS5 app for UWP: the launcher, the game menu, the settings, the trophies, the button layout page, the overlay and the controller input. It runs on Windows with Developer Mode and is packaged for Xbox Dev Mode.
 
 **Status:** the emulator runs in the app with a Direct3D 12 renderer (`docs/d3d12-backend.md`), on a PC and on the Xbox Series X, with sound through XAudio2. Shaders go through Mesa's `spirv_to_dxil`. Where the Series X's driver lacks something, the renderer works around it or skips it: mesh programs run as compute shaders, shaders read guest memory through a table of buffers below shader model 6.6, and tessellation, 64-bit image atomics and 96-bit textures are reported once and skipped (`XBOX_CHANGES.md` lists the changes and the known limits). Guest memory is committed on first touch, and above a budget the parts a game has not used lately go to a swap file (by default when the app may use 8 GB or less, as on the Xbox). `kyty://run?title=<title ID>` (or `?game=<folder>`) starts a game.
 
@@ -24,6 +24,8 @@
 ## Controllers
 
 The controllers are the Xbox's own (`Windows.Gaming.Input`, the same on a PC and on Xbox) and those of DSU servers on the network (`dsu.h`), for example DualSenses that a PC serves with DSU Bridge, or a phone. They form one list, and the list is not the players: Settings › Controller › Players and the game menu's Controllers list the controllers by player (Player 1 at the top, then 2 to 4, then "Not playing"); the overlay and the library list them in the same order (P1 to P4, – for none). A controller's tile shows its name and player; its text shows its connection and battery, a DSU controller (named "Remote Controller") also its server and the end of its MAC address, which tells two alike apart. Y on a controller's tile makes it vibrate (a DualSense through DSU Bridge also lights up white), to see which one it is.
+
+Settings › Controller follows the Xbox's Settings: its pages are entries (Players, Remote Controllers, Feedback and audio, Button layout), and each opens full screen with its tiles in columns and the text of the tile with the focus beside them; Players opens DSU servers one level deeper too. The game menu's Controllers shows the same Players tiles in its panel, and its DSU servers one level deeper.
 
 - **Automatically** (the default): each controller takes the lowest free player of the four when it appears, and gives it back when it goes away. A fifth plays for none.
 - **Manually**: each controller plays for the player chosen for it (none, or 1 to 4), also mid-game; one not chosen yet plays for none. Choosing a player for a controller switches to this mode. Several controllers can play for the same player, and their input adds up: buttons, the stick and trigger moved furthest, the first finger on a touchpad, the first network controller's motion sensors. A phone clipped to an Xbox controller is simply a DSU controller with the same player.
