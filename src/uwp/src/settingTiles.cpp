@@ -1,11 +1,18 @@
 #include "settingTiles.h"
 
+#include "input.h"
+#include "xboxLook.h"
+
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.UI.Text.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
+#include <winrt/Windows.UI.Xaml.Documents.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
 #include <winrt/Windows.UI.h>
 
+#include <algorithm>
+#include <iterator>
 #include <memory>
 #include <utility>
 
@@ -22,6 +29,27 @@ constexpr double CHECK_BOX_SIZE  = 16;
 // In Segoe MDL2 Assets.
 constexpr wchar_t CHEVRON_DOWN[] = {0xE70D, 0};
 constexpr wchar_t CHECK_MARK[]   = {0xE73E, 0};
+// A category's entries: 219 by 66, the symbol 20 at 17 from the left edge, the name at 50.
+constexpr double ENTRY_WIDTH       = 219;
+constexpr double ENTRY_HEIGHT      = 66;
+constexpr double ENTRY_SYMBOL_SIZE = 20;
+constexpr double ENTRY_TEXT_LEFT   = 50;
+// A button's symbol in an explanation: a little larger than the text, as in the hint bar; the lines keep the text's height, so that a
+// line with a symbol is as far from the next as the others.
+constexpr double BUTTON_SYMBOL_SIZE = 15;
+constexpr double TEXT_LINE_HEIGHT   = 20;
+// The columns of a full-screen page.
+constexpr double COLUMN_WIDTH = 219;
+
+// The buttons an explanation can show as their symbols, by their names in brackets.
+struct NamedButton {
+	const wchar_t* name;
+	XboxButton     button;
+};
+constexpr NamedButton TEXT_BUTTONS[] = {
+    {L"A", XboxButton::A}, {L"B", XboxButton::B},       {L"X", XboxButton::X},
+    {L"Y", XboxButton::Y}, {L"View", XboxButton::View}, {L"Menu", XboxButton::Menu},
+};
 
 // A setting as a tile of the Xbox's Settings: its name, and its current value under it with a chevron (A opens the choices) or a check box at
 // its right (A turns it over); or a tile that opens something, with a line under its name.
@@ -104,21 +132,171 @@ SettingTile MakeTile(const wchar_t* name, TileKind kind) {
 	return tile;
 }
 
+// A paragraph of an explanation, with the buttons named in brackets as their symbols (the face buttons in their colours).
+xaml::Controls::TextBlock Paragraph(const std::wstring& paragraph) {
+	xaml::Controls::TextBlock text;
+	text.Style(AppStyle(L"BodyTextBlockStyle"));
+	text.TextWrapping(xaml::TextWrapping::Wrap);
+	const auto append = [&text](const std::wstring& piece) {
+		if (!piece.empty()) {
+			xaml::Documents::Run run;
+			run.Text(piece);
+			text.Inlines().Append(run);
+		}
+	};
+	size_t start = 0;
+	for (size_t open = paragraph.find(L'['); open != std::wstring::npos; open = paragraph.find(L'[', open + 1)) {
+		const size_t close = paragraph.find(L']', open);
+		if (close == std::wstring::npos) {
+			break;
+		}
+		const auto  name  = paragraph.substr(open + 1, close - open - 1);
+		const auto* named = std::find_if(std::begin(TEXT_BUTTONS), std::end(TEXT_BUTTONS), [&name](const NamedButton& button) { return name == button.name; });
+		if (named == std::end(TEXT_BUTTONS)) {
+			continue;
+		}
+		append(paragraph.substr(start, open - start));
+		const auto           symbol = GetButtonSymbol(named->button);
+		xaml::Documents::Run run;
+		run.FontFamily(xaml::Media::FontFamily(symbol.font));
+		run.FontSize(BUTTON_SYMBOL_SIZE);
+		run.Text(symbol.glyph);
+		if (const auto color = GetButtonColor(named->button)) {
+			run.Foreground(xaml::Media::SolidColorBrush(*color));
+		}
+		text.Inlines().Append(run);
+		text.LineStackingStrategy(xaml::LineStackingStrategy::BlockLineHeight);
+		text.LineHeight(TEXT_LINE_HEIGHT);
+		start = close + 1;
+		open  = close;
+	}
+	append(paragraph.substr(start));
+	return text;
+}
+
 } // namespace
 
 void ShowExplanation(xaml::Controls::StackPanel const& explanation, const Paragraphs& paragraphs) {
 	explanation.Children().Clear();
 	for (const auto& paragraph: paragraphs) {
-		xaml::Controls::TextBlock text;
-		text.Style(AppStyle(L"BodyTextBlockStyle"));
-		text.TextWrapping(xaml::TextWrapping::Wrap);
-		text.Text(paragraph);
-		explanation.Children().Append(text);
+		explanation.Children().Append(Paragraph(paragraph));
 	}
+}
+
+void ShowExplanation(xaml::Controls::StackPanel const& explanation, const std::wstring& title, const std::vector<std::wstring>& facts,
+                     const Paragraphs& paragraphs) {
+	ShowExplanation(explanation, paragraphs);
+	// The name and the facts close together, over the paragraphs.
+	xaml::Controls::StackPanel head;
+	head.Spacing(2);
+	auto name = Paragraph(title);
+	name.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+	name.FontSize(name.FontSize() + 2);
+	name.Margin(xaml::ThicknessHelper::FromLengths(0, 0, 0, 4));
+	head.Children().Append(name);
+	const auto grey =
+	    xaml::Application::Current().Resources().Lookup(winrt::box_value(L"SystemControlForegroundBaseMediumBrush")).as<xaml::Media::Brush>();
+	for (const auto& fact: facts) {
+		auto line = Paragraph(fact);
+		line.Foreground(grey);
+		head.Children().Append(line);
+	}
+	explanation.Children().InsertAt(0, head);
 }
 
 void Explain(xaml::Controls::Control const& control, xaml::Controls::StackPanel const& explanation, Paragraphs paragraphs) {
 	control.GotFocus([explanation, paragraphs = std::move(paragraphs)](auto const&, auto const&) { ShowExplanation(explanation, paragraphs); });
+}
+
+void Explain(xaml::Controls::Control const& control, xaml::Controls::StackPanel const& explanation, std::wstring title,
+             std::vector<std::wstring> facts, Paragraphs paragraphs) {
+	control.GotFocus([explanation, title = std::move(title), facts = std::move(facts), paragraphs = std::move(paragraphs)](auto const&,
+	                                                                                                                         auto const&) {
+		ShowExplanation(explanation, title, facts, paragraphs);
+	});
+}
+
+bool FocusFirst(xaml::DependencyObject const& root, winrt::hstring const& tag) {
+	if (root == nullptr) {
+		return false;
+	}
+	if (auto viewer = root.try_as<xaml::Controls::ScrollViewer>()) {
+		return FocusFirst(viewer.Content().try_as<xaml::DependencyObject>(), tag);
+	}
+	if (auto panel = root.try_as<xaml::Controls::Panel>()) {
+		for (const auto& child: panel.Children()) {
+			if (FocusFirst(child, tag)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	if (auto border = root.try_as<xaml::Controls::Border>()) {
+		return FocusFirst(border.Child(), tag);
+	}
+	auto control = root.try_as<xaml::Controls::Control>();
+	if (control == nullptr || control.Visibility() != xaml::Visibility::Visible) {
+		return false;
+	}
+	const bool wanted = tag.empty() ? control.IsEnabled() && control.IsTabStop() : winrt::unbox_value_or<winrt::hstring>(control.Tag(), L"") == tag;
+	return wanted && control.Focus(xaml::FocusState::Keyboard);
+}
+
+xaml::Controls::StackPanel AddColumn(xaml::Controls::StackPanel const& columns, const wchar_t* heading) {
+	xaml::Controls::StackPanel column;
+	column.Width(COLUMN_WIDTH);
+	column.Spacing(8);
+	if (heading != nullptr) {
+		AddHeading(column, heading);
+	}
+	columns.Children().Append(column);
+	return column;
+}
+
+void SetPageTitle(xaml::Controls::TextBlock const& title, const wchar_t* place, const wchar_t* page) {
+	title.Inlines().Clear();
+	xaml::Documents::Run where;
+	where.Text(place);
+	where.FontWeight(winrt::Windows::UI::Text::FontWeights::Bold());
+	xaml::Documents::Run name;
+	name.Text(std::wstring(L"  ") + page);
+	name.FontWeight(winrt::Windows::UI::Text::FontWeights::Normal());
+	title.Inlines().Append(where);
+	title.Inlines().Append(name);
+}
+
+xaml::Controls::Button MakeEntry(const wchar_t* symbol, const wchar_t* name, std::function<void()> clicked) {
+	const xaml::Media::SolidColorBrush normal(winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x30, 0x30, 0x30));
+	const xaml::Media::SolidColorBrush focused(winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x44, 0x44, 0x44));
+	xaml::Controls::Button             entry;
+	entry.Width(ENTRY_WIDTH);
+	entry.Height(ENTRY_HEIGHT);
+	entry.HorizontalContentAlignment(xaml::HorizontalAlignment::Left);
+	entry.VerticalContentAlignment(xaml::VerticalAlignment::Center);
+	entry.Padding(xaml::ThicknessHelper::FromLengths(17, 0, 11, 0));
+	entry.CornerRadius(xaml::CornerRadiusHelper::FromUniformRadius(0));
+	entry.BorderThickness(xaml::ThicknessHelper::FromUniformLength(0));
+	entry.Background(normal);
+	entry.GotFocus([entry, focused](auto const&, auto const&) { entry.Background(focused); });
+	entry.LostFocus([entry, normal](auto const&, auto const&) { entry.Background(normal); });
+	xaml::Controls::StackPanel content;
+	content.Orientation(xaml::Controls::Orientation::Horizontal);
+	xaml::Controls::FontIcon icon;
+	icon.FontFamily(xaml::Media::FontFamily(L"Segoe MDL2 Assets"));
+	icon.Glyph(symbol);
+	icon.FontSize(ENTRY_SYMBOL_SIZE);
+	icon.Width(ENTRY_TEXT_LEFT - 17);
+	icon.HorizontalAlignment(xaml::HorizontalAlignment::Left);
+	icon.VerticalAlignment(xaml::VerticalAlignment::Center);
+	content.Children().Append(icon);
+	xaml::Controls::TextBlock label;
+	label.Style(AppStyle(L"BodyTextBlockStyle"));
+	label.Text(name);
+	label.VerticalAlignment(xaml::VerticalAlignment::Center);
+	content.Children().Append(label);
+	entry.Content(content);
+	entry.Click([clicked = std::move(clicked)](auto const&, auto const&) { clicked(); });
+	return entry;
 }
 
 void AddHeading(xaml::Controls::Panel const& panel, const wchar_t* text) {
@@ -129,8 +307,8 @@ void AddHeading(xaml::Controls::Panel const& panel, const wchar_t* text) {
 	panel.Children().Append(heading);
 }
 
-void AddChoice(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, const wchar_t* name, std::vector<std::wstring> choices,
-               size_t selected, std::function<void(size_t)> chosen, Paragraphs help) {
+xaml::Controls::Button AddChoice(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, const wchar_t* name,
+                                 std::vector<std::wstring> choices, size_t selected, std::function<void(size_t)> chosen, Paragraphs help) {
 	auto tile = MakeTile(name, TileKind::Choice);
 	tile.value.Text(selected < choices.size() ? winrt::hstring(choices[selected]) : winrt::hstring());
 	auto current = std::make_shared<size_t>(selected);
@@ -151,6 +329,7 @@ void AddChoice(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel co
 	});
 	Explain(tile.button, explanation, help);
 	panel.Children().Append(tile.button);
+	return tile.button;
 }
 
 void AddSwitch(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, const wchar_t* name, bool on,
