@@ -191,6 +191,11 @@ private:
 	PadTriggerEffectStateInformation m_trigger_state {};
 	// Per trigger, how often a weapon effect has fired.
 	std::array<uint32_t, 2> m_trigger_shots {};
+#if defined(KYTY_PLATFORM_UWP)
+	// The game's light bar colour, for the host feedback.
+	std::array<uint8_t, 3> m_light_bar {};
+	bool                   m_light_bar_set = false;
+#endif
 	// Setting changes share the output lock; audio only needs an atomic scale snapshot.
 	std::array<std::atomic<uint32_t>, 3> m_setting_steps {};
 };
@@ -1001,6 +1006,18 @@ HostFeedback GameController::GetHostFeedback() {
 		feedback.trigger_vibration[i]  = Scale(feel.vibration, trigger_scale);
 		feedback.trigger_frequency[i]  = feel.frequency;
 		feedback.trigger_shots[i]      = m_trigger_shots[i];
+		auto& block                    = feedback.trigger_blocks[i];
+		if (!trigger_effect_to_dualsense(m_trigger_effect.command[i], block.data(), GetSettingScale(Setting::TriggerEffectIntensity))) {
+			block    = {};
+			block[0] = 0x05;
+		}
+	}
+	if (const auto& color = Config::GetControllerColor()) {
+		feedback.light_bar_set = true;
+		feedback.light_bar     = {static_cast<uint8_t>((*color)[0]), static_cast<uint8_t>((*color)[1]), static_cast<uint8_t>((*color)[2])};
+	} else if (m_light_bar_set) {
+		feedback.light_bar_set = true;
+		feedback.light_bar     = m_light_bar;
 	}
 	return feedback;
 }
@@ -1013,6 +1030,10 @@ void GameController::SetLightBar(uint8_t r, uint8_t g, uint8_t b) {
 		g = (*color)[1];
 		b = (*color)[2];
 	}
+#if defined(KYTY_PLATFORM_UWP)
+	m_light_bar     = {r, g, b};
+	m_light_bar_set = true;
+#endif
 	if (auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(m_active_id));
 	    pad != nullptr) {
 		SetHostPadLED(pad, r, g, b);
