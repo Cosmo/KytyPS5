@@ -822,7 +822,8 @@ void GameOverlay::State::Update() {
 	}
 }
 
-// One row per connected controller: its player number, the controller symbol, its name and, with a headset, the headset symbol.
+// One row per connected controller, by player (ConnectedControllers): its player, the controller symbol, its name and, with a headset, the
+// headset symbol.
 void GameOverlay::State::UpdateControllers() {
 	controllers.Children().Clear();
 	controllers.RowDefinitions().Clear();
@@ -848,12 +849,13 @@ void GameOverlay::State::UpdateControllers() {
 	for (const auto& controller: connected) {
 		const int32_t             row = add_row();
 		xaml::Controls::TextBlock number;
-		number.Text(L"#" + std::to_wstring(controller.player + 1));
+		number.Text(controller.player < 0 ? std::wstring(L"–") : L"P" + std::to_wstring(controller.player + 1));
 		xaml::Documents::Typography::SetNumeralAlignment(number, xaml::FontNumeralAlignment::Tabular);
 		place(number, row, 0);
+		// A DSU controller: the network symbol of Segoe MDL2 Assets.
 		xaml::Controls::TextBlock icon;
-		icon.FontFamily(xaml::Media::FontFamily(symbol.font));
-		icon.Text(symbol.glyph);
+		icon.FontFamily(xaml::Media::FontFamily(controller.network ? L"Segoe MDL2 Assets" : symbol.font));
+		icon.Text(controller.network ? L"" : symbol.glyph);
 		icon.VerticalAlignment(xaml::VerticalAlignment::Center);
 		place(icon, row, 1);
 		xaml::Controls::TextBlock name;
