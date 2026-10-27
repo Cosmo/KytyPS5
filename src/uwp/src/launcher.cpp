@@ -140,7 +140,7 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="4">
             <!-- A controller, drawn like the trophy cup: how the Xbox controller plays a PS5 game. -->
             <Button x:Name="ControlsButton" Background="Transparent" BorderThickness="0" Padding="8"
-                    ToolTipService.ToolTip="Controller" AutomationProperties.Name="Controller">
+                    ToolTipService.ToolTip="Button layout" AutomationProperties.Name="Button layout">
               <Viewbox Width="20" Height="20">
                 <Canvas Width="24" Height="24">
                   <Path Stroke="{ThemeResource SystemControlForegroundBaseHighBrush}" StrokeThickness="1.5"
