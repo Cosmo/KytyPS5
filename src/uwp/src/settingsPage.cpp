@@ -1,5 +1,7 @@
 #include "settingsPage.h"
 
+#include "controlsPage.h"
+#include "controllerSettings.h"
 #include "fileAccess.h"
 #include "input.h"
 #include "overlay.h"
@@ -89,10 +91,10 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
     <RowDefinition Height="*" />
     <RowDefinition Height="Auto" />
   </Grid.RowDefinitions>
-  <TextBlock Text="Settings" Style="{StaticResource PageTitleTextBlockStyle}" Margin="48,0,48,20" />
+  <TextBlock x:Name="PageTitle" Text="Settings" Style="{StaticResource PageTitleTextBlockStyle}" Margin="48,0,48,20" />
   <!-- As the Xbox's Settings: the categories on the left (the chosen one in its green), the settings of the chosen one in columns of tiles
        (SettingTile, 219 wide, 36 between columns), and next to them the explanation of the one with the focus. -->
-  <Grid Grid.Row="1" ColumnSpacing="24">
+  <Grid x:Name="Main" Grid.Row="1" ColumnSpacing="24">
     <Grid.ColumnDefinitions>
       <ColumnDefinition Width="220" />
       <ColumnDefinition Width="*" />
@@ -129,7 +131,7 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
                  Text="Game settings apply to the next game you start." />
     </Grid>
 
-    <Grid Grid.Column="1" Margin="0,0,48,0">
+    <Grid Grid.Column="1" Margin="0,0,36,0">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="Auto" />
         <ColumnDefinition Width="*" />
@@ -140,9 +142,22 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
                groups a page's settings in columns. -->
           <StackPanel x:Name="Display" Width="219" Spacing="8" />
 
-          <StackPanel x:Name="Overlay" Width="219" Spacing="8" Visibility="Collapsed" />
+          <StackPanel x:Name="Overlay" Orientation="Horizontal" Spacing="18" Visibility="Collapsed">
+            <StackPanel x:Name="OverlayGroup" Width="219" Spacing="8" />
+            <StackPanel x:Name="OnScreenGroup" Width="219" Spacing="8" />
+          </StackPanel>
 
-          <StackPanel x:Name="Controller" Width="219" Spacing="8" Visibility="Collapsed" />
+          <!-- The category's pages as the Xbox shows a category's pages: wide tiles, two in a row; each opens full screen (Detail). -->
+          <Grid x:Name="Controller" ColumnSpacing="8" RowSpacing="8" Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto" />
+              <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+          </Grid>
 
           <!-- What the emulated console tells the games. -->
           <StackPanel x:Name="System" Width="219" Spacing="8" Visibility="Collapsed">
@@ -181,15 +196,44 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
         </Grid>
       </ScrollViewer>
       <!-- The explanation of the setting with the focus, or of the category: a paragraph each for what it does, its effect and a warning. -->
-      <StackPanel x:Name="Explanation" Grid.Column="1" Margin="36,0,0,0" MaxWidth="230" HorizontalAlignment="Left" VerticalAlignment="Top"
+      <StackPanel x:Name="Explanation" Grid.Column="1" Margin="24,0,0,0" MaxWidth="216" HorizontalAlignment="Left" VerticalAlignment="Top"
                   Spacing="12" />
+    </Grid>
+  </Grid>
+  <!-- A category's page, full screen as on the Xbox: the category and the page as the title, the page's columns of tiles (a heading over
+       each), and next to them the explanation of the tile with the focus. -->
+  <Grid x:Name="Detail" Grid.RowSpan="2" Visibility="Collapsed">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+    <TextBlock x:Name="DetailTitle" Style="{StaticResource PageTitleTextBlockStyle}" Margin="48,0,48,20" />
+    <Grid Grid.Row="1" Margin="48,0,48,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="*" />
+      </Grid.ColumnDefinitions>
+      <ScrollViewer VerticalScrollBarVisibility="Hidden" Padding="0,0,0,16">
+        <StackPanel x:Name="DetailColumns" Orientation="Horizontal" Spacing="36" />
+      </ScrollViewer>
+      <StackPanel x:Name="DetailExplanation" Grid.Column="1" Margin="36,0,0,0" MaxWidth="325" HorizontalAlignment="Left"
+                  VerticalAlignment="Top" Spacing="12" />
     </Grid>
   </Grid>
   <Border x:Name="Hints" Grid.Row="2" Style="{StaticResource HintBarStyle}" Margin="48,16,48,0" />
 </Grid>)xaml";
 
+// Settings › Controller's pages.
+enum class ControllerPage { Players, Servers, Feedback };
+
 struct SettingsState {
 	AppSettings                               settings = LoadSettings();
+	// The open pages (Detail), the shown one last; empty while the categories show. Leaving one goes back to the one under it, or to the
+	// entry that opened it.
+	std::vector<ControllerPage> pages;
+	// The control to focus when the page shows again (back from the controls page), instead of the categories.
+	xaml::Controls::Control return_focus {nullptr};
+	winrt::event_token      back_token {};
 	bool                                      folders_changed = false;
 	bool                                      left            = false;
 	std::function<void(bool)>                 back;
@@ -378,71 +422,170 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		              : L"At 120 Hz, games that offer a 120 Hz mode can run at up to 120 frames per second on a display that supports 120 Hz.",
 		     L"A lower rate limits games to that frame rate."});
 	}
-	// Overlay: the same tiles as in the game menu's Settings.
-	AddOverlaySettings(panel(L"Overlay"), explanation, std::shared_ptr<AppSettings>(state, &state->settings), save);
+	// Overlay: the same tiles as in the game menu's Overlay, in two groups.
+	AddHeading(panel(L"OverlayGroup"), L"Overlay");
+	AddHeading(panel(L"OnScreenGroup"), L"Also on screen");
+	AddOverlaySettings(panel(L"OverlayGroup"), panel(L"OnScreenGroup"), explanation, std::shared_ptr<AppSettings>(state, &state->settings), save);
 
-	// Controller.
-	const auto controller = panel(L"Controller");
-	AddSwitch(
-	    controller, explanation, L"Adaptive triggers as Impulse Triggers", settings.impulse_triggers,
-	    [state, save](bool on) {
-		    state->settings.impulse_triggers = on;
-		    save();
-	    },
-	    {L"The DualSense's adaptive triggers become rumble in the Xbox controller's triggers.",
-	     L"When a trigger resists, it rumbles softly while you press it deeper. When a trigger vibrates, it rumbles softly. When a trigger gives way, it "
-	     L"rumbles once.",
-	     L"Pressed all the way down, a trigger no longer resists or vibrates."});
-	AddSwitch(
-	    controller, explanation, L"Haptic feedback as gentle rumble", settings.haptic_rumble,
-	    [state, save](bool on) {
-		    state->settings.haptic_rumble = on;
-		    save();
-	    },
-	    {L"The DualSense's haptic feedback becomes gentle rumble.",
-	     L"A sudden effect, such as a knock or a step, gives a soft bump on the small motor. An effect that goes on, such as rain or an engine, only "
-	     L"bumps when it starts.",
-	     L"The game's sound is not affected."});
-	AddChoice(
-	    controller, explanation, L"Vibration intensity", Percentages(), std::min<size_t>((settings.controller_vibration + 5) / 10, 10),
-	    [state, save](size_t index) {
-		    state->settings.controller_vibration = static_cast<uint32_t>(index * 10);
-		    save();
-	    },
-	    {L"How strongly the controller rumbles, including haptic feedback as rumble.", L"At 0%, it doesn't rumble.",
-	     L"Impulse Triggers keep their strength."});
-	AddSwitch(
-	    controller, explanation, L"Controller speaker on the headset", settings.headset_speaker,
-	    [state, save](bool on) {
-		    state->settings.headset_speaker = on;
-		    save();
-	    },
-	    // The Xbox doesn't report a controller's headset (input.h): there it is always the chat headset.
-	    {IsXbox() ? L"Sound a game plays on player 1's DualSense speaker plays on the chat headset, such as one plugged into the controller."
-	              : L"Sound a game plays on player 1's DualSense speaker plays on a headset plugged into player 1's controller, or else on the "
-	                L"communications device of Windows where that is not the default one.",
-	     L"Without a headset, it plays with the rest of the sound."});
-	AddChoice(
-	    controller, explanation, L"Controller speaker volume", Percentages(), std::min<size_t>((settings.controller_speaker_volume + 5) / 10, 10),
-	    [state, save](size_t index) {
-		    state->settings.controller_speaker_volume = static_cast<uint32_t>(index * 10);
-		    save();
-	    },
-	    {L"How loud the sound a game plays on the DualSense's speaker is.", L"At 50%, it plays at the game's own volume. 100% adds 6 dB."});
-	AddSwitch(
-	    controller, explanation, L"Headset microphone", settings.headset_mic,
-	    [state, save](bool on) {
-		    state->settings.headset_mic = on;
-		    save();
-		    if (on) {
-			    RequestMicrophoneAccess();
-		    }
-	    },
-	    {IsXbox() ? L"Player 1's DualSense microphone uses the chat microphone, such as the one of a headset plugged into the controller."
-	              : L"Player 1's DualSense microphone uses the microphone of a headset plugged into player 1's controller, or else the "
-	                L"communications microphone of Windows.",
-	     L"Games use it for example to blow into. Off: games find no microphone.",
-	     L"You are asked once whether KytyPS5 may use the microphone. If you say no, allow it later in the privacy settings."});
+	// Controller: its pages as entries. Players and DSU servers are the same as in the game menu's Controllers.
+	auto       main_view    = page.FindName(L"Main").as<xaml::UIElement>();
+	auto       page_title   = page.FindName(L"PageTitle").as<xaml::UIElement>();
+	auto       detail       = page.FindName(L"Detail").as<xaml::UIElement>();
+	auto       detail_title = page.FindName(L"DetailTitle").as<xaml::Controls::TextBlock>();
+	auto       columns      = page.FindName(L"DetailColumns").as<xaml::Controls::StackPanel>();
+	auto       detail_text  = page.FindName(L"DetailExplanation").as<xaml::Controls::StackPanel>();
+	const auto hints        = page.FindName(L"Hints").as<xaml::Controls::Border>();
+	// Shows a page; set below, as the pages open each other.
+	auto show_page = std::make_shared<std::function<void(ControllerPage)>>();
+	const auto open_page = [state, show_page](ControllerPage which) {
+		state->pages.push_back(which);
+		(*show_page)(which);
+	};
+	const auto entries = panel(L"Controller");
+	// The entries have no text, as the Xbox's: their names say where they go (the focus on one clears the text column).
+	const auto add_entry = [&entries, &explanation](xaml::Controls::Button const& entry) {
+		Explain(entry, explanation, {});
+		entries.Children().Append(entry);
+	};
+	// In Segoe MDL2 Assets: People, Wifi (as the DSU controllers' symbol in the lists), Volume, Game.
+	constexpr wchar_t PEOPLE_SYMBOL[] = {0xE716, 0};
+	constexpr wchar_t WIFI_SYMBOL[]   = {0xE701, 0};
+	constexpr wchar_t VOLUME_SYMBOL[] = {0xE767, 0};
+	constexpr wchar_t GAME_SYMBOL[]   = {0xE7FC, 0};
+	const auto        players_entry   = MakeEntry(PEOPLE_SYMBOL, L"Players", [open_page] { open_page(ControllerPage::Players); });
+	const auto        servers_entry   = MakeEntry(WIFI_SYMBOL, L"DSU servers", [open_page] { open_page(ControllerPage::Servers); });
+	const auto        feedback_entry  = MakeEntry(VOLUME_SYMBOL, L"Feedback and audio", [open_page] { open_page(ControllerPage::Feedback); });
+	// The controls page, and back here with the focus on its entry.
+	auto layout_entry = MakeEntry(GAME_SYMBOL, L"Button layout", [] {});
+	layout_entry.Click([state, weak_page = winrt::make_weak(page), weak_entry = winrt::make_weak(layout_entry)](auto const&, auto const&) {
+		auto shown = weak_page.get();
+		if (shown == nullptr) {
+			return;
+		}
+		state->return_focus = weak_entry.get();
+		xaml::Window::Current().Content(CreateControlsPage([shown] { xaml::Window::Current().Content(shown); }, L"Controller"));
+	});
+	for (const auto& entry: {players_entry, servers_entry, feedback_entry, layout_entry}) {
+		add_entry(entry);
+	}
+	// DSU servers shows only with Developer › DSU controllers on; the others close up, two in a row.
+	const auto place_entries = [players_entry, servers_entry, feedback_entry, layout_entry](bool dsu) {
+		servers_entry.Visibility(dsu ? xaml::Visibility::Visible : xaml::Visibility::Collapsed);
+		std::vector<xaml::Controls::Button> shown = {players_entry};
+		if (dsu) {
+			shown.push_back(servers_entry);
+		}
+		shown.push_back(feedback_entry);
+		shown.push_back(layout_entry);
+		for (size_t index = 0; index < shown.size(); index++) {
+			xaml::Controls::Grid::SetRow(shown[index], static_cast<int>(index / 2));
+			xaml::Controls::Grid::SetColumn(shown[index], static_cast<int>(index % 2));
+		}
+	};
+	place_entries(settings.dsu_enabled);
+
+	*show_page = [state, save, main_view, page_title, detail, detail_title, columns, detail_text, hints, open_page](ControllerPage which) {
+		columns.Children().Clear();
+		detail_text.Children().Clear();
+		SetHints(hints, {{XboxButton::A, L"Select"}, {XboxButton::B, L"Back"}});
+		main_view.Visibility(xaml::Visibility::Collapsed);
+		page_title.Visibility(xaml::Visibility::Collapsed);
+		detail.Visibility(xaml::Visibility::Visible);
+		SetPageTitle(detail_title, L"Controller",
+		             which == ControllerPage::Players ? L"Players" : which == ControllerPage::Servers ? L"DSU servers" : L"Feedback and audio");
+
+		const auto settings = std::shared_ptr<AppSettings>(state, &state->settings);
+		if (which == ControllerPage::Players) {
+			AddPlayersColumns(columns, detail_text, hints, settings, save, [open_page] { open_page(ControllerPage::Servers); });
+		} else if (which == ControllerPage::Servers) {
+			AddServerColumns(columns, settings, save);
+		} else {
+			const auto vibration = AddColumn(columns, L"Vibration");
+			const auto audio     = AddColumn(columns, L"Speaker and microphone");
+			AddChoice(
+			    vibration, detail_text, L"Vibration intensity", Percentages(), std::min<size_t>((state->settings.controller_vibration + 5) / 10, 10),
+			    [state, save](size_t index) {
+				    state->settings.controller_vibration = static_cast<uint32_t>(index * 10);
+				    save();
+			    },
+			    {L"Sets how strongly the controller vibrates, including haptic feedback played as rumble.",
+			     L"At 0%, the controller doesn't vibrate. Impulse Triggers aren't affected."});
+			AddSwitch(
+			    vibration, detail_text, L"Haptics as gentle rumble", state->settings.haptic_rumble,
+			    [state, save](bool on) {
+				    state->settings.haptic_rumble = on;
+				    save();
+			    },
+			    {L"Plays the DualSense's haptic feedback as gentle rumble.",
+			     L"Short effects, such as footsteps or impacts, give a soft bump. Continuous effects, such as rain or an engine, bump only when they "
+			     L"start.",
+			     L"Game audio isn't affected."});
+			AddSwitch(
+			    vibration, detail_text, L"Impulse Triggers", state->settings.impulse_triggers,
+			    [state, save](bool on) {
+				    state->settings.impulse_triggers = on;
+				    save();
+			    },
+			    {L"Plays the DualSense's adaptive trigger effects as vibration in the Xbox controller's triggers.",
+			     L"A trigger that would resist or vibrate rumbles softly while you press it. A trigger that would give way rumbles once.",
+			     L"Pressed all the way down, a trigger stops vibrating."});
+			AddSwitch(
+			    audio, detail_text, L"Speaker on the headset", state->settings.headset_speaker,
+			    [state, save](bool on) {
+				    state->settings.headset_speaker = on;
+				    save();
+			    },
+			    // The Xbox doesn't report a controller's headset (input.h): there it is always the chat headset.
+			    {IsXbox() ? L"Plays sound meant for player 1's DualSense speaker on your chat headset, such as one plugged into the controller."
+			              : L"Plays sound meant for player 1's DualSense speaker on a headset plugged into player 1's controller, or else on your "
+			                L"Windows communications device.",
+			     L"Without a headset, it plays with the rest of the game audio."});
+			AddChoice(
+			    audio, detail_text, L"Speaker volume", Percentages(), std::min<size_t>((state->settings.controller_speaker_volume + 5) / 10, 10),
+			    [state, save](size_t index) {
+				    state->settings.controller_speaker_volume = static_cast<uint32_t>(index * 10);
+				    save();
+			    },
+			    {L"Sets the volume of sound meant for the DualSense speaker.", L"At 50%, it plays at the game's own volume. 100% is 6 dB louder."});
+			AddSwitch(
+			    audio, detail_text, L"Headset microphone", state->settings.headset_mic,
+			    [state, save](bool on) {
+				    state->settings.headset_mic = on;
+				    save();
+				    if (on) {
+					    RequestMicrophoneAccess();
+				    }
+			    },
+			    {IsXbox() ? L"Lets games use your chat headset's microphone as player 1's DualSense microphone, for example to blow into."
+			              : L"Lets games use the microphone of a headset plugged into player 1's controller, or else your Windows communications "
+			                L"microphone, as player 1's DualSense microphone.",
+			     L"When this is off, games don't find a microphone.",
+			     IsXbox() ? L"The first time, you're asked to allow KytyPS5 to use your microphone. If you decline, you can allow it later in the "
+			                L"privacy settings."
+			              : L"The first time, you're asked to allow KytyPS5 to use your microphone. If you decline, you can allow it later in "
+			                L"Windows privacy settings."});
+		}
+		columns.UpdateLayout();
+		FocusFirst(columns);
+	};
+	// Back from a page: to the page under it (the focus on the tile that opened this one), or to the categories' entries.
+	const auto close_page = [state, show_page, main_view, page_title, detail, columns, detail_text, players_entry, servers_entry, feedback_entry] {
+		const auto closed = state->pages.back();
+		state->pages.pop_back();
+		if (!state->pages.empty()) {
+			(*show_page)(state->pages.back());
+			FocusFirst(columns, L"servers");
+			return;
+		}
+		columns.Children().Clear();
+		detail_text.Children().Clear();
+		detail.Visibility(xaml::Visibility::Collapsed);
+		main_view.Visibility(xaml::Visibility::Visible);
+		page_title.Visibility(xaml::Visibility::Visible);
+		main_view.UpdateLayout();
+		(closed == ControllerPage::Players ? players_entry : closed == ControllerPage::Servers ? servers_entry : feedback_entry)
+		    .Focus(xaml::FocusState::Keyboard);
+	};
 
 	auto user_name = page.FindName(L"UserName").as<xaml::Controls::TextBox>();
 	user_name.Text(winrt::to_hstring(settings.user_name));
@@ -727,6 +870,16 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	     L"If the update changed how shaders are translated, games can crash or show wrong images.",
 	     L"In that case, turn this off or remove the compiled shaders. The game compiles its shaders again on its next start.",
 	     L"Turning this on or off also makes each game compile its shaders once more."});
+	AddSwitch(
+	    testing, explanation, L"DSU controllers", settings.dsu_enabled,
+	    [state, save, place_entries](bool on) {
+		    state->settings.dsu_enabled = on;
+		    save();
+		    SetControllerAssignment(state->settings.controller_auto, state->settings.controller_players, DsuServersInUse(state->settings));
+		    place_entries(on);
+	    },
+	    {L"Adds DSU servers to the controller settings, for controllers shared over your network, such as a DualSense through DSU Bridge on a "
+	     L"PC. Still being tested."});
 	// The games' compiled shaders (LocalState\_PipelineCache, a file per game): each game compiles them afresh on its next start.
 	auto remove_shaders_status = page.FindName(L"RemoveShadersStatus").as<xaml::Controls::TextBlock>();
 	auto remove_shaders        = page.FindName(L"RemoveShaders").as<xaml::Controls::Button>();
@@ -776,7 +929,7 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	// The explanation while a category is chosen and before a setting of it has the focus.
 	const std::vector<Paragraphs> category_explanations = {
 	    {},
-	    {L"What the overlay shows over games. It is the same as in the game menu's Settings."},
+	    {},
 	    {},
 	    {L"The console's own settings: the user's name, the language, the intro logos and the home screen music."},
 	    {L"Where KytyPS5 looks for games, and where it keeps saves, patches and trophies."},
@@ -810,7 +963,11 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	});
 
 	// Back: B, Escape or the window's back button (shown while the page is open).
-	const auto leave = [state, in_panel, categories] {
+	const auto leave = [state, in_panel, categories, close_page] {
+		if (!state->pages.empty()) {
+			close_page();
+			return;
+		}
 		if (*in_panel) {
 			categories.Focus(xaml::FocusState::Keyboard);
 			return;
@@ -827,18 +984,25 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 			leave();
 		}
 	});
-	auto navigation = winrt::Windows::UI::Core::SystemNavigationManager::GetForCurrentView();
-	navigation.AppViewBackButtonVisibility(winrt::Windows::UI::Core::AppViewBackButtonVisibility::Visible);
-	auto back_token = navigation.BackRequested(
-	    [leave](auto const&, winrt::Windows::UI::Core::BackRequestedEventArgs const& args) {
-		    args.Handled(true);
-		    leave();
-	    });
-	page.Loaded([categories](auto const&, auto const&) { categories.Focus(xaml::FocusState::Keyboard); });
-	page.Unloaded([navigation, back_token](auto const&, auto const&) {
-		navigation.BackRequested(back_token);
-		navigation.AppViewBackButtonVisibility(
-		    winrt::Windows::UI::Core::AppViewBackButtonVisibility::Collapsed);
+	// Each time the page shows: it shows again after the controls page (Button layout), with the focus back on that entry.
+	page.Loaded([state, categories, leave](auto const&, auto const&) {
+		auto navigation = winrt::Windows::UI::Core::SystemNavigationManager::GetForCurrentView();
+		navigation.AppViewBackButtonVisibility(winrt::Windows::UI::Core::AppViewBackButtonVisibility::Visible);
+		state->back_token = navigation.BackRequested([leave](auto const&, winrt::Windows::UI::Core::BackRequestedEventArgs const& args) {
+			args.Handled(true);
+			leave();
+		});
+		if (state->return_focus != nullptr) {
+			state->return_focus.Focus(xaml::FocusState::Keyboard);
+			state->return_focus = nullptr;
+		} else {
+			categories.Focus(xaml::FocusState::Keyboard);
+		}
+	});
+	page.Unloaded([state](auto const&, auto const&) {
+		auto navigation = winrt::Windows::UI::Core::SystemNavigationManager::GetForCurrentView();
+		navigation.BackRequested(state->back_token);
+		navigation.AppViewBackButtonVisibility(winrt::Windows::UI::Core::AppViewBackButtonVisibility::Collapsed);
 	});
 	return page;
 }
