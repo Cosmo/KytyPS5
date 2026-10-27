@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -61,6 +62,15 @@ struct AppSettings {
 	// The settings page, Controller: the microphone of that headset as the DualSense's microphone. Off (Windows asks for the microphone when it
 	// is turned on).
 	bool headset_mic = false;
+	// Settings › Controller and the game menu's Controllers (input.h, SetControllerAssignment): controllers take the lowest free player when
+	// they appear (true), or play for the player `controller_players` gives for their id (0 to 3; none without one).
+	bool                       controller_auto = true;
+	std::map<std::string, int> controller_players;
+	// There too: the DSU servers' addresses (dsu.h; with or without :port), for example a PC that serves DualSenses with DSU Bridge.
+	std::vector<std::string> dsu_servers;
+	// Settings › Developer › DSU controllers: the DSU servers are asked and shown only while this is on (DsuServersInUse). Off, as it is
+	// still being tested: then nothing in the app mentions DSU.
+	bool dsu_enabled = false;
 	// The settings page, Controller: upstream's vibration intensity and DualSense speaker volume, 0 to 100 % (Config::controller_vibration_intensity,
 	// Config::controller_speaker_volume; 50 % is the game's own speaker volume, 100 % adds 6 dB).
 	uint32_t controller_vibration      = 100;
@@ -129,6 +139,9 @@ struct AppSettings {
 };
 [[nodiscard]] AppSettings LoadSettings();
 void                      SaveSettings(const AppSettings& settings);
+
+// The DSU servers to ask: the settings' while DSU controllers is on, none otherwise.
+[[nodiscard]] std::vector<std::string> DsuServersInUse(const AppSettings& settings);
 
 // The folder of the user's data: AppSettings::user_data_path, or LocalState when none is set.
 [[nodiscard]] std::filesystem::path UserDataFolder(const AppSettings& settings);

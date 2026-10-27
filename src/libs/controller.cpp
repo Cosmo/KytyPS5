@@ -121,7 +121,7 @@ public:
 	void Button(int id, uint32_t button, bool down);
 	void Axis(int id, Axis axis, int value);
 	void RightStick(int id, int x, int y);
-	void TouchPad(int id, int finger, bool down, float x, float y);
+	void TouchPad(int id, int finger, bool down, float x, float y, bool click);
 	void Motion(int id, Sensor sensor, const float* data, uint64_t time_us);
 	void SetMotionSensorState(bool enable);
 	void ResetOrientation();
@@ -184,6 +184,11 @@ private:
 	PadTriggerEffectStateInformation m_trigger_state {};
 	// Per trigger, how often a weapon effect has fired.
 	std::array<uint32_t, 2> m_trigger_shots {};
+#if defined(KYTY_PLATFORM_UWP)
+	// The game's light bar colour, for the host feedback.
+	std::array<uint8_t, 3> m_light_bar {};
+	bool                   m_light_bar_set = false;
+#endif
 	// Setting changes share the output lock; audio only needs an atomic scale snapshot.
 	std::array<std::atomic<uint32_t>, 3> m_setting_steps {};
 };
@@ -672,7 +677,7 @@ void GameController::RightStick(int id, int x, int y) {
 	}
 }
 
-void GameController::TouchPad(int id, int finger, bool down, float x, float y) {
+void GameController::TouchPad(int id, int finger, bool down, float x, float y, bool click) {
 	if (finger < 0 || finger >= 2) {
 		return;
 	}
@@ -688,7 +693,7 @@ void GameController::TouchPad(int id, int finger, bool down, float x, float y) {
 		touch.down = down;
 		touch.x    = static_cast<uint16_t>(std::clamp(x, 0.0f, 1.0f) * 1920.0f);
 		touch.y    = static_cast<uint16_t>(std::clamp(y, 0.0f, 1.0f) * 943.0f);
-		if (id == HOST_INPUT_CONTROLLER_ID) {
+		if (id == HOST_INPUT_CONTROLLER_ID && click) {
 			m_state.buttons = down ? m_state.buttons | PAD_BUTTON_TOUCH_PAD
 			                       : m_state.buttons & ~PAD_BUTTON_TOUCH_PAD;
 		}
@@ -968,6 +973,18 @@ HostFeedback GameController::GetHostFeedback() {
 		feedback.trigger_vibration[i]  = Scale(feel.vibration, trigger_scale);
 		feedback.trigger_frequency[i]  = feel.frequency;
 		feedback.trigger_shots[i]      = m_trigger_shots[i];
+		auto& block                    = feedback.trigger_blocks[i];
+		if (!trigger_effect_to_dualsense(m_trigger_effect.command[i], block.data(), GetSettingScale(Setting::TriggerEffectIntensity))) {
+			block    = {};
+			block[0] = 0x05;
+		}
+	}
+	if (const auto& color = Config::GetControllerColor()) {
+		feedback.light_bar_set = true;
+		feedback.light_bar     = {static_cast<uint8_t>((*color)[0]), static_cast<uint8_t>((*color)[1]), static_cast<uint8_t>((*color)[2])};
+	} else if (m_light_bar_set) {
+		feedback.light_bar_set = true;
+		feedback.light_bar     = m_light_bar;
 	}
 	return feedback;
 }
@@ -980,6 +997,10 @@ void GameController::SetLightBar(uint8_t r, uint8_t g, uint8_t b) {
 		g = (*color)[1];
 		b = (*color)[2];
 	}
+#if defined(KYTY_PLATFORM_UWP)
+	m_light_bar     = {r, g, b};
+	m_light_bar_set = true;
+#endif
 	if (auto* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(m_active_id));
 	    pad != nullptr) {
 		(void)SDL_SetGamepadLED(pad, r, g, b);
@@ -1209,10 +1230,10 @@ void SetRightStick(int id, int x, int y) {
 	}
 }
 
-void SetTouchPad(int id, int finger, bool down, float x, float y) {
+void SetTouchPad(int id, int finger, bool down, float x, float y, bool click) {
 	Common::LockGuard lock(g_router_mutex);
 	if (auto* player = PlayerForDevice(id)) {
-		player->TouchPad(id, finger, down, x, y);
+		player->TouchPad(id, finger, down, x, y, click);
 	}
 }
 
