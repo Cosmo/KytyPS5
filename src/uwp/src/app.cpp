@@ -782,6 +782,10 @@ void App::Show(winrt::hstring const& activation_arguments) {
 	const auto arguments = activation_arguments.empty() ? PendingLaunchArguments() : activation_arguments;
 	Log("activated, arguments: \"%ls\"\n", arguments.c_str());
 	StartInput();
+	{
+		const auto settings = LoadSettings();
+		SetControllerAssignment(settings.controller_auto, settings.controller_players, DsuServersInUse(settings));
+	}
 	if (!m_resources_loaded) {
 		Resources().MergedDictionaries().Append(winrt::Microsoft::UI::Xaml::Controls::XamlControlsResources());
 		Resources().MergedDictionaries().Append(XboxLookResources());

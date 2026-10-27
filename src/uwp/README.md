@@ -23,7 +23,15 @@
 
 ## Controllers
 
-Xbox controllers (`Windows.Gaming.Input`, the same on a PC and on Xbox), up to four at once: each is a local player, and a controller that connects takes the lowest free player. The keyboard is for the menus.
+The controllers are the Xbox's own (`Windows.Gaming.Input`, the same on a PC and on Xbox) and those of DSU servers on the network (`dsu.h`), for example DualSenses that a PC serves with DSU Bridge, or a phone. They form one list, and the list is not the players: Settings › Controller › Players and the game menu's Controllers list the controllers by player (Player 1 at the top, then 2 to 4, then "Not playing"); the overlay and the library list them in the same order (P1 to P4, – for none). A controller's tile shows its name and player; its text shows its connection and battery, a DSU controller (named "Remote Controller") also its server and the end of its MAC address, which tells two alike apart. Y on a controller's tile makes it vibrate (a DualSense through DSU Bridge also lights up white), to see which one it is.
+
+- **Automatically** (the default): each controller takes the lowest free player of the four when it appears, and gives it back when it goes away. A fifth plays for none.
+- **Manually**: each controller plays for the player chosen for it (none, or 1 to 4), also mid-game; one not chosen yet plays for none. Choosing a player for a controller switches to this mode. Several controllers can play for the same player, and their input adds up: buttons, the stick and trigger moved furthest, the first finger on a touchpad, the first network controller's motion sensors. A phone clipped to an Xbox controller is simply a DSU controller with the same player.
+- **Always**: every Xbox controller connected to the Xbox opens the game menu (View + Menu), whatever its player, so the controllers can't be locked out. A DSU controller with a player opens it with its PS button.
+- **DSU controllers** are off by default, while they are being tested: Settings › Developer › Remote Controllers turns them on. Off, the app asks no server and nothing in it mentions them (no Remote Controllers tiles, no wording about them in the texts). On, the app calls them Remote Controllers and its texts say "DSU-compatible" where it explains them.
+- **DSU servers** are added by their address (Add server; port 26760 unless another is given; Enter adds it) and removed by selecting one, then Remove server. The app asks each one for all of its controllers, from app start; the list changes as they come and go. A DSU controller is remembered by its MAC address, so it keeps its player on another slot or server.
+
+The keyboard is for the menus.
 
 | Xbox controller | PS5 controller |
 |---|---|
@@ -33,7 +41,7 @@ Xbox controllers (`Windows.Gaming.Input`, the same on a PC and on Xbox), up to f
 | LT, RT | L2, R2 (analog) |
 | Left stick, right stick, their clicks | Left stick, right stick, L3, R3 |
 | D-pad | D-pad |
-| View + left stick, moved or clicked | A finger on the touchpad where the stick points, which also presses the touchpad (until View is released) |
+| View + left stick, moved or clicked | A finger on the touchpad where the stick points (until View is released); the stick's click is the touchpad click |
 | View + right stick | The controller's angle for the motion sensors: up/down tips it forward/back, left/right leans it, up to 180 degrees each way |
 | View + right stick pressed in | Left/right turns the controller instead of leaning it |
 | View + Menu | The game menu (Escape on a keyboard) |
@@ -42,6 +50,8 @@ Xbox controllers (`Windows.Gaming.Input`, the same on a PC and on Xbox), up to f
 While View is held, the sticks do not reach the game. The View + Menu chords act when they are released, so the order of the presses does not matter.
 
 Rumble goes to the controller's motors. The DualSense's adaptive triggers rumble in the Impulse Triggers while a trigger resists, vibrates or gives way, and its haptic feedback gives soft bumps on the small motor; the settings can turn both off. Player 1's DualSense speaker plays on a headset (on the Xbox, the chat headset), and with the setting on, the headset's microphone is player 1's DualSense microphone. Players 2 to 4 are called Player 2, Player 3 and Player 4 in the games.
+
+A DSU server that speaks DSU Bridge's extension gets each of its controllers' feedback from the player it plays for: light bar, player lights (the player's number), rumble, adaptive triggers, the speaker's and the haptics' audio; player 1's DSU controller is the microphone, before the headset.
 
 ## Setting up your games folder
 
