@@ -464,13 +464,14 @@ void ListControllers(const std::shared_ptr<Launcher>& launcher) {
 
 		xaml::Controls::TextBlock number;
 		number.Style(caption);
-		number.Text(L"#" + std::to_wstring(controller.player + 1));
+		number.Text(controller.player < 0 ? std::wstring(L"–") : L"P" + std::to_wstring(controller.player + 1));
 		number.Foreground(brush);
 		place(number, row, 1);
 
+		// A DSU controller: the network symbol of Segoe MDL2 Assets.
 		xaml::Controls::TextBlock icon;
-		icon.FontFamily(xaml::Media::FontFamily(symbol.font));
-		icon.Text(symbol.glyph);
+		icon.FontFamily(xaml::Media::FontFamily(controller.network ? L"Segoe MDL2 Assets" : symbol.font));
+		icon.Text(controller.network ? L"" : symbol.glyph);
 		icon.Foreground(brush);
 		place(icon, row, 2);
 
