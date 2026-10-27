@@ -111,7 +111,21 @@ AppSettings LoadSettings() {
 	read("haptic_rumble", settings.haptic_rumble);
 	read("headset_speaker", settings.headset_speaker);
 	read("headset_mic", settings.headset_mic);
+	read("controller_auto", settings.controller_auto);
+	read("controller_players", settings.controller_players);
+	read("dsu_servers", settings.dsu_servers);
+	read("dsu_enabled", settings.dsu_enabled);
+	// The first experiment's one server.
+	std::string server;
+	read("dsu_server", server);
+	if (settings.dsu_servers.empty() && !server.empty()) {
+		settings.dsu_servers.push_back(server);
+	}
 	return settings;
+}
+
+std::vector<std::string> DsuServersInUse(const AppSettings& settings) {
+	return settings.dsu_enabled ? settings.dsu_servers : std::vector<std::string> {};
 }
 
 void SaveSettings(const AppSettings& settings) {
@@ -170,6 +184,11 @@ void SaveSettings(const AppSettings& settings) {
 	json["haptic_rumble"]              = settings.haptic_rumble;
 	json["headset_speaker"]            = settings.headset_speaker;
 	json["headset_mic"]                = settings.headset_mic;
+	json["controller_auto"]            = settings.controller_auto;
+	json["controller_players"]         = settings.controller_players;
+	json["dsu_servers"]                = settings.dsu_servers;
+	json["dsu_enabled"]                = settings.dsu_enabled;
+	json.erase("dsu_server");
 	std::ofstream(SettingsPath(), std::ios::binary | std::ios::trunc) << json.dump(2);
 }
 

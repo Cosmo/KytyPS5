@@ -99,7 +99,9 @@ void CycleKeyboardPlayer();
 void SetButton(int id, uint32_t button, bool down);
 void SetAxis(int id, Axis axis, int value);
 void SetRightStick(int id, int x, int y);
-void SetTouchPad(int id, int finger, bool down, float x, float y);
+// For the host input, a finger also presses the touchpad's button unless `click` is false (a real touchpad's finger, whose click is the
+// button of its own).
+void SetTouchPad(int id, int finger, bool down, float x, float y, bool click = true);
 void SetSensor(int id, Sensor sensor, const float* data, uint64_t time_us);
 void ToggleGyroEmulation(int id);
 void ResetInputState();
@@ -124,6 +126,12 @@ struct HostFeedback {
 	// louder, 0 otherwise.
 	uint8_t haptic_left  = 0;
 	uint8_t haptic_right = 0;
+	// For a DualSense the app reaches over the network: the light bar's colour (the settings' controller colour, else the game's; false: neither
+	// set one), and the adaptive triggers' effects (left, right) as the DualSense's 11-byte blocks, with the trigger effect intensity applied
+	// (mode 0x05: off).
+	bool                                   light_bar_set = false;
+	std::array<uint8_t, 3>                 light_bar {};
+	std::array<std::array<uint8_t, 11>, 2> trigger_blocks {};
 };
 [[nodiscard]] HostFeedback GetHostFeedback(int player);
 // The audio library, for every block a game plays on a local player's vibration port: the block's loudness per actuator (RMS, 0..1, volume
