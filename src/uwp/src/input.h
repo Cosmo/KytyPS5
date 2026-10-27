@@ -2,13 +2,15 @@
 #define EMULATOR_SRC_UWP_INPUT_H_
 
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
-// Xbox controllers for the emulator, through Windows.Gaming.Input (the same on a PC and on Xbox).
-// Up to four controllers, each a local player (Libs::Controller::MAX_PLAYERS): a controller takes
-// the lowest free player when it connects. In a game each player is a user of its own with a pad of
-// its own (local co-op; Libs::Controller::LOCAL_PLAYERS_MAX).
+// The controllers for the emulator: the Xbox controllers, through Windows.Gaming.Input (the same on a PC and on Xbox), and the DSU servers'
+// controllers (dsu.h), in one list in the order they appeared. Each plays for one of the four local players (Libs::Controller::MAX_PLAYERS)
+// or for none: automatically the lowest free player when it appears, or manually the chosen one (SetControllerAssignment); several can play
+// for one player, and their input adds up. In a game each player is a user of its own with a pad of its own (local co-op;
+// Libs::Controller::LOCAL_PLAYERS_MAX).
 //
 // Mapping: A/B/X/Y Cross/Circle/Square/Triangle, Menu Options, LB/RB L1/R1, LT/RT L2/R2 (analog),
 // sticks and their clicks L3/R3, D-pad. Holding View turns the sticks into the DualSense's extras:
@@ -17,7 +19,7 @@
 // turn it with the stick pressed in; full deflection is 180 degrees. Rumble and adaptive triggers (as rumble of the trigger's motor: while it
 // is squeezed against resistance, while it vibrates, and a kick when a weapon effect gives way) come back to the controller, and the haptic
 // feedback as gentle rumble. View + Menu together open the game menu, or
-// with both triggers pulled as well toggle the overlay.
+// with both triggers pulled as well toggle the overlay: on every Xbox controller, whatever its player.
 namespace Kyty::Uwp {
 
 // Starts reading the controllers (at app start, for the launcher's list); the game gets their
@@ -31,9 +33,14 @@ void ActivateGameInput();
 void OnChords(std::function<void()> menu, std::function<void()> overlay);
 
 struct ControllerInfo {
-	int          player = 0; // 0 is player 1
-	std::wstring name;
-	bool         latest = false; // the controller with the most recent input
+	int          player = 0; // 0 is player 1; -1: it plays for none
+	std::wstring name;   // the model, or for a DSU controller "Remote Controller"
+	std::wstring detail; // its connection and battery; for a DSU controller, a second line with its server and the end of its MAC address
+	std::string  id;     // the key of SetControllerAssignment's `players`: an Xbox controller's id, a DSU controller's MAC address
+	bool         network      = false; // a DSU controller
+	bool         can_identify = false; // IdentifyController can make it rumble
+	bool         light_bar    = false; // IdentifyController also turns its light bar white (a DualSense through DSU Bridge)
+	bool         latest       = false; // the controller with the most recent input
 	// A headset microphone is there for this player (player 1: the controller's headset or the chat headset); the DualSense's microphone when
 	// the settings page's option is on.
 	bool headset_mic = false;
@@ -54,8 +61,14 @@ enum class XboxButton { A, B, X, Y, LeftBumper, RightBumper, LeftTrigger, RightT
 constexpr const wchar_t* HEADSET_SYMBOL_FONT = L"Segoe MDL2 Assets";
 constexpr const wchar_t* HEADSET_SYMBOL      = L"";
 
-// The connected controllers by player.
+// The connected controllers by player: players 1 to 4, then those that play for none; one player's in the order they appeared.
 [[nodiscard]] std::vector<ControllerInfo> ConnectedControllers();
+// Shows which controller it is: it rumbles for half a second (a DualSense through DSU Bridge also shows a white light bar).
+void IdentifyController(const std::string& id);
+// How controllers get players (AppSettings' controller_auto, controller_players) and the DSU servers to ask (dsu_servers): at app start and
+// whenever the settings change, also mid-game. `automatic`: each controller takes the lowest free player when it appears; otherwise each
+// plays for the player `players` gives for its id (none without one).
+void SetControllerAssignment(bool automatic, const std::map<std::string, int>& players, const std::vector<std::string>& dsu_servers);
 // While paused (the game menu is open), the game gets neutral input and no rumble; buttons held
 // when it resumes count once they are released and pressed again.
 void PauseGameInput(bool paused);
