@@ -1,4 +1,5 @@
 #include "input.h"
+#include "dsu.h"
 #include "fileAccess.h"
 
 #include "padHost.h"
@@ -12,6 +13,8 @@
 #include <winrt/Windows.Gaming.Input.h>
 #include <winrt/Windows.Media.Capture.h>
 #include <winrt/Windows.Media.Devices.h>
+#include <winrt/Windows.Devices.Power.h>
+#include <winrt/Windows.System.Power.h>
 #include <winrt/Windows.System.h>
 
 #include <algorithm>
@@ -21,6 +24,8 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -47,6 +52,9 @@ constexpr auto MISSING_GRACE = std::chrono::seconds(2);
 // zone for tilting.
 constexpr double TOUCH_START    = 0.25;
 constexpr double TILT_DEAD_ZONE = 0.1;
+// Identify (IdentifyController): how long and how strongly an Xbox controller rumbles.
+constexpr auto    IDENTIFY_TIME   = std::chrono::milliseconds(500);
+constexpr uint8_t IDENTIFY_RUMBLE = 160;
 // Adaptive triggers resist while squeezed; an Xbox controller rumbles the trigger softly instead, evenly while it moves deeper than the dead
 // zone (by more than the reading's jitter) and briefly after. A trigger's vibration rumbles it while it is held there (pulsed at frequencies the
 // motor can show), and a weapon effect that gives way kicks once. Pressed all the way, a trigger is still: the effect has nothing left to give.
@@ -81,14 +89,22 @@ constexpr std::array BUTTONS = {
     std::pair {gaming::GamepadButtons::DPadLeft, Controller::PAD_BUTTON_LEFT},
 };
 
-// A local player's controller. Only the polling thread uses these.
-struct Player {
+// An Xbox controller, in the list of controllers with the DSU ones (in the order they appeared). Only the polling thread uses these.
+struct XboxController {
 	gaming::Gamepad pad {nullptr};
 	// RawGameController::NonRoamableId: Gamepad objects can be replaced while the controller stays
 	// connected.
 	std::wstring      id;
+	std::string       key; // in the settings' manual assignment
+	uint64_t          order  = 0;
+	int               player = -1; // the player it plays for (-1: none)
 	bool              missing = false;
 	Clock::time_point missing_since;
+	// For the lists: the model, and the connection and battery (XboxDetail, looked up on every scan).
+	std::wstring name;
+	std::wstring detail;
+	// It rumbles until then to show which one it is (IdentifyController).
+	Clock::time_point identify_until {};
 	// Buttons held when the controller was assigned (the A that started the game): ignored until
 	// released.
 	uint32_t blocked  = 0;
@@ -100,7 +116,6 @@ struct Player {
 	bool chord          = false;
 	bool chord_triggers = false;
 
-	Controller::HostPadState sent;
 	// Large and small motor, left and right trigger.
 	std::array<uint8_t, 4>           vibration {};
 	// Per trigger: the deepest point since it last moved back, and when it last moved deeper.
@@ -108,17 +123,53 @@ struct Player {
 	std::array<Clock::time_point, 2> trigger_squeezed {};
 	std::array<uint32_t, 2>          trigger_shots {};
 	std::array<Clock::time_point, 2> trigger_kick_until {};
-	// The controller's headset events: they may report a headset that Gamepad::Headset() does not.
+	// The controller's headset events: they may report a headset that Gamepad::Headset() does not. The devices are guarded by g_shared_mutex.
 	gaming::Gamepad::HeadsetConnected_revoker    headset_connected;
 	gaming::Gamepad::HeadsetDisconnected_revoker headset_disconnected;
+	std::wstring                                 event_headset_render;
+	std::wstring                                 event_headset_capture;
 };
 
-std::array<Player, Controller::MAX_PLAYERS> g_players;
+// A DSU controller (dsu.h) in the list. Only the polling thread uses these.
+struct DsuController {
+	std::string  server;
+	int          slot = 0;
+	std::string  key; // its MAC address, or its server and slot
+	uint64_t     order  = 0;
+	int          player = -1;
+	bool         home   = false; // its PS button was down
+	Dsu::PadData data;
+	bool         fresh = false;
+	// For the lists: its name and what the protocol tells about it (DsuName, DsuDetail), and whether it can rumble to show which one it is.
+	std::wstring name;
+	std::wstring detail;
+	bool         can_identify = false;
+	bool         light_bar    = false; // a DualSense through DSU Bridge: identifying it also lights up its light bar
+	// For the launcher's activity mark: the state at the last poll.
+	Controller::HostPadState previous;
+};
 
-std::mutex                  g_shared_mutex; // guards the chord handlers, g_controllers and the headset
+// In the order they appeared (both share g_order). g_xbox_controllers changes under g_shared_mutex (the headset events read it).
+std::vector<std::unique_ptr<XboxController>> g_xbox_controllers;
+std::vector<DsuController>                   g_dsu_controllers;
+uint64_t                                     g_order = 0;
+// Per player: the state it was sent, whether it is connected (player 1 always is), and its network controller's last motion sample.
+std::array<Controller::HostPadState, Controller::MAX_PLAYERS> g_sent {};
+std::array<bool, Controller::MAX_PLAYERS>                     g_connected {};
+std::array<uint64_t, Controller::MAX_PLAYERS>                 g_motion_time {};
+
+std::mutex                  g_shared_mutex; // guards the chord handlers, g_controllers, the assignment and the headset
 std::function<void()>       g_menu_handler;
 std::function<void()>       g_overlay_handler;
 std::vector<ControllerInfo> g_controllers;
+// When each of g_controllers last had input (steady clock, milliseconds; 0: none yet).
+std::vector<int64_t>        g_controller_inputs;
+// How controllers get players (SetControllerAssignment); g_assignment_changed asks the input thread to apply it.
+bool                        g_automatic = true;
+std::map<std::string, int>  g_manual;
+std::atomic_bool            g_assignment_changed = false;
+// The controllers to identify (IdentifyController), for the input thread.
+std::vector<std::string>    g_identify;
 std::atomic_bool            g_paused  = false;
 // The settings page's controller options (SetControllerOptions).
 std::atomic_bool            g_impulse_triggers = true;
@@ -128,14 +179,9 @@ std::atomic_bool            g_headset_mic      = false;
 // The audio devices of a headset plugged into player 1's controller (empty: none); guarded by g_shared_mutex.
 std::wstring                g_headset_render;
 std::wstring                g_headset_capture;
-// The headset player 1's controller reported in its HeadsetConnected event (used when Gamepad::Headset() has none); guarded by g_shared_mutex.
-std::wstring                g_event_headset_render;
-std::wstring                g_event_headset_capture;
 // The game gets controller input (ActivateGameInput); g_activate asks the input thread for it.
 std::atomic_bool            g_game_input = false;
 std::atomic_bool            g_activate   = false;
-// Per player, when its controller last had input (steady clock, milliseconds; 0: none yet).
-std::array<std::atomic<int64_t>, Controller::MAX_PLAYERS> g_last_input {};
 // Set when the game resumes: the input thread then blocks the buttons still held.
 std::atomic_bool            g_resumed = false;
 
@@ -177,20 +223,153 @@ const wchar_t* ControllerModel(uint16_t vendor, uint16_t product) {
 	}
 }
 
-void ListControllers() {
-	std::vector<ControllerInfo> controllers;
-	for (int index = 0; index < Controller::MAX_PLAYERS; index++) {
-		if (const auto& pad = g_players[index].pad; pad != nullptr) {
-			std::wstring name = L"Controller";
-			if (auto raw = gaming::RawGameController::FromGameController(pad)) {
-				const auto* model = ControllerModel(raw.HardwareVendorId(), raw.HardwareProductId());
-				name              = model != nullptr ? std::wstring(model) : std::wstring(raw.DisplayName());
-			}
-			controllers.push_back({index, std::move(name)});
+// Player 1's Xbox controller, for its headset: the first one that plays for player 1 (nullptr: none).
+XboxController* Player1XboxController() {
+	for (auto& controller: g_xbox_controllers) {
+		if (controller->player == 0 && !controller->missing) {
+			return controller.get();
 		}
 	}
+	return nullptr;
+}
+
+// An Xbox controller's model, by its product id, else the name Windows gives it.
+std::wstring XboxName(gaming::Gamepad const& pad) {
+	if (auto raw = gaming::RawGameController::FromGameController(pad)) {
+		const auto* model = ControllerModel(raw.HardwareVendorId(), raw.HardwareProductId());
+		return model != nullptr ? std::wstring(model) : std::wstring(raw.DisplayName());
+	}
+	return L"Controller";
+}
+
+// An Xbox controller's connection and battery, for the settings: "Wireless · Battery 80%", "Wireless · Charging", "Wired".
+std::wstring XboxDetail(gaming::Gamepad const& pad) {
+	std::wstring detail = pad.IsWireless() ? L"Wireless" : L"Wired";
+	if (const auto report = pad.TryGetBatteryReport()) {
+		const auto status = report.Status();
+		if (status == winrt::Windows::System::Power::BatteryStatus::Charging) {
+			detail += L" · Charging";
+		} else if (status != winrt::Windows::System::Power::BatteryStatus::NotPresent && report.RemainingCapacityInMilliwattHours() != nullptr &&
+		           report.FullChargeCapacityInMilliwattHours() != nullptr && report.FullChargeCapacityInMilliwattHours().Value() > 0) {
+			const auto percent = report.RemainingCapacityInMilliwattHours().Value() * 100 / report.FullChargeCapacityInMilliwattHours().Value();
+			detail += L" · Battery " + std::to_wstring(std::clamp(percent, 0, 100)) + L"%";
+		}
+	}
+	return detail;
+}
+
+// A DSU controller's name: the protocol tells no name or kind (a server may claim a whole controller for a phone), so every one is a Remote
+// Controller.
+std::wstring DsuName(const Dsu::Controller& /*controller*/) {
+	return L"Remote Controller";
+}
+
+// A DSU controller's connection and battery, and on a second line its server and the end of its MAC address (which tells two alike apart):
+// "USB · Battery full", then "From 10.0.0.2 · MAC address ending in 3A:7F".
+std::wstring DsuDetail(const Dsu::Controller& controller) {
+	std::vector<std::wstring> parts;
+	if (controller.connection == 1) {
+		parts.emplace_back(L"USB");
+	} else if (controller.connection == 2) {
+		parts.emplace_back(L"Bluetooth");
+	}
+	switch (controller.battery) {
+		case 0x01: parts.emplace_back(L"Battery almost empty"); break;
+		case 0x02: parts.emplace_back(L"Battery low"); break;
+		case 0x03: parts.emplace_back(L"Battery medium"); break;
+		case 0x04: parts.emplace_back(L"Battery high"); break;
+		case 0x05: parts.emplace_back(L"Battery full"); break;
+		case 0xEE: parts.emplace_back(L"Charging"); break;
+		case 0xEF: parts.emplace_back(L"Charged"); break;
+		default: break;
+	}
+	std::wstring detail;
+	for (const auto& part: parts) {
+		detail += (detail.empty() ? L"" : L" · ") + part;
+	}
+	std::wstring source = L"From " + std::wstring(winrt::to_hstring(controller.server));
+	if (std::any_of(controller.mac.begin(), controller.mac.end(), [](uint8_t byte) { return byte != 0; })) {
+		wchar_t end[8] = {};
+		swprintf_s(end, L"%02X:%02X", controller.mac[4], controller.mac[5]);
+		source += L" · MAC address ending in " + std::wstring(end);
+	}
+	return detail.empty() ? source : detail + L"\n" + source;
+}
+
+// The key a DSU controller is remembered by: its MAC address, the same on every server and slot, or else its server and slot.
+std::string DsuKey(const Dsu::Controller& controller) {
+	if (std::none_of(controller.mac.begin(), controller.mac.end(), [](uint8_t byte) { return byte != 0; })) {
+		return "dsu:" + controller.server + "#" + std::to_string(controller.slot + 1);
+	}
+	char mac[24] = {};
+	snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", controller.mac[0], controller.mac[1], controller.mac[2], controller.mac[3],
+	         controller.mac[4], controller.mac[5]);
+	return std::string("dsu:") + mac;
+}
+
+// The list for the launcher, the overlay and the settings (ConnectedControllers): the Xbox and the DSU controllers by player, players 1 to
+// 4 and then those that play for none; the controllers of one player in the order they appeared.
+void ListControllers() {
+	struct Listed {
+		int            player;
+		uint64_t       order;
+		ControllerInfo info;
+	};
+	std::vector<Listed> listed;
+	const auto*         headset_controller = Player1XboxController();
+	for (const auto& controller: g_xbox_controllers) {
+		ControllerInfo info;
+		info.player       = controller->player;
+		info.name         = controller->name;
+		info.detail       = controller->detail;
+		info.id           = controller->key;
+		info.headset_mic  = controller.get() == headset_controller;
+		info.can_identify = true;
+		listed.push_back({controller->player, controller->order, std::move(info)});
+	}
+	for (const auto& controller: g_dsu_controllers) {
+		ControllerInfo info;
+		info.player       = controller.player;
+		info.name         = controller.name;
+		info.detail       = controller.detail;
+		info.id           = controller.key;
+		info.network      = true;
+		info.can_identify = controller.can_identify;
+		info.light_bar    = controller.light_bar;
+		listed.push_back({controller.player, controller.order, std::move(info)});
+	}
+	std::sort(listed.begin(), listed.end(), [](const Listed& a, const Listed& b) {
+		const int a_player = a.player < 0 ? Controller::MAX_PLAYERS : a.player;
+		const int b_player = b.player < 0 ? Controller::MAX_PLAYERS : b.player;
+		return a_player != b_player ? a_player < b_player : a.order < b.order;
+	});
+	std::vector<ControllerInfo> controllers;
+	for (auto& entry: listed) {
+		controllers.push_back(std::move(entry.info));
+	}
 	std::lock_guard lock(g_shared_mutex);
-	g_controllers = std::move(controllers);
+	// The input times stay with their controllers.
+	std::vector<int64_t> inputs(controllers.size(), 0);
+	for (size_t i = 0; i < controllers.size(); i++) {
+		for (size_t old = 0; old < g_controllers.size(); old++) {
+			if (g_controllers[old].id == controllers[i].id && old < g_controller_inputs.size()) {
+				inputs[i] = g_controller_inputs[old];
+			}
+		}
+	}
+	g_controllers       = std::move(controllers);
+	g_controller_inputs = std::move(inputs);
+}
+
+// A controller of the list had input now (for the launcher's activity mark).
+void NoteInput(const std::string& key, Clock::time_point now) {
+	const auto      ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+	std::lock_guard lock(g_shared_mutex);
+	for (size_t i = 0; i < g_controllers.size() && i < g_controller_inputs.size(); i++) {
+		if (g_controllers[i].id == key) {
+			g_controller_inputs[i] = ms;
+		}
+	}
 }
 
 std::wstring ControllerId(gaming::Gamepad const& pad) {
@@ -200,8 +379,8 @@ std::wstring ControllerId(gaming::Gamepad const& pad) {
 	return {};
 }
 
-bool IsController(const Player& player, gaming::Gamepad const& pad, const std::wstring& id) {
-	return player.pad != nullptr && (id.empty() ? player.pad == pad : player.id == id);
+bool IsController(const XboxController& controller, gaming::Gamepad const& pad, const std::wstring& id) {
+	return controller.pad != nullptr && (id.empty() ? controller.pad == pad : controller.id == id);
 }
 
 void SetVibration(gaming::Gamepad const& pad, const std::array<uint8_t, 4>& strengths) {
@@ -230,10 +409,10 @@ float Tilt(double value) {
 	    std::copysign((magnitude - TILT_DEAD_ZONE) / (1.0 - TILT_DEAD_ZONE), value));
 }
 
-Controller::HostPadState MapReading(Player& player, const gaming::GamepadReading& reading) {
+Controller::HostPadState MapReading(XboxController& controller, const gaming::GamepadReading& reading) {
 	auto held = static_cast<uint32_t>(reading.Buttons);
-	player.blocked &= held;
-	held &= ~player.blocked;
+	controller.blocked &= held;
+	held &= ~controller.blocked;
 	const auto is_held = [held](gaming::GamepadButtons button) {
 		return (held & static_cast<uint32_t>(button)) != 0;
 	};
@@ -244,19 +423,19 @@ Controller::HostPadState MapReading(Player& player, const gaming::GamepadReading
 	const bool menu     = is_held(gaming::GamepadButtons::Menu);
 	const bool triggers = reading.LeftTrigger > 0.5 && reading.RightTrigger > 0.5;
 	if (view && menu) {
-		player.chord = true;
+		controller.chord = true;
 	}
-	if (player.chord) {
-		player.chord_triggers = player.chord_triggers || triggers;
-		const bool released   = !view && !menu && (!player.chord_triggers ||
+	if (controller.chord) {
+		controller.chord_triggers = controller.chord_triggers || triggers;
+		const bool released   = !view && !menu && (!controller.chord_triggers ||
 		                                          (reading.LeftTrigger < 0.1 && reading.RightTrigger < 0.1));
 		if (released) {
-			const bool overlay    = player.chord_triggers;
-			player.chord          = false;
-			player.chord_triggers = false;
+			const bool overlay    = controller.chord_triggers;
+			controller.chord          = false;
+			controller.chord_triggers = false;
 			RunChord(overlay);
 		}
-		player.touching = false;
+		controller.touching = false;
 		return {};
 	}
 
@@ -272,23 +451,24 @@ Controller::HostPadState MapReading(Player& player, const gaming::GamepadReading
 	              TriggerAxis(reading.LeftTrigger),    TriggerAxis(reading.RightTrigger)};
 
 	if (!is_held(gaming::GamepadButtons::View)) {
-		player.touching = false;
+		controller.touching = false;
 		return state;
 	}
 
 	// View held: the left stick is a finger on the touchpad, from when it moves (or clicks) until
-	// View is released, and its click is the touchpad click; the right stick tilts the controller.
+	// View is released; the finger alone doesn't click, the stick's click is the touchpad click. The
+	// right stick tilts the controller.
 	const double x          = reading.LeftThumbstickX;
 	const double y          = reading.LeftThumbstickY;
 	const bool   left_click = is_held(gaming::GamepadButtons::LeftThumbstick);
 	if (left_click || std::hypot(x, y) > TOUCH_START) {
-		player.touching = true;
+		controller.touching = true;
 	}
 	state.buttons &= ~Controller::PAD_BUTTON_L3;
 	if (left_click) {
 		state.buttons |= Controller::PAD_BUTTON_TOUCH_PAD;
 	}
-	if (player.touching) {
+	if (controller.touching) {
 		state.touch   = true;
 		state.touch_x = static_cast<float>((std::clamp(x, -1.0, 1.0) + 1.0) / 2.0);
 		state.touch_y = static_cast<float>((1.0 - std::clamp(y, -1.0, 1.0)) / 2.0);
@@ -335,22 +515,22 @@ uint8_t HapticRumble(uint8_t level) {
 	return static_cast<uint8_t>(HAPTIC_RUMBLE_MIN + (HAPTIC_RUMBLE_MAX - HAPTIC_RUMBLE_MIN) * (level - HAPTIC_GATE) / (255 - HAPTIC_GATE));
 }
 
-void ApplyFeedback(int index, Player& player, const Controller::HostPadState& state,
+void ApplyFeedback(int player, XboxController& controller, const Controller::HostPadState& state,
                    Clock::time_point now) {
 	// A trigger moves deeper once it passed the last deeper point by more than the reading's jitter; moving back resets that point.
 	std::array<uint8_t, 2> positions {};
 	for (int trigger = 0; trigger < 2; trigger++) {
 		const auto position = state.axes[static_cast<int>(Controller::Axis::TriggerLeft) + trigger];
-		auto&      deepest  = player.trigger_deepest[trigger];
+		auto&      deepest  = controller.trigger_deepest[trigger];
 		if (position >= deepest + TRIGGER_MOVE_MIN) {
-			player.trigger_squeezed[trigger] = now;
+			controller.trigger_squeezed[trigger] = now;
 			deepest                          = position;
 		} else if (position < deepest) {
 			deepest = position;
 		}
 		positions[trigger] = position;
 	}
-	const auto             feedback = Controller::GetPlayerFeedback(index);
+	const auto             feedback = Controller::GetPlayerFeedback(player);
 	std::array<uint8_t, 4> vibration {feedback.large_motor, feedback.small_motor, 0, 0};
 	// Once per session in the log: which of the DualSense's feedback the game uses.
 	static bool logged_triggers = false;
@@ -369,81 +549,259 @@ void ApplyFeedback(int index, Player& player, const Controller::HostPadState& st
 	}
 	for (int trigger = 0; trigger < 2; trigger++) {
 		// One more shot is a kick; a jump (the first look at the count) is not.
-		if (feedback.trigger_shots[trigger] != player.trigger_shots[trigger]) {
-			if (feedback.trigger_shots[trigger] - player.trigger_shots[trigger] == 1) {
-				player.trigger_kick_until[trigger] = now + TRIGGER_KICK;
+		if (feedback.trigger_shots[trigger] != controller.trigger_shots[trigger]) {
+			if (feedback.trigger_shots[trigger] - controller.trigger_shots[trigger] == 1) {
+				controller.trigger_kick_until[trigger] = now + TRIGGER_KICK;
 			}
-			player.trigger_shots[trigger] = feedback.trigger_shots[trigger];
+			controller.trigger_shots[trigger] = feedback.trigger_shots[trigger];
 		}
 		if (!g_impulse_triggers) {
 			continue;
 		}
-		const auto resistance = TriggerRumble(feedback.trigger_resistance[trigger], positions[trigger], player.trigger_squeezed[trigger], now);
+		const auto resistance = TriggerRumble(feedback.trigger_resistance[trigger], positions[trigger], controller.trigger_squeezed[trigger], now);
 		const auto shaking =
 		    TriggerVibration(feedback.trigger_vibration[trigger], feedback.trigger_frequency[trigger], positions[trigger], now);
-		const auto kick = now < player.trigger_kick_until[trigger] ? TRIGGER_KICK_STRENGTH : uint8_t {0};
+		const auto kick = now < controller.trigger_kick_until[trigger] ? TRIGGER_KICK_STRENGTH : uint8_t {0};
 		vibration[2 + trigger] = std::max({resistance, shaking, kick});
 	}
-	if (vibration != player.vibration) {
-		SetVibration(player.pad, vibration);
-		player.vibration = vibration;
+	if (vibration != controller.vibration) {
+		SetVibration(controller.pad, vibration);
+		controller.vibration = vibration;
 	}
 }
 
-void Assign(int index, gaming::Gamepad const& pad, std::wstring id) {
-	auto& player   = g_players[index];
-	player         = {};
-	player.pad     = pad;
-	player.id      = std::move(id);
-	player.blocked  = static_cast<uint32_t>(pad.GetCurrentReading().Buttons);
-	player.previous = pad.GetCurrentReading();
-	SetVibration(pad, {});
-	if (g_game_input) {
-		Controller::SetPlayerConnected(index, true);
+// The players the listed controllers play for.
+std::array<bool, Controller::MAX_PLAYERS> UsedPlayers() {
+	std::array<bool, Controller::MAX_PLAYERS> used {};
+	for (const auto& controller: g_xbox_controllers) {
+		if (controller->player >= 0) {
+			used[controller->player] = true;
+		}
 	}
-	Log("controller connected: player %d (user: %s, headset: %s)\n", index + 1, pad.User() != nullptr ? "assigned" : "none",
-	    pad.Headset() != nullptr ? "yes" : "none");
-	player.headset_connected = pad.HeadsetConnected(winrt::auto_revoke, [index](auto const&, gaming::Headset const& headset) {
-		Log("controller headset event: connected to player %d\n", index + 1);
-		if (index == 0) {
-			std::lock_guard lock(g_shared_mutex);
-			g_event_headset_render  = headset.RenderDeviceId();
-			g_event_headset_capture = headset.CaptureDeviceId();
+	for (const auto& controller: g_dsu_controllers) {
+		if (controller.player >= 0) {
+			used[controller.player] = true;
 		}
-	});
-	player.headset_disconnected = pad.HeadsetDisconnected(winrt::auto_revoke, [index](auto const&, auto const&) {
-		Log("controller headset event: disconnected from player %d\n", index + 1);
-		if (index == 0) {
-			std::lock_guard lock(g_shared_mutex);
-			g_event_headset_render.clear();
-			g_event_headset_capture.clear();
+	}
+	return used;
+}
+
+// The player a controller that appears plays for: automatically the lowest free one (none when all four are taken), manually the chosen
+// one (none when there is none).
+int PlayerFor(const std::string& key) {
+	bool automatic = true;
+	int  manual    = -1;
+	{
+		std::lock_guard lock(g_shared_mutex);
+		automatic = g_automatic;
+		if (const auto found = g_manual.find(key); found != g_manual.end() && found->second >= 0 && found->second < Controller::MAX_PLAYERS) {
+			manual = found->second;
 		}
-	});
+	}
+	if (!automatic) {
+		return manual;
+	}
+	const auto used = UsedPlayers();
+	for (int player = 0; player < Controller::MAX_PLAYERS; player++) {
+		if (!used[player]) {
+			return player;
+		}
+	}
+	return -1;
+}
+
+// A changed assignment, for all listed controllers: automatically in the order they appeared, manually as chosen.
+void Reassign() {
+	struct Entry {
+		uint64_t           order;
+		const std::string* key;
+		int*               player;
+	};
+	std::vector<Entry> entries;
+	for (auto& controller: g_xbox_controllers) {
+		entries.push_back({controller->order, &controller->key, &controller->player});
+	}
+	for (auto& controller: g_dsu_controllers) {
+		entries.push_back({controller.order, &controller.key, &controller.player});
+	}
+	std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.order < b.order; });
+	for (auto& entry: entries) {
+		*entry.player = -1;
+	}
+	for (auto& entry: entries) {
+		*entry.player = PlayerFor(*entry.key);
+	}
+	for (const auto& controller: g_dsu_controllers) {
+		Dsu::SetPlayer(controller.server, controller.slot, controller.player);
+	}
+	bool automatic = true;
+	{
+		std::lock_guard lock(g_shared_mutex);
+		automatic = g_automatic;
+	}
+	Log("controllers: %s assignment\n", automatic ? "automatic" : "manual");
 	ListControllers();
 }
 
-void Release(int index) {
-	auto& player = g_players[index];
+// Players 2 to 4 are connected while a controller plays for them (player 1 always is); a player that loses its last one lets go of what it
+// held.
+void UpdateConnections() {
+	if (!g_game_input) {
+		return;
+	}
+	const auto used = UsedPlayers();
+	for (int player = 0; player < Controller::MAX_PLAYERS; player++) {
+		const bool connected = player == 0 || used[player];
+		if (connected == g_connected[player]) {
+			continue;
+		}
+		if (!connected) {
+			Controller::SetPlayerState(player, {});
+			g_sent[player] = {};
+		}
+		Controller::SetPlayerConnected(player, connected);
+		g_connected[player] = connected;
+	}
+}
+
+void AddXboxController(gaming::Gamepad const& pad, std::wstring id) {
+	auto  added      = std::make_unique<XboxController>();
+	auto& controller = *added;
+	controller.pad      = pad;
+	controller.key      = "xbox:" + (id.empty() ? std::to_string(g_order + 1) : winrt::to_string(id));
+	controller.id       = std::move(id);
+	controller.order    = ++g_order;
+	controller.name     = XboxName(pad);
+	controller.detail   = XboxDetail(pad);
+	controller.blocked  = static_cast<uint32_t>(pad.GetCurrentReading().Buttons);
+	controller.previous = pad.GetCurrentReading();
+	SetVibration(pad, {});
+	controller.player = PlayerFor(controller.key);
+	Log("controller connected: %ls, player %d (user: %s, headset: %s)\n", controller.name.c_str(), controller.player + 1,
+	    pad.User() != nullptr ? "assigned" : "none", pad.Headset() != nullptr ? "yes" : "none");
+	// The events come on other threads: g_xbox_controllers changes under g_shared_mutex, so a late one finds its controller gone.
+	auto*      raw   = added.get();
+	const auto known = [raw] {
+		return std::any_of(g_xbox_controllers.begin(), g_xbox_controllers.end(), [raw](const auto& listed) { return listed.get() == raw; });
+	};
+	controller.headset_connected = pad.HeadsetConnected(winrt::auto_revoke, [raw, known](auto const&, gaming::Headset const& headset) {
+		Log("controller headset event: connected\n");
+		std::lock_guard lock(g_shared_mutex);
+		if (known()) {
+			raw->event_headset_render  = headset.RenderDeviceId();
+			raw->event_headset_capture = headset.CaptureDeviceId();
+		}
+	});
+	controller.headset_disconnected = pad.HeadsetDisconnected(winrt::auto_revoke, [raw, known](auto const&, auto const&) {
+		Log("controller headset event: disconnected\n");
+		std::lock_guard lock(g_shared_mutex);
+		if (known()) {
+			raw->event_headset_render.clear();
+			raw->event_headset_capture.clear();
+		}
+	});
+	{
+		std::lock_guard lock(g_shared_mutex);
+		g_xbox_controllers.push_back(std::move(added));
+	}
+	ListControllers();
+}
+
+void RemoveXboxController(size_t index) {
+	auto& controller = *g_xbox_controllers[index];
 	try {
-		SetVibration(player.pad, {});
+		SetVibration(controller.pad, {});
 	} catch (const winrt::hresult_error&) {
 	}
-	player              = {};
-	g_last_input[index] = 0;
-	if (index == 0) {
+	Log("controller disconnected: %ls, player %d\n", controller.name.c_str(), controller.player + 1);
+	// The revokers go with it; the headset events are guarded by g_shared_mutex.
+	std::unique_ptr<XboxController> removed;
+	{
 		std::lock_guard lock(g_shared_mutex);
-		g_event_headset_render.clear();
-		g_event_headset_capture.clear();
+		removed = std::move(g_xbox_controllers[index]);
+		g_xbox_controllers.erase(g_xbox_controllers.begin() + static_cast<std::ptrdiff_t>(index));
 	}
-	if (g_game_input) {
-		Controller::SetPlayerState(index, {});
-		Controller::SetPlayerConnected(index, false);
-	}
-	Log("controller disconnected: player %d\n", index + 1);
+	removed.reset();
 	ListControllers();
 }
 
-// Matches the connected controllers to the players; new ones take the lowest free player.
+// The DSU controllers as the client has them now: new ones join the list (with a player), gone ones leave it, and what the lists show
+// follows them (the battery).
+void UpdateDsuControllers() {
+	auto       reported = Dsu::Controllers();
+	bool       changed  = false;
+	const auto same     = [](const DsuController& controller, const Dsu::Controller& report) {
+        return controller.server == report.server && controller.slot == report.slot;
+	};
+	for (size_t index = 0; index < g_dsu_controllers.size();) {
+		const auto& controller = g_dsu_controllers[index];
+		if (std::none_of(reported.begin(), reported.end(), [&](const auto& report) { return same(controller, report); })) {
+			Log("controller disconnected: DSU %s #%d, player %d\n", controller.server.c_str(), controller.slot + 1, controller.player + 1);
+			g_dsu_controllers.erase(g_dsu_controllers.begin() + static_cast<std::ptrdiff_t>(index));
+			changed = true;
+		} else {
+			index++;
+		}
+	}
+	for (auto& report: reported) {
+		auto found = std::find_if(g_dsu_controllers.begin(), g_dsu_controllers.end(), [&](const DsuController& controller) { return same(controller, report); });
+		if (found == g_dsu_controllers.end()) {
+			DsuController controller;
+			controller.server = report.server;
+			controller.slot   = report.slot;
+			controller.key    = DsuKey(report);
+			controller.order  = ++g_order;
+			controller.player = PlayerFor(controller.key);
+			Log("controller connected: DSU %s #%d (%s), player %d\n", controller.server.c_str(), controller.slot + 1, controller.key.c_str(),
+			    controller.player + 1);
+			g_dsu_controllers.push_back(std::move(controller));
+			found   = g_dsu_controllers.end() - 1;
+			changed = true;
+		}
+		// The client has its player too (for the feedback and audio); it forgets it when the controller comes back after a gap, maybe
+		// between two polls, so that this list never saw it go.
+		if (report.player != found->player) {
+			Dsu::SetPlayer(found->server, found->slot, found->player);
+		}
+		found->fresh = report.fresh;
+		found->data  = report.data;
+		auto name    = DsuName(report);
+		auto detail  = DsuDetail(report);
+		if (name != found->name || detail != found->detail || report.can_vibrate != found->can_identify || report.full != found->light_bar) {
+			found->name         = std::move(name);
+			found->detail       = std::move(detail);
+			found->can_identify = report.can_vibrate;
+			found->light_bar    = report.full;
+			changed             = true;
+		}
+	}
+	if (changed) {
+		ListControllers();
+	}
+}
+
+// The controllers asked to show which one they are (IdentifyController): an Xbox controller rumbles for half a second, a DSU controller
+// asks its server.
+void TakeIdentifyRequests(Clock::time_point now) {
+	std::vector<std::string> keys;
+	{
+		std::lock_guard lock(g_shared_mutex);
+		keys.swap(g_identify);
+	}
+	for (const auto& key: keys) {
+		for (auto& controller: g_xbox_controllers) {
+			if (controller->key == key) {
+				controller->identify_until = now + IDENTIFY_TIME;
+			}
+		}
+		for (const auto& controller: g_dsu_controllers) {
+			if (controller.key == key) {
+				Dsu::Identify(controller.server, controller.slot);
+			}
+		}
+	}
+}
+
 // The log's list of the audio devices: each output and input by name, marked when it is the default one, the default one for chat, or player 1's
 // controller headset.
 void LogAudioDevices() {
@@ -503,33 +861,36 @@ void Scan(Clock::time_point now) {
 		connected.emplace_back(pad, ControllerId(pad));
 	}
 
-	for (int index = 0; index < Controller::MAX_PLAYERS; index++) {
-		auto& player = g_players[index];
-		if (player.pad == nullptr) {
+	bool details_changed = false;
+	for (size_t index = 0; index < g_xbox_controllers.size();) {
+		auto&      controller = *g_xbox_controllers[index];
+		const auto found      = std::find_if(connected.begin(), connected.end(), [&](const auto& pad) {
+            return IsController(controller, pad.first, pad.second);
+        });
+		if (found != connected.end()) {
+			controller.pad     = found->first;
+			controller.missing = false;
+			connected.erase(found);
+			// The connection and the battery change now and then.
+			if (auto detail = XboxDetail(controller.pad); detail != controller.detail) {
+				controller.detail = std::move(detail);
+				details_changed   = true;
+			}
+		} else if (!controller.missing) {
+			controller.missing       = true;
+			controller.missing_since = now;
+		} else if (now - controller.missing_since >= MISSING_GRACE) {
+			RemoveXboxController(index);
 			continue;
 		}
-		const auto found = std::find_if(connected.begin(), connected.end(), [&](const auto& pad) {
-			return IsController(player, pad.first, pad.second);
-		});
-		if (found != connected.end()) {
-			player.pad     = found->first;
-			player.missing = false;
-			connected.erase(found);
-		} else if (!player.missing) {
-			player.missing       = true;
-			player.missing_since = now;
-		} else if (now - player.missing_since >= MISSING_GRACE) {
-			Release(index);
-		}
+		index++;
 	}
 
 	for (auto& [pad, id]: connected) {
-		const auto free = std::find_if(g_players.begin(), g_players.end(),
-		                               [](const Player& player) { return player.pad == nullptr; });
-		if (free == g_players.end()) {
-			break;
-		}
-		Assign(static_cast<int>(free - g_players.begin()), pad, std::move(id));
+		AddXboxController(pad, std::move(id));
+	}
+	if (details_changed) {
+		ListControllers();
 	}
 
 	// Player 1's headset: Windows lists its speaker and microphone like any other audio device. Gamepad::Headset(), or else what the
@@ -537,8 +898,9 @@ void Scan(Clock::time_point now) {
 	std::wstring render;
 	std::wstring capture;
 	const char*  source = "none";
-	if (const auto& player = g_players[0]; player.pad != nullptr && !player.missing) {
-		if (const auto headset = player.pad.Headset()) {
+	auto*        first  = Player1XboxController();
+	if (first != nullptr) {
+		if (const auto headset = first->pad.Headset()) {
 			render  = headset.RenderDeviceId();
 			capture = headset.CaptureDeviceId();
 			source  = "the controller's";
@@ -546,9 +908,9 @@ void Scan(Clock::time_point now) {
 	}
 	{
 		std::lock_guard lock(g_shared_mutex);
-		if (render.empty() && capture.empty() && !g_event_headset_render.empty()) {
-			render  = g_event_headset_render;
-			capture = g_event_headset_capture;
+		if (render.empty() && capture.empty() && first != nullptr && !first->event_headset_render.empty()) {
+			render  = first->event_headset_render;
+			capture = first->event_headset_capture;
 			source  = "the controller's (from its event)";
 		}
 	}
@@ -590,45 +952,153 @@ bool HadInput(const gaming::GamepadReading& before, const gaming::GamepadReading
 	       std::abs(before.RightTrigger - after.RightTrigger) > moved;
 }
 
-void Update(int index, Clock::time_point now) {
-	auto& player = g_players[index];
-	if (player.pad == nullptr) {
-		return;
+// Whether a DSU controller was used between two packets: a button or a finger, or a stick or trigger moved (as for the Xbox controller).
+bool HadInput(const Controller::HostPadState& before, const Controller::HostPadState& after) {
+	constexpr int moved = 51;
+	if (before.buttons != after.buttons || before.touch != after.touch) {
+		return true;
 	}
-	Controller::HostPadState state;
-	if (!player.missing) {
-		try {
-			const auto reading = player.pad.GetCurrentReading();
-			if (HadInput(player.previous, reading)) {
-				g_last_input[index] =
-				    std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-			}
-			player.previous = reading;
-			if (!g_game_input) {
-				return;
-			}
-			if (g_paused) {
-				player.touching = false;
-				if (player.vibration != std::array<uint8_t, 4> {}) {
-					SetVibration(player.pad, {});
-					player.vibration = {};
-				}
-			} else {
-				state = MapReading(player, reading);
-				ApplyFeedback(index, player, state, now);
-			}
-		} catch (const winrt::hresult_error&) {
-			player.missing       = true;
-			player.missing_since = now;
-			state                = {};
+	for (size_t i = 0; i < before.axes.size(); i++) {
+		if (std::abs(static_cast<int>(before.axes[i]) - static_cast<int>(after.axes[i])) > moved) {
+			return true;
 		}
 	}
-	if (g_game_input && state != player.sent) {
-		Controller::SetPlayerState(index, state);
-		player.sent = state;
+	return false;
+}
+
+// Several controllers playing for one player add up: their buttons, each stick and trigger from the controller that moves it further, the
+// first fingers on a touchpad (View + left stick's or a DSU controller's) and the first stick tilt.
+void Merge(Controller::HostPadState& state, const Controller::HostPadState& other) {
+	state.buttons |= other.buttons;
+	const auto deflection = [](const std::array<uint8_t, 6>& axes, size_t x) {
+		return std::abs(static_cast<int>(axes[x]) - 128) + std::abs(static_cast<int>(axes[x + 1]) - 128);
+	};
+	for (const size_t stick: {size_t {0}, size_t {2}}) {
+		if (deflection(other.axes, stick) > deflection(state.axes, stick)) {
+			state.axes[stick]     = other.axes[stick];
+			state.axes[stick + 1] = other.axes[stick + 1];
+		}
 	}
-	if (g_game_input) {
-		Controller::StepPlayerMotion(index);
+	for (const size_t trigger: {size_t {4}, size_t {5}}) {
+		state.axes[trigger] = std::max(state.axes[trigger], other.axes[trigger]);
+	}
+	if (!state.touch && !state.touch2 && (other.touch || other.touch2)) {
+		state.touch    = other.touch;
+		state.touch_x  = other.touch_x;
+		state.touch_y  = other.touch_y;
+		state.touch2   = other.touch2;
+		state.touch2_x = other.touch2_x;
+		state.touch2_y = other.touch2_y;
+	}
+	if (state.tilt_x == 0.0f && state.tilt_y == 0.0f && state.turn == 0.0f) {
+		state.tilt_x = other.tilt_x;
+		state.tilt_y = other.tilt_y;
+		state.turn   = other.turn;
+	}
+}
+
+// One poll: each controller's input to the player it plays for, merged, and each player's state to the game. Every Xbox controller's View +
+// Menu works, whatever its player; a DSU controller with a player opens the game menu with its PS button. The motion sensors of a player's
+// first DSU controller that has them replace the emulated ones.
+void Update(Clock::time_point now) {
+	std::array<Controller::HostPadState, Controller::MAX_PLAYERS> states {};
+	std::array<bool, Controller::MAX_PLAYERS>                     has {};
+	const auto add = [&states, &has](int player, const Controller::HostPadState& state) {
+		if (player < 0 || player >= Controller::MAX_PLAYERS) {
+			return;
+		}
+		if (has[player]) {
+			Merge(states[player], state);
+		} else {
+			states[player] = state;
+			has[player]    = true;
+		}
+	};
+
+	for (auto& listed: g_xbox_controllers) {
+		auto& controller = *listed;
+		if (controller.missing) {
+			continue;
+		}
+		try {
+			const auto reading = controller.pad.GetCurrentReading();
+			if (HadInput(controller.previous, reading)) {
+				NoteInput(controller.key, now);
+			}
+			controller.previous = reading;
+			// While it identifies itself, it rumbles, game or not; then its rumble is the game's again (or none).
+			const bool identifying = now < controller.identify_until;
+			if (identifying) {
+				constexpr std::array<uint8_t, 4> IDENTIFY = {IDENTIFY_RUMBLE, IDENTIFY_RUMBLE, 0, 0};
+				if (controller.vibration != IDENTIFY) {
+					SetVibration(controller.pad, IDENTIFY);
+					controller.vibration = IDENTIFY;
+				}
+			}
+			const bool playing = g_game_input && !g_paused && controller.player >= 0;
+			if (g_game_input && !g_paused) {
+				const auto state = MapReading(controller, reading); // View + Menu, also for a controller that plays for none
+				if (playing) {
+					if (!identifying) {
+						ApplyFeedback(controller.player, controller, state, now);
+					}
+					add(controller.player, state);
+				}
+			} else if (g_paused) {
+				controller.touching = false;
+			}
+			if (!playing && !identifying && controller.vibration != std::array<uint8_t, 4> {}) {
+				SetVibration(controller.pad, {});
+				controller.vibration = {};
+			}
+		} catch (const winrt::hresult_error&) {
+			controller.missing       = true;
+			controller.missing_since = now;
+		}
+	}
+
+	std::array<bool, Controller::MAX_PLAYERS> motion_taken {};
+	for (auto& controller: g_dsu_controllers) {
+		const auto& data = controller.data;
+		// The PS button also closes the game menu again.
+		const bool home = controller.fresh && data.home && controller.player >= 0;
+		if (home && !controller.home && g_game_input) {
+			RunChord(false);
+		}
+		controller.home = home;
+		if (!controller.fresh) {
+			continue;
+		}
+		if (HadInput(controller.previous, data.state)) {
+			NoteInput(controller.key, now);
+		}
+		controller.previous = data.state;
+		if (!g_game_input || g_paused || controller.player < 0) {
+			continue;
+		}
+		add(controller.player, data.state);
+		if (data.motion_time != 0 && !motion_taken[controller.player]) {
+			motion_taken[controller.player] = true;
+			if (data.motion_time != g_motion_time[controller.player]) {
+				Controller::SetPlayerMotion(controller.player, data.accel, data.gyro, data.motion_time);
+				g_motion_time[controller.player] = data.motion_time;
+			}
+		}
+	}
+
+	if (!g_game_input) {
+		return;
+	}
+	for (int player = 0; player < Controller::MAX_PLAYERS; player++) {
+		if (!g_connected[player]) {
+			continue;
+		}
+		// A player whose controllers let go (or went away) lets go too.
+		if (states[player] != g_sent[player]) {
+			Controller::SetPlayerState(player, states[player]);
+			g_sent[player] = states[player];
+		}
+		Controller::StepPlayerMotion(player);
 	}
 }
 
@@ -650,34 +1120,33 @@ void PollControllers() {
 			}
 			next_scan = now + SCAN_INTERVAL;
 		}
-		if (g_activate.exchange(false)) {
-			// The game starts: the connected controllers become its players. Buttons still held
-			// (the A that started it) count once released.
-			for (int index = 0; index < Controller::MAX_PLAYERS; index++) {
-				auto& player = g_players[index];
-				if (player.pad != nullptr) {
-					Controller::SetPlayerConnected(index, true);
+		try {
+			UpdateDsuControllers();
+		} catch (const winrt::hresult_error& error) {
+			Log("dsu controllers failed: 0x%08x\n", static_cast<uint32_t>(error.code()));
+		}
+		if (g_assignment_changed.exchange(false)) {
+			Reassign();
+		}
+		TakeIdentifyRequests(now);
+		const bool activate = g_activate.exchange(false);
+		if (activate || g_resumed.exchange(false)) {
+			// The game starts or resumes: buttons still held (the A that started it) count once released.
+			for (auto& controller: g_xbox_controllers) {
+				if (!controller->missing) {
 					try {
-						player.blocked = static_cast<uint32_t>(player.pad.GetCurrentReading().Buttons);
+						controller->blocked = static_cast<uint32_t>(controller->pad.GetCurrentReading().Buttons);
 					} catch (const winrt::hresult_error&) {
 					}
 				}
 			}
+		}
+		if (activate) {
+			// The game starts: the players with controllers connect.
 			g_game_input = true;
 		}
-		if (g_resumed.exchange(false)) {
-			for (auto& player: g_players) {
-				if (player.pad != nullptr && !player.missing) {
-					try {
-						player.blocked = static_cast<uint32_t>(player.pad.GetCurrentReading().Buttons);
-					} catch (const winrt::hresult_error&) {
-					}
-				}
-			}
-		}
-		for (int index = 0; index < Controller::MAX_PLAYERS; index++) {
-			Update(index, now);
-		}
+		UpdateConnections();
+		Update(now);
 
 		LARGE_INTEGER due {};
 		due.QuadPart = -std::chrono::duration_cast<std::chrono::nanoseconds>(POLL_INTERVAL).count() / 100;
@@ -699,21 +1168,39 @@ void OnChords(std::function<void()> menu, std::function<void()> overlay) {
 
 std::vector<ControllerInfo> ConnectedControllers() {
 	std::vector<ControllerInfo> controllers;
+	std::vector<int64_t>        inputs;
 	{
 		std::lock_guard lock(g_shared_mutex);
 		controllers = g_controllers;
+		inputs      = g_controller_inputs;
 		for (auto& controller: controllers) {
-			controller.headset_mic = controller.player == 0 && !g_headset_capture.empty();
+			controller.headset_mic = controller.headset_mic && !g_headset_capture.empty();
 		}
 	}
-	int64_t newest = 0;
-	for (auto& controller: controllers) {
-		newest = std::max(newest, g_last_input[controller.player].load());
-	}
-	for (auto& controller: controllers) {
-		controller.latest = newest != 0 && g_last_input[controller.player] == newest;
+	const int64_t newest = inputs.empty() ? 0 : *std::max_element(inputs.begin(), inputs.end());
+	for (size_t i = 0; i < controllers.size() && i < inputs.size(); i++) {
+		controllers[i].latest = newest != 0 && inputs[i] == newest;
 	}
 	return controllers;
+}
+
+void IdentifyController(const std::string& id) {
+	std::lock_guard lock(g_shared_mutex);
+	g_identify.push_back(id);
+}
+
+void SetControllerAssignment(bool automatic, const std::map<std::string, int>& players, const std::vector<std::string>& dsu_servers) {
+	{
+		std::lock_guard lock(g_shared_mutex);
+		if (automatic == g_automatic && players == g_manual) {
+			// Only the servers may have changed.
+		} else {
+			g_automatic          = automatic;
+			g_manual             = players;
+			g_assignment_changed = true;
+		}
+	}
+	Dsu::SetServers(dsu_servers);
 }
 
 void ActivateGameInput() {
@@ -761,6 +1248,7 @@ void RequestMicrophoneAccess() {
 }
 
 void PauseGameInput(bool paused) {
+	Dsu::SetPaused(paused);
 	if (g_paused.exchange(paused) && !paused) {
 		g_resumed = true;
 	}
