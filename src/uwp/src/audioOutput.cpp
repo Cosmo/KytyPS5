@@ -5,6 +5,7 @@
 #include "libs/audioOutput.h"
 
 #include "common/logging/log.h"
+#include "dsu.h"
 #include "input.h"
 #include "log.h"
 
@@ -13,7 +14,9 @@
 #include <mmreg.h>
 #include <xaudio2.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -282,6 +285,36 @@ void Clear(Stream* stream) {
 		// The removed buffers still end through OnBufferEnd.
 		stream->voice->FlushSourceBuffers();
 	}
+}
+
+uint64_t QueueNetworkController(int player, bool speaker, const void* data, uint32_t frames, uint32_t freq, uint32_t channels, bool is_float,
+                                const int* volume, float gain, const float* gains) {
+	// Without such a DualSense (DSU controllers off, for example), the block is not converted at all.
+	if (data == nullptr || frames == 0 || freq == 0 || channels == 0 || volume == nullptr || !Kyty::Uwp::Dsu::PlaysAudio(player, speaker)) {
+		return 0;
+	}
+	// The speaker: the right channel of a stereo port; the actuators: the first two channels (one for both of a mono port).
+	const uint32_t       outputs = speaker ? 1 : 2;
+	std::vector<int16_t> samples(static_cast<size_t>(frames) * outputs);
+	for (uint32_t output = 0; output < outputs; output++) {
+		const uint32_t channel = speaker ? std::min(channels - 1, 1u) : std::min(channels - 1, output);
+		const float    scale   = static_cast<float>(volume[channel]) / 32768.0f * gain * (gains != nullptr ? gains[channel] : 1.0f);
+		for (uint32_t frame = 0; frame < frames; frame++) {
+			const size_t index  = static_cast<size_t>(frame) * channels + channel;
+			const float  sample = is_float ? static_cast<const float*>(data)[index] : static_cast<const int16_t*>(data)[index] / 32768.0f;
+			samples[static_cast<size_t>(frame) * outputs + output] =
+			    static_cast<int16_t>(std::lround(std::clamp(sample * scale, -1.0f, 1.0f) * 32767.0f));
+		}
+	}
+	const bool sent = speaker ? Kyty::Uwp::Dsu::SendSpeaker(player, samples.data(), frames, freq)
+	                          : Kyty::Uwp::Dsu::SendHaptics(player, samples.data(), frames, freq);
+	static std::atomic_bool logged_speaker = false;
+	static std::atomic_bool logged_haptics = false;
+	if (sent && !(speaker ? logged_speaker : logged_haptics).exchange(true)) {
+		Kyty::Uwp::Log("audio: the %s plays on a DualSense over the network (player %d, %u Hz, %u ch)\n", speaker ? "controller speaker" : "haptics",
+		               player + 1, freq, channels);
+	}
+	return sent ? static_cast<uint64_t>(frames) * 1000000 / freq : 0;
 }
 
 } // namespace Libs::Audio::Output
