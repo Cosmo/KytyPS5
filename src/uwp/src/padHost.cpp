@@ -76,12 +76,16 @@ Quat Target(const HostPadState& state) {
 	                AxisAngle(1.0f, 0.0f, 0.0f, -state.tilt_y * MAX_ANGLE));
 }
 
-// An emulated pad: its orientation, when its sensors were last sent, and whether it rests at its target (and was sent so).
+// An emulated pad: its orientation, when its sensors were last sent, and whether it rests at its target (and was sent so). Until `real_until`
+// a real controller's sensors come instead (SetPlayerMotion).
 struct Motion {
 	Quat     orientation {};
-	uint64_t time    = 0;
-	bool     settled = true;
+	uint64_t time       = 0;
+	bool     settled    = true;
+	uint64_t real_until = 0;
 };
+// How long a real controller's sensors keep the emulated motion off after their last sample.
+constexpr uint64_t REAL_MOTION_HOLD_US = 200000;
 std::array<Motion, MAX_PLAYERS> g_motions {};
 
 // The motion sensors as the pad feels them: gravity in the pad's frame, and the turn per second (in the pad's frame too, as a gyroscope measures).
@@ -173,11 +177,14 @@ void SetPlayerState(int player, const HostPadState& state) {
 			C::SetAxis(id, AXES[i], state.axes[i]);
 		}
 	}
-	// A finger on the touchpad also presses its button in the library; a click without a finger is the button alone.
+	// The fingers don't press the touchpad's button (as on a DualSense): its click is the state's button alone.
 	if (state.touch != last.touch || (state.touch && (state.touch_x != last.touch_x || state.touch_y != last.touch_y))) {
-		C::SetTouchPad(id, 0, state.touch, state.touch_x, state.touch_y);
+		C::SetTouchPad(id, 0, state.touch, state.touch_x, state.touch_y, false);
 	}
-	if (!state.touch && (changed & PAD_BUTTON_TOUCH_PAD) != 0) {
+	if (state.touch2 != last.touch2 || (state.touch2 && (state.touch2_x != last.touch2_x || state.touch2_y != last.touch2_y))) {
+		C::SetTouchPad(id, 1, state.touch2, state.touch2_x, state.touch2_y, false);
+	}
+	if ((changed & PAD_BUTTON_TOUCH_PAD) != 0) {
 		C::SetButton(id, PAD_BUTTON_TOUCH_PAD, (state.buttons & PAD_BUTTON_TOUCH_PAD) != 0);
 	}
 	last = state;
@@ -188,10 +195,26 @@ void StepPlayerMotion(int player) {
 		return;
 	}
 	std::lock_guard lock(g_mutex);
-	if (!g_ready_before[player] || C::GetActiveControllerId() == -1) {
+	if (!g_ready_before[player] || C::GetActiveControllerId() == -1 || NowMicroseconds() < g_motions[player].real_until) {
 		return;
 	}
 	StepMotion(player, Target(g_last[player]));
+}
+
+void SetPlayerMotion(int player, const std::array<float, 3>& accel, const std::array<float, 3>& gyro, uint64_t time) {
+	if (!Valid(player)) {
+		return;
+	}
+	std::lock_guard lock(g_mutex);
+	if (!g_ready_before[player] || C::GetActiveControllerId() == -1) {
+		return;
+	}
+	const auto id = C::HostPlayerId(player);
+	C::SetSensor(id, C::Sensor::Accel, accel.data(), time);
+	C::SetSensor(id, C::Sensor::Gyro, gyro.data(), time);
+	auto& motion      = g_motions[player];
+	motion.real_until = NowMicroseconds() + REAL_MOTION_HOLD_US;
+	motion.settled    = false; // the emulated motion starts again from a sample at rest when the real one stops
 }
 
 void StartAutoPress(uint32_t interval_ms) {
@@ -230,8 +253,9 @@ HostPadFeedback GetPlayerFeedback(int player) {
 		return {};
 	}
 	const auto feedback = C::GetHostFeedback(player);
-	return {feedback.large_motor,       feedback.small_motor,       feedback.trigger_resistance, feedback.trigger_vibration,
-	        feedback.trigger_frequency, feedback.trigger_shots,     feedback.haptic_left,        feedback.haptic_right};
+	return {feedback.large_motor,       feedback.small_motor,   feedback.trigger_resistance, feedback.trigger_vibration,
+	        feedback.trigger_frequency, feedback.trigger_shots, feedback.haptic_left,        feedback.haptic_right,
+	        feedback.light_bar_set,     feedback.light_bar,     feedback.trigger_blocks};
 }
 
 } // namespace Kyty::Uwp::Pad
