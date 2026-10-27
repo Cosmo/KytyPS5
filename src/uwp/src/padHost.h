@@ -36,10 +36,13 @@ enum class Axis { LeftX = 0, LeftY = 1, RightX = 2, RightY = 3, TriggerLeft = 4,
 struct HostPadState {
 	uint32_t               buttons = 0;
 	std::array<uint8_t, 6> axes {128, 128, 128, 128, 0, 0}; // in Axis order; triggers set L2/R2
-	// One finger on the touchpad; x and y in 0..1 from the top left.
-	bool  touch   = false;
-	float touch_x = 0.5f;
-	float touch_y = 0.5f;
+	// Up to two fingers on the touchpad; x and y in 0..1 from the top left. They don't click: the click is PAD_BUTTON_TOUCH_PAD alone.
+	bool  touch    = false;
+	float touch_x  = 0.5f;
+	float touch_y  = 0.5f;
+	bool  touch2   = false;
+	float touch2_x = 0.5f;
+	float touch2_y = 0.5f;
 	// Emulated motion: the pad's angle, set by where a stick points, -1..1 like the PS5 stick axes (x to the right, y down); full deflection is
 	// 180 degrees, 0 is at rest. tilt_y tips the pad forward or back, tilt_x leans it to a side, turn turns it to a side as it lies.
 	float tilt_x = 0.0f;
@@ -62,6 +65,11 @@ struct HostPadFeedback {
 	// The DualSense's haptic feedback as a bump now (left, right actuator; 0..255): a short pulse at each of its attacks.
 	uint8_t haptic_left  = 0;
 	uint8_t haptic_right = 0;
+	// For a DualSense over the network (dsu.h): the light bar's colour (false: none set) and the adaptive triggers' effects as the DualSense's
+	// 11-byte blocks (left, right).
+	bool                                   light_bar_set = false;
+	std::array<uint8_t, 3>                 light_bar {};
+	std::array<std::array<uint8_t, 11>, 2> trigger_blocks {};
 };
 
 // Testing without a person at the controller: presses the confirm button (Cross on the PS5 pad, A on an Xbox controller) for a moment every
@@ -73,6 +81,9 @@ void                          SetPlayerState(int player, const HostPadState& sta
 // Called on every poll: moves the emulated motion one step toward the angle of the player's last state, so that the game's motion sensors
 // follow a stick that is held still too.
 void                          StepPlayerMotion(int player);
+// A real controller's motion sensors (a DSU controller's, dsu.h): accelerometer in m/s² and gyroscope in rad/s in the pad's frame (x right,
+// y up, z toward the player), at `time` (microseconds, QueryPerformanceCounter). While they keep coming, the emulated motion stays off.
+void                          SetPlayerMotion(int player, const std::array<float, 3>& accel, const std::array<float, 3>& gyro, uint64_t time);
 [[nodiscard]] HostPadFeedback GetPlayerFeedback(int player);
 
 } // namespace Kyty::Uwp::Pad

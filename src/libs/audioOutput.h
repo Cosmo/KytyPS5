@@ -18,6 +18,12 @@ bool     Queue(Stream* stream, const void* data, uint32_t size);
 uint32_t QueuedSize(Stream* stream); // The bytes not played yet.
 void     Clear(Stream* stream);
 
+// A block of a player's pad speaker port (`speaker`) or vibration port for the DualSenses the app reaches over the network for that player,
+// with the port's volume, `gain` and `gains` (per channel, or nullptr) applied: the speaker plays the right channel (as on a DualSense on
+// USB), the actuators the first two. How long the block plays, in microseconds, or 0 when there is no such DualSense to play it.
+uint64_t QueueNetworkController(int player, bool speaker, const void* data, uint32_t frames, uint32_t freq, uint32_t channels, bool is_float,
+                                const int* volume, float gain, const float* gains);
+
 } // namespace Libs::Audio::Output
 
 #endif // EMULATOR_INCLUDE_EMULATOR_AUDIO_OUTPUT_H_
