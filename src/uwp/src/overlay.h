@@ -33,9 +33,11 @@ private:
 	std::shared_ptr<State> m_state;
 };
 
-// The overlay's settings as tiles, for the settings page and the game menu: what it shows (Off is OverlayShown), its log, its controllers and
-// its size, changed in `settings`. `changed` runs after each change.
-void AddOverlaySettings(winrt::Windows::UI::Xaml::Controls::Panel const&      panel,
+// The overlay's settings as tiles, for the settings page and the game menu: what it shows (Off is OverlayShown) and its size in `overlay`,
+// the controllers, the log and the compile notice in `on_screen` (the game menu passes one panel for both), changed in `settings`. Only
+// what isn't clear from its name has a text. `changed` runs after each change.
+void AddOverlaySettings(winrt::Windows::UI::Xaml::Controls::Panel const&      overlay,
+                        winrt::Windows::UI::Xaml::Controls::Panel const&      on_screen,
                         winrt::Windows::UI::Xaml::Controls::StackPanel const& explanation, std::shared_ptr<AppSettings> settings,
                         std::function<void()> changed);
 
