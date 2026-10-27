@@ -5,6 +5,7 @@
 #include "gameLibrary.h"
 #include "gameSource.h"
 #include "log.h"
+#include "settingTiles.h"
 #include "settings.h"
 #include "xboxLook.h"
 
@@ -850,7 +851,7 @@ void ShowTrophyDetails(std::string title_id, std::string trophy_name, std::funct
 	}(std::move(title_id), std::move(trophy_name), std::move(closed));
 }
 
-void ShowGameTrophies(xaml::Controls::Grid const& host, GameEntry game) {
+void ShowGameTrophies(xaml::Controls::Grid const& host, GameEntry game, xaml::Controls::StackPanel text) {
 	host.Children().Clear();
 	host.RowDefinitions().Clear();
 	host.RowSpacing(12);
@@ -883,7 +884,7 @@ void ShowGameTrophies(xaml::Controls::Grid const& host, GameEntry game) {
 	status(L"Reading the game's trophies...");
 
 	[](xaml::Controls::Grid host, xaml::Controls::StackPanel header, xaml::Controls::ListView list, GameEntry game,
-	   std::function<void(const wchar_t*)> status) -> winrt::fire_and_forget {
+	   std::function<void(const wchar_t*)> status, xaml::Controls::StackPanel text) -> winrt::fire_and_forget {
 		const auto dispatcher = host.Dispatcher();
 		const int  language   = static_cast<int>(LoadSettings().console_language);
 		co_await winrt::resume_background();
@@ -930,6 +931,26 @@ void ShowGameTrophies(xaml::Controls::Grid const& host, GameEntry game) {
 				list.Items().Append(row);
 			}
 		}
+		// The trophy with the focus: its name, grade and when it was earned, and what to do for it (a hidden one keeps that to itself).
+		list.GotFocus([entry, text](auto const&, xaml::RoutedEventArgs const& args) {
+			const auto item = args.OriginalSource().try_as<xaml::Controls::ListViewItem>();
+			const auto row  = item != nullptr ? item.Content().try_as<xaml::FrameworkElement>() : nullptr;
+			if (row == nullptr || row.Tag() == nullptr) {
+				return;
+			}
+			const uint32_t tag   = winrt::unbox_value<uint32_t>(row.Tag());
+			const auto&    found = entry->packages[tag >> 16u];
+			const auto     at    = found.package.trophies.find(static_cast<int>(tag & 0xffffu));
+			if (at == found.package.trophies.end()) {
+				return;
+			}
+			const auto&        trophy = at->second;
+			const bool         earned = found.unlocks.unlocked.contains(trophy.id);
+			const bool         masked = trophy.hidden && !earned;
+			const std::wstring state  = earned ? EarnedText(found.unlocks, trophy.id) : std::wstring(L"Not earned");
+			ShowExplanation(text, TrophyName(trophy, masked), {masked ? state : std::wstring(GradeName(trophy.grade)) + L" · " + state},
+			                {masked ? std::wstring(L"This trophy is hidden until you earn it.") : std::wstring(winrt::to_hstring(trophy.description))});
+		});
 		list.ItemClick([entry](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
 			const auto row = args.ClickedItem().try_as<xaml::FrameworkElement>();
 			if (row == nullptr || row.Tag() == nullptr) {
@@ -939,7 +960,7 @@ void ShowGameTrophies(xaml::Controls::Grid const& host, GameEntry game) {
 			ShowTrophyOf(*entry, tag >> 16u, static_cast<int>(tag & 0xffffu));
 		});
 		FocusFirstItem(list);
-	}(host, header, list, std::move(game), status);
+	}(host, header, list, std::move(game), status, std::move(text));
 }
 
 size_t ResetAllTrophies() {

@@ -25,10 +25,11 @@ namespace Kyty::Uwp {
 // can't be found. UI thread.
 void ShowTrophyDetails(std::string title_id, std::string trophy_name, std::function<void()> closed);
 
-// The running game's trophies for the game menu's side panel, in `host` (filled anew): its progress, then a row per trophy; A on one shows its
-// details over the game. They are read on a background thread each time, so trophies earned in this session show too. The focus goes to the
-// first trophy, or to the line that says why there are none, so that B still goes back. UI thread.
-void ShowGameTrophies(winrt::Windows::UI::Xaml::Controls::Grid const& host, GameEntry game);
+// The running game's trophies for the game menu's side panel, in `host` (filled anew): its progress, then a row per trophy; the one with
+// the focus is described in `text` (next to the panel), A on one shows its details over the game. They are read on a background thread each
+// time, so trophies earned in this session show too. The focus goes to the first trophy, or to the line that says why there are none, so
+// that B still goes back. UI thread.
+void ShowGameTrophies(winrt::Windows::UI::Xaml::Controls::Grid const& host, GameEntry game, winrt::Windows::UI::Xaml::Controls::StackPanel text);
 
 // Removes the trophies earned in all games: the unlock files in the user data folder's _Trophies (trophies_*.json in a folder per game). The
 // number of games that had some.
