@@ -264,9 +264,10 @@ void BuildPlayers(const std::shared_ptr<PlayersPage>& page) {
 		    }
 	    },
 	    {L"Automatically: each controller is assigned to the next free player when it connects.",
-	     page->settings->dsu_enabled ? L"Manually: you choose the player for each controller. Several controllers can share a player, for example "
-	                                   L"a phone for motion controls together with an Xbox controller."
-	                                 : L"Manually: you choose the player for each controller. Several controllers can share a player.",
+	     page->settings->dsu_enabled ? L"Manually: you choose the player for each controller; a new one plays as Player 1. Several controllers can "
+	                                   L"share a player, for example a phone for motion controls together with an Xbox controller."
+	                                 : L"Manually: you choose the player for each controller; a new one plays as Player 1. Several controllers can "
+	                                   L"share a player.",
 	     L"Any Xbox controller can open the game menu with [View] + [Menu], whichever player it's assigned to."});
 	mode.Tag(winrt::box_value(L"mode"));
 	// Only with Settings › Developer › Remote Controllers on.
