@@ -587,15 +587,16 @@ std::array<bool, Controller::MAX_PLAYERS> UsedPlayers() {
 }
 
 // The player a controller that appears plays for: automatically the lowest free one (none when all four are taken), manually the chosen
-// one (none when there is none).
+// one, and player 1 for a controller without a choice: an Xbox controller's id can change between app runs, which forgets its choice, and
+// the game then still has a player 1.
 int PlayerFor(const std::string& key) {
 	bool automatic = true;
-	int  manual    = -1;
+	int  manual    = 0;
 	{
 		std::lock_guard lock(g_shared_mutex);
 		automatic = g_automatic;
-		if (const auto found = g_manual.find(key); found != g_manual.end() && found->second >= 0 && found->second < Controller::MAX_PLAYERS) {
-			manual = found->second;
+		if (const auto found = g_manual.find(key); found != g_manual.end()) {
+			manual = found->second >= 0 && found->second < Controller::MAX_PLAYERS ? found->second : -1;
 		}
 	}
 	if (!automatic) {
