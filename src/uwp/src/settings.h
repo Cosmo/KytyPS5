@@ -44,13 +44,13 @@ struct AppSettings {
 	bool                               game_output      = false; // the game's printf in the log
 	bool                               d3d12_selftest   = false; // translate and sign built-in shaders at start (not on the settings page)
 	// The overlay's size: 0 small, 1 medium, 2 large (OverlaySizes in overlay.cpp).
-	uint32_t overlay_size = 1;
+	uint32_t overlay_size = 0;
 	// How many of the log's last lines the overlay shows: 2 to 20 (OverlayLogLines in overlay.cpp).
 	uint32_t overlay_log_lines = 20;
 	// What the overlay shows while it is on (OverlayShown): OVERLAY_FRAME_RATE, OVERLAY_COMPACT, OVERLAY_FULL or OVERLAY_DETAILED.
 	uint32_t overlay_detail = 2;
 	// Whether the overlay shows the end of the emulator's log, and the connected controllers.
-	bool overlay_log         = true;
+	bool overlay_log         = false;
 	bool overlay_controllers = true;
 	// A notice at the bottom right while the emulator translates shaders or builds pipelines, overlay or not. On.
 	bool compile_notice = true;
