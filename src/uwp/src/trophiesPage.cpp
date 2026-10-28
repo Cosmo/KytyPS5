@@ -157,14 +157,18 @@ winrt::Windows::UI::Color GradeColor(int grade) {
 // A game's trophy packages and unlocks, or nothing when it has none (a background thread: it reads the game and the user data folder).
 std::optional<GameTrophies> LoadGameTrophies(GameEntry game, int language, const std::filesystem::path& user_data) {
 	GameTrophies entry;
-	entry.game = std::move(game);
+	entry.game            = std::move(game);
+	const bool is_archive = IsArchivePath(entry.game.folder);
+	// An archive's packages are looked up in its own index, as the emulator reads them: while its game runs, the Xbox refuses the archive's
+	// attributes ("access denied"), which GameFileExists asks for. Held here, the archive's index is read once for all the packages.
+	const auto archive = is_archive ? Common::OpenArchive(entry.game.folder) : nullptr;
 	for (uint32_t label = 0; label < SERVICE_LABELS; label++) {
 		const auto inner = Trophies::PackagePath(label);
-		if (!GameFileExists(entry.game.folder / inner)) {
+		// Common::File reads a member of an archive by its virtual path.
+		const auto path = is_archive ? Common::MakeArchivePath(entry.game.folder, inner) : entry.game.folder / inner;
+		if (is_archive ? archive == nullptr || !Common::File::IsFileExisting(path) : !GameFileExists(path)) {
 			continue;
 		}
-		// Common::File reads a member of an archive by its virtual path.
-		const auto  path = IsArchivePath(entry.game.folder) ? Common::MakeArchivePath(entry.game.folder, inner) : entry.game.folder / inner;
 		GamePackage package;
 		package.label   = label;
 		package.package = Trophies::LoadPackage(path, language);
