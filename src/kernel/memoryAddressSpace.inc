@@ -834,6 +834,31 @@ public:
 	}
 
 
+	// The emulator could not get memory: the app is at its limit, which the guest shares with the GPU and the heap. Windows of the guest's
+	// memory leave for the store on the spot, the coldest first, as for a failed commit (Regions::MakeRoom), about `size` bytes of them. The
+	// lock is only tried, for up to a second: the caller may hold it itself (a host copy holds it shared), and then nothing leaves. Returns the
+	// bytes that left.
+	uint64_t MakeRoomForHost(uint64_t size) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		if (!m_lazy_enabled) {
+			return 0;
+		}
+		std::unique_lock lock(m_lazy_mutex, std::defer_lock);
+		for (int attempt = 0; !lock.try_lock(); ++attempt) {
+			if (attempt >= 1000) {
+				return 0;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		constexpr uint64_t kWindow = Xbox::Lazy::Regions::kWindow;
+		LazyHost           host;
+		return m_lazy.MakeRoom((size + kWindow - 1) / kWindow, host) * kWindow;
+#else
+		(void)size;
+		return 0;
+#endif
+	}
+
 	// The guest memory totals the overlay shows (GuestMemoryTotals in memory.h).
 	GuestMemoryTotals GetTotals() {
 		GuestMemoryTotals totals;
