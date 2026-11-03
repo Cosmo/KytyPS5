@@ -40,6 +40,12 @@ struct ImageResource {
 	// Placed on the memory of resources[0], with its description in another family's format (Config::SharedFormatAliases): the two
 	// hold the same bytes, and switching from one to the other is an aliasing barrier. `allocation` is null; the resource is its own.
 	bool                               shared = false;
+	// A view in an uncompressed format of the same block size on a block-compressed image (Vulkan's block-texel views, which a compute
+	// shader uses to write compressed blocks): one texel per block, so it is `width` x `height` at level 0, the image's size in blocks,
+	// and copies between it and the image's own resource go block for texel.
+	bool                               block_view = false;
+	uint32_t                           width      = 0;
+	uint32_t                           height     = 0;
 };
 
 // The descriptors of one view, created when first needed. The shared view cache normalizes
