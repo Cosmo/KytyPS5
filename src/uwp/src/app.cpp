@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/frameDump.h"
 #include "overlay.h"
 #include "settingsPage.h"
+#include "systemDialog.h"
 #include "trophiesPage.h"
 #include "trophyToast.h"
 #include "controlsPage.h"
@@ -569,7 +570,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 			set_view(MenuView::Entries);
 		}
 		menu.Visibility(open ? xaml::Visibility::Visible : xaml::Visibility::Collapsed);
-		PauseGameInput(open || GameKeyboardShown());
+		PauseGameInput(open || GameKeyboardShown() || SystemDialogShown());
 		if (open) {
 			set_view(MenuView::Entries);
 			menu.UpdateLayout();
@@ -580,14 +581,17 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 
 	// A game asking for text: the box for it goes over the game and the overlay, under the menu; the game's input is paused while it shows.
 	page.Children().IndexOf(menu, menu_index);
-	SetUpGameKeyboard(page, menu_index, [is_open](bool shown) { PauseGameInput(shown || is_open()); });
+	SetUpGameKeyboard(page, menu_index, [is_open](bool shown) { PauseGameInput(shown || SystemDialogShown() || is_open()); });
+	// A system dialog the game waits for (the PlayStation Network sign-in, an error): the same, its box over the keyboard's.
+	page.Children().IndexOf(menu, menu_index);
+	SetUpSystemDialog(page, menu_index, [is_open](bool shown) { PauseGameInput(shown || GameKeyboardShown() || is_open()); });
 
 	// A trophy notification selected during the game: the trophy's details over it, the game's input paused while they show (and after them
 	// while the menu is open).
 	g_trophy_over_game = [is_open](const TrophyLink& link) {
 		PauseGameInput(true);
 		ShowTrophyDetails(link.title_id, link.name, [is_open] {
-			if (!is_open() && !GameKeyboardShown()) {
+			if (!is_open() && !GameKeyboardShown() && !SystemDialogShown()) {
 				PauseGameInput(false);
 			}
 		});
@@ -658,7 +662,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 	});
 	winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread().KeyDown(
 	    [show, is_open, toggle_overlay](auto const&, winrt::Windows::UI::Core::KeyEventArgs const& args) {
-		    if (args.VirtualKey() == winrt::Windows::System::VirtualKey::Escape && !is_open() && !GameKeyboardShown()) {
+		    if (args.VirtualKey() == winrt::Windows::System::VirtualKey::Escape && !is_open() && !GameKeyboardShown() && !SystemDialogShown()) {
 			    args.Handled(true);
 			    show(true);
 		    } else if (args.VirtualKey() == winrt::Windows::System::VirtualKey::F3) {
