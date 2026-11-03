@@ -32,6 +32,19 @@ struct GraphicContext {
 	[[nodiscard]] const char* DeviceName() const { return device_name.c_str(); }
 
 	void                   LogMemoryBudget() const;
+	// A resource of about `size` bytes that `create` (returning its HRESULT) could not create for lack of memory: the app's limit, which lazy
+	// guest memory shares on the Xbox. Some of the guest's memory leaves for the pager's store (LibKernel::Memory::MakeRoomForHost) and it is
+	// tried again, until it is created or nothing more can leave.
+	template <typename Create>
+	[[nodiscard]] auto CreateMakingRoom(uint64_t size, Create&& create) const {
+		auto result = create();
+		for (int attempt = 0; result == static_cast<decltype(result)>(0x8007000EL) && attempt < 16 && MakeRoomForResource(size); ++attempt) {
+			result = create();
+		}
+		return result;
+	}
+	// (CreateMakingRoom) Whether some of the guest's memory could leave to make room for `size` bytes.
+	[[nodiscard]] bool     MakeRoomForResource(uint64_t size) const;
 	// Debugging: where the GPU memory goes (the allocator's heaps by type); at most every 10 s.
 	void                   LogAllocatorMemory() const;
 	[[nodiscard]] bool     CanReportMemoryUsage() const noexcept { return adapter != nullptr; }

@@ -30,6 +30,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <shared_mutex>
 #include <span>
 #include <stop_token>
@@ -992,6 +993,37 @@ bool HandleCommitFault(uint64_t fault_vaddr, bool is_write) noexcept {
 	return g_guest_address_space != nullptr && g_guest_address_space->HandleCommitFault(fault_vaddr, is_write);
 }
 
+uint64_t MakeRoomForHost(uint64_t size) {
+	return g_guest_address_space != nullptr ? g_guest_address_space->MakeRoomForHost(size) : 0;
+}
+
+// (MakeRoomForNew) operator new fails as without the new handler.
+[[noreturn]] static void NoRoomForNew() {
+#if defined(__cpp_exceptions)
+	throw std::bad_alloc();
+#else
+	std::abort(); // (as operator new itself, without exceptions)
+#endif
+}
+
+// operator new found no memory: some of the guest's memory makes room and new tries again; when nothing could leave, it fails as before
+// (std::bad_alloc). Not for an allocation this thread makes while making room.
+static void MakeRoomForNew() {
+	constexpr uint64_t       kRoom        = uint64_t {64} << 20u;
+	static thread_local bool making_room  = false;
+	if (making_room || g_guest_address_space == nullptr) {
+		NoRoomForNew();
+	}
+	struct Guard {
+		Guard() { making_room = true; }
+		~Guard() { making_room = false; }
+		KYTY_CLASS_NO_COPY(Guard);
+	} guard;
+	if (g_guest_address_space->MakeRoomForHost(kRoom) == 0) {
+		NoRoomForNew();
+	}
+}
+
 bool EnsureGuestCommitted(uint64_t vaddr, uint64_t size) {
 	return g_guest_address_space == nullptr || g_guest_address_space->EnsureCommitted(vaddr, size);
 }
@@ -1146,9 +1178,13 @@ void Initialize() {
 	g_virtual_ranges      = std::make_unique<VirtualRanges>();
 	EXIT_IF(!g_guest_address_space->SelfTest());
 	EXIT_IF(!SelfTestSub64SharedPlaceholderAlias());
+	if (g_guest_address_space->LazyEnabled()) {
+		std::set_new_handler(MakeRoomForNew);
+	}
 }
 
 void Shutdown() {
+	std::set_new_handler(nullptr);
 	g_pooled_memory.reset();
 	g_flexible_memory.reset();
 	g_physical_memory.reset();

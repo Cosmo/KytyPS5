@@ -385,9 +385,9 @@ uint32_t Image::ResourceIndex(vk::Format view_format) {
 			return static_cast<uint32_t>(backing.resources.size() - 1);
 		}
 	}
-	const auto result = m_graphics.allocator->CreateResource(&allocation, &desc, initial, nullptr,
-	                                                         &resource.allocation, IID_NULL,
-	                                                         nullptr);
+	const auto result = m_graphics.CreateMakingRoom(m_graphics.device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes, [&]() {
+		return m_graphics.allocator->CreateResource(&allocation, &desc, initial, nullptr, &resource.allocation, IID_NULL, nullptr);
+	});
 	if (FAILED(result)) {
 		m_graphics.LogMemoryBudget();
 		EXIT("D3D12: failed to create image: extent=%ux%ux%u format=%d family=%d layers=%u "
@@ -565,7 +565,9 @@ void Image::UseCopy(CommandBuffer& command, ImageViewDescriptors& view, uint32_t
 			allocation.CustomPool = m_graphics.cpu_texture_pool;
 		}
 		const auto initial = copy.cpu_written ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_COPY_DEST;
-		const auto result  = m_graphics.allocator->CreateResource(&allocation, &desc, initial, nullptr, &copy.allocation, IID_NULL, nullptr);
+		const auto result  = m_graphics.CreateMakingRoom(m_graphics.device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes, [&]() {
+			return m_graphics.allocator->CreateResource(&allocation, &desc, initial, nullptr, &copy.allocation, IID_NULL, nullptr);
+		});
 		if (FAILED(result)) {
 			m_graphics.LogMemoryBudget();
 			EXIT("D3D12: failed to create the copy of an image view: %ux%u, %u levels, %u layers, format %d, HRESULT=0x%08x\n", width,
