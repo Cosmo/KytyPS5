@@ -990,8 +990,27 @@ bool HandleCommitFault(uint64_t fault_vaddr, bool is_write) noexcept {
 	return g_guest_address_space != nullptr && g_guest_address_space->HandleCommitFault(fault_vaddr, is_write);
 }
 
+// Heap kept back for making room (MakeRoomForNew): when the app is at its limit, the heap is full too, and evicting guest memory needs a little
+// of it (the pager's map of evicted windows). Taken with malloc, which does not call the new handler; back once room was made.
+static std::atomic<void*> g_heap_reserve {nullptr};
+constexpr size_t          kHeapReserve = size_t {32} << 20u;
+
+static void RefillHeapReserve() {
+	if (g_heap_reserve.load(std::memory_order_relaxed) == nullptr) {
+		void* block = std::malloc(kHeapReserve);
+		void* none  = nullptr;
+		if (block != nullptr && !g_heap_reserve.compare_exchange_strong(none, block)) {
+			std::free(block);
+		}
+	}
+}
+
 uint64_t MakeRoomForHost(uint64_t size) {
-	return g_guest_address_space != nullptr ? g_guest_address_space->MakeRoomForHost(size) : 0;
+	const uint64_t freed = g_guest_address_space != nullptr ? g_guest_address_space->MakeRoomForHost(size) : 0;
+	if (freed != 0) {
+		RefillHeapReserve();
+	}
+	return freed;
 }
 
 // (MakeRoomForNew) operator new fails as without the new handler.
@@ -1003,11 +1022,15 @@ uint64_t MakeRoomForHost(uint64_t size) {
 #endif
 }
 
-// operator new found no memory: some of the guest's memory makes room and new tries again; when nothing could leave, it fails as before
-// (std::bad_alloc). Not for an allocation this thread makes while making room.
+// operator new found no memory: the heap reserve goes back first; then some of the guest's memory makes room and new tries again; when
+// nothing could leave, it fails as before (std::bad_alloc). Not for an allocation this thread makes while making room.
 static void MakeRoomForNew() {
 	constexpr uint64_t       kRoom        = uint64_t {64} << 20u;
 	static thread_local bool making_room  = false;
+	if (void* reserve = g_heap_reserve.exchange(nullptr); reserve != nullptr) {
+		std::free(reserve);
+		return;
+	}
 	if (making_room || g_guest_address_space == nullptr) {
 		NoRoomForNew();
 	}
@@ -1016,7 +1039,7 @@ static void MakeRoomForNew() {
 		~Guard() { making_room = false; }
 		KYTY_CLASS_NO_COPY(Guard);
 	} guard;
-	if (g_guest_address_space->MakeRoomForHost(kRoom) == 0) {
+	if (MakeRoomForHost(kRoom) == 0) {
 		NoRoomForNew();
 	}
 }
@@ -1175,12 +1198,14 @@ void Initialize() {
 	EXIT_IF(!g_guest_address_space->SelfTest());
 	EXIT_IF(!SelfTestSub64SharedPlaceholderAlias());
 	if (g_guest_address_space->LazyEnabled()) {
+		RefillHeapReserve();
 		std::set_new_handler(MakeRoomForNew);
 	}
 }
 
 void Shutdown() {
 	std::set_new_handler(nullptr);
+	std::free(g_heap_reserve.exchange(nullptr));
 	g_pooled_memory.reset();
 	g_flexible_memory.reset();
 	g_physical_memory.reset();
