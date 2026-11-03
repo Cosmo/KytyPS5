@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/d3d12/gpuTrace.h"
 #include "graphics/host_gpu/d3d12/selfTest.h"
 #include "graphics/shader/recompiler/HostShaderFeatures.h"
+#include "kernel/memory.h"
 
 #include <D3D12MemAlloc.h>
 #include <algorithm>
@@ -456,6 +457,18 @@ void GraphicContext::LogMemoryBudget() const {
 	const auto info = LocalMemory(adapter);
 	LOGF("D3D12 local memory: usage=%" PRIu64 ", budget=%" PRIu64 "\n", info.CurrentUsage,
 	     info.Budget);
+}
+
+bool GraphicContext::MakeRoomForResource(uint64_t size) const {
+	// (and a margin: the allocator takes whole blocks of its heaps)
+	constexpr uint64_t kMargin = uint64_t {64} << 20u;
+	const auto         freed   = LibKernel::Memory::MakeRoomForHost(size + kMargin);
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+		Log::WriteToConsoleAndLog(fmt::format("D3D12: no memory for a {} MB resource: {} MB of guest memory went to the swap file\n", size >> 20u,
+		                                      freed >> 20u));
+	}
+	return freed != 0;
 }
 
 void GraphicContext::LogAllocatorMemory() const {
