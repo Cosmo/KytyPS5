@@ -148,6 +148,10 @@ void                   InstallGpuResources(Graphics::RenderContext* renderer) no
 [[nodiscard]] bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept;
 // Xbox fork (T3): commit the window of a lazily committed page that was touched; false when the fault is not a commit fault.
 [[nodiscard]] bool HandleCommitFault(uint64_t fault_vaddr, bool is_write) noexcept;
+// The emulator could not get memory (with lazy guest memory the app's limit is shared with the guest): about `size` bytes of the guest's memory
+// leave for the pager's store, so that the allocation can be tried again. Returns the bytes that left (0: none could, or lazy memory is off). The
+// heap's operator new does this on its own (its new handler).
+[[nodiscard]] uint64_t MakeRoomForHost(uint64_t size);
 // Xbox fork (T3): commit the lazy windows of a range before a host call writes into it.
 bool EnsureGuestCommitted(uint64_t vaddr, uint64_t size);
 // Xbox fork (debugging the pager): what happened to the guest memory windows that these values point into (printed when the game crashes).
