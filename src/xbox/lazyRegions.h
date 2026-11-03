@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <new>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -568,9 +569,10 @@ public:
 			return false;
 		}
 		// The window is marked as in the store before it is decommitted: whoever finds it decommitted (a host copy that sees reserved pages) must
-		// also see that it is not a window that was never used, which reads as zero.
-		m_flags.Store(window, kEvicted);
+		// also see that it is not a window that was never used, which reads as zero. (The map entry first: under a full heap its insert is
+		// what fails, and then nothing has changed yet.)
 		m_evicted[window] = slot;
+		m_flags.Store(window, kEvicted);
 		host.Decommit(window << kWindowBits, kWindow, r->committed[window - (r->start >> kWindowBits)] == 2);
 		r->committed[window - (r->start >> kWindowBits)] = 0;
 		return true;
@@ -623,6 +625,8 @@ public:
 		return done;
 	}
 	[[nodiscard]] uint64_t RoomEvicted() const { return m_room_evicted.load(std::memory_order_relaxed); }
+	// Why on-the-spot evictions (MakeRoom) failed so far: the protection, the copy to the store, the heap (the map entry).
+	[[nodiscard]] std::array<uint64_t, 3> RoomFailures() const { return m_room_failures; }
 
 	// Is the window a view of a section of its own (it came back from the store and is still there)? Under the caller's lock.
 	[[nodiscard]] bool IsView(uint64_t window) const {
@@ -846,15 +850,29 @@ private:
 			m_flags.Or(window, kEvicting); // before the protection: a fault it causes must find the flag
 			if (!host.Protect(window << kWindowBits, kWindow, Mode::Read)) {
 				m_flags.And(window, static_cast<uint8_t>(~kEvicting));
+				m_room_failures[0]++;
 				return false;
 			}
 		}
 		uint32_t slot = 0;
 		if (!host.Spill(window, window << kWindowBits, kWindow, slot)) {
 			Touch(window, host); // read-write again
+			m_room_failures[1]++;
 			return false;
 		}
-		if (!CommitEvict(window, slot, host)) {
+		bool evicted = false;
+#if defined(__cpp_exceptions)
+		try {
+			evicted = CommitEvict(window, slot, host);
+		} catch (const std::bad_alloc&) {
+			// the heap is full too (the map entry): the window stays, read-write again
+			Touch(window, host);
+			m_room_failures[2]++;
+		}
+#else
+		evicted = CommitEvict(window, slot, host);
+#endif
+		if (!evicted) {
 			host.FreeSlot(slot);
 			return false;
 		}
@@ -864,6 +882,7 @@ private:
 	static constexpr uint64_t kRoomWindows = 128; // 8 MiB: what one failed commit makes room for
 	uint64_t                  m_room_hand    = 0;
 	std::atomic<uint64_t>     m_room_evicted {0};
+	std::array<uint64_t, 3>   m_room_failures {}; // (RoomFailures; under the caller's lock)
 };
 
 } // namespace Xbox::Lazy

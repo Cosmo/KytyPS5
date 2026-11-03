@@ -850,9 +850,20 @@ public:
 			}
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
-		constexpr uint64_t kWindow = Xbox::Lazy::Regions::kWindow;
+		constexpr uint64_t kWindow  = Xbox::Lazy::Regions::kWindow;
+		const uint64_t     wanted   = (size + kWindow - 1) / kWindow;
+		const auto         before   = m_lazy.RoomFailures();
 		LazyHost           host;
-		return m_lazy.MakeRoom((size + kWindow - 1) / kWindow, host) * kWindow;
+		const uint64_t     done     = m_lazy.MakeRoom(wanted, host);
+		const auto         failures = m_lazy.RoomFailures();
+		static std::atomic<uint32_t> logged {0};
+		if (done < wanted && logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+			PagerLog("\t pager: room for the emulator: %" PRIu64 " of %" PRIu64 " windows left; failed: protection %" PRIu64 ", swap file %" PRIu64
+			         ", heap %" PRIu64 "; guest resident %" PRIu64 " MB\n",
+			         done, wanted, failures[0] - before[0], failures[1] - before[1], failures[2] - before[2],
+			         Xbox::Lazy::GetCounters().committed.load() >> 20u);
+		}
+		return done * kWindow;
 #else
 		(void)size;
 		return 0;
