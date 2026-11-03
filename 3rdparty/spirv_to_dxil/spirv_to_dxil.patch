@@ -150,6 +150,21 @@ index 309c5d2..27e26d0 100644
  bool dxil_nir_lower_sysval_to_load_input(nir_shader *s, nir_variable **sysval_vars);
  bool dxil_nir_lower_vs_vertex_conversion(nir_shader *s, enum pipe_format target_formats[]);
  
+diff --git a/src/microsoft/compiler/dxil_nir_algebraic.py b/src/microsoft/compiler/dxil_nir_algebraic.py
+index ef4ffe0..e12e55f 100644
+--- a/src/microsoft/compiler/dxil_nir_algebraic.py
++++ b/src/microsoft/compiler/dxil_nir_algebraic.py
+@@ -101,6 +101,10 @@ algebraic_ops = [
+ no_16bit_conv += [
+   (('f2f32', ('u2u16', 'a@32')), ('unpack_half_x_dxil', a)),
+   (('u2u32', ('f2f16_rtz', 'a@32')), ('pack_half_2x16_split', 'a', 0)),
++  # nir_opt_algebraic folds f2u32(f2f32(a@16)) to f2u32(a): a half unpacked to a float and converted to an integer then
++  # needs a 16-bit float conversion.
++  (('f2u32', ('u2u16', 'a@32')), ('f2u32', ('unpack_half_x_dxil', a))),
++  (('f2i32', ('u2u16', 'a@32')), ('f2i32', ('unpack_half_x_dxil', a))),
+ ]
+ 
+ def main():
 diff --git a/src/microsoft/compiler/dxil_signature.c b/src/microsoft/compiler/dxil_signature.c
 index 0219e54..18cb485 100644
 --- a/src/microsoft/compiler/dxil_signature.c
