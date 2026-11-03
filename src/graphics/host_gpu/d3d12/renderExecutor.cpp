@@ -40,11 +40,31 @@ std::string DescribeDispatch(const PipelineCache::Pipeline& pipeline, const Prep
 }
 
 // A raw view of `binding`: a UAV, or an SRV used in `read_state` for buffers the shader only
-// reads.
+// reads. A binding without a buffer (a guest buffer of no memory, which upstream binds as a Vulkan
+// null descriptor) gets a null view: it reads zeros and drops writes.
 void WriteRawView(ID3D12Device* device, const BufferBinding& binding,
                   D3D12_CPU_DESCRIPTOR_HANDLE destination, CommandBuffer& command,
                   std::optional<D3D12_RESOURCE_STATES> read_state = {}) {
-	EXIT_IF(binding.buffer == nullptr || binding.offset % 16 != 0);
+	if (binding.buffer == nullptr) {
+		if (read_state) {
+			D3D12_SHADER_RESOURCE_VIEW_DESC view {};
+			view.Format                  = DXGI_FORMAT_R32_TYPELESS;
+			view.ViewDimension           = D3D12_SRV_DIMENSION_BUFFER;
+			view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			view.Buffer.NumElements      = 1;
+			view.Buffer.Flags            = D3D12_BUFFER_SRV_FLAG_RAW;
+			device->CreateShaderResourceView(nullptr, &view, destination);
+			return;
+		}
+		D3D12_UNORDERED_ACCESS_VIEW_DESC view {};
+		view.Format             = DXGI_FORMAT_R32_TYPELESS;
+		view.ViewDimension      = D3D12_UAV_DIMENSION_BUFFER;
+		view.Buffer.NumElements = 1;
+		view.Buffer.Flags       = D3D12_BUFFER_UAV_FLAG_RAW;
+		device->CreateUnorderedAccessView(nullptr, nullptr, &view, destination);
+		return;
+	}
+	EXIT_IF(binding.offset % 16 != 0);
 	const auto& buffer    = *binding.buffer;
 	const auto  available = buffer.Size() - binding.offset;
 	const auto  size = binding.range == UINT64_MAX ? available : std::min(binding.range, available);
