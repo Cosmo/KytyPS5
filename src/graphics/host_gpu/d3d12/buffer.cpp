@@ -57,8 +57,9 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	desc.SampleDesc.Count = 1;
 	desc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 	desc.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-	const auto result     = graphics.allocator->CreateResource(
-        &allocation, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, &m_allocation, IID_NULL, nullptr);
+	const auto result = graphics.CreateMakingRoom(size, [&]() {
+		return graphics.allocator->CreateResource(&allocation, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, &m_allocation, IID_NULL, nullptr);
+	});
 	if (FAILED(result)) {
 		graphics.LogMemoryBudget();
 		EXIT("D3D12: failed to create a %" PRIu64 "-byte buffer, HRESULT=0x%08" PRIx32 "\n",
