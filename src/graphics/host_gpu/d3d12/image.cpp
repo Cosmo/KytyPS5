@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cinttypes>
 #include <cmath>
 #include <fmt/format.h>
@@ -154,6 +155,19 @@ struct CopyBlock {
 	}
 	const auto extent = vk::blockExtent(format);
 	return {vk::blockSize(format), extent[0], extent[1]};
+}
+
+// The copy block of one of an image's resources: a block view's texel is a block of the image (ImageResource::block_view).
+[[nodiscard]] CopyBlock ResourceCopyBlock(const ImageBacking& backing, uint32_t resource, vk::ImageAspectFlags aspect) {
+	const auto block = GetCopyBlock(backing.format, aspect);
+	return backing.resources[resource].block_view ? CopyBlock {block.bytes} : block;
+}
+
+// The extent of a level of one of an image's resources (a block view's in blocks).
+[[nodiscard]] vk::Extent3D LevelExtent(const ImageBacking& backing, uint32_t resource, uint32_t level) {
+	const auto& target = backing.resources[resource];
+	return {std::max((target.block_view ? target.width : backing.extent.width) >> level, 1u),
+	        std::max((target.block_view ? target.height : backing.extent.height) >> level, 1u), std::max(backing.extent.depth >> level, 1u)};
 }
 
 void SetDebugName(ID3D12Resource* resource, const std::string& name) {
@@ -326,6 +340,19 @@ uint32_t Image::ResourceIndex(vk::Format view_format) {
 	}
 	desc.Width            = backing.extent.width;
 	desc.Height           = backing.extent.height;
+	// A view in an uncompressed format of a block-compressed image, of its block size: a block view (ImageResource::block_view), the
+	// image's size in blocks. (With the image's levels: where the blocks would allow fewer, it is wider.)
+	const auto image_block = vk::blockExtent(backing.format);
+	const bool block_view  = !backing.resources.empty() && backing.image_type == vk::ImageType::e2D && image_block[0] * image_block[1] > 1 &&
+	                        vk::blockSize(view_format) == vk::blockSize(backing.format) && vk::blockExtent(view_format)[0] == 1 &&
+	                        vk::blockExtent(view_format)[1] == 1;
+	if (block_view) {
+		desc.Width  = DivCeil(backing.extent.width, image_block[0]);
+		desc.Height = DivCeil(backing.extent.height, image_block[1]);
+		if (std::bit_width(std::max<uint64_t>(desc.Width, desc.Height)) < static_cast<int>(backing.mip_levels)) {
+			desc.Width = uint64_t {1} << (backing.mip_levels - 1);
+		}
+	}
 	desc.DepthOrArraySize = static_cast<UINT16>(
 	    backing.image_type == vk::ImageType::e3D ? backing.extent.depth : backing.layers);
 	desc.MipLevels        = static_cast<UINT16>(backing.mip_levels);
@@ -393,6 +420,9 @@ uint32_t Image::ResourceIndex(vk::Format view_format) {
 		     static_cast<uint32_t>(result));
 	}
 	resource.resource      = resource.allocation->GetResource();
+	resource.block_view    = block_view;
+	resource.width         = static_cast<uint32_t>(desc.Width);
+	resource.height        = desc.Height;
 	resource.needs_discard =
 	    initial != D3D12_RESOURCE_STATE_COMMON && resource.allocation->GetHeap() != nullptr;
 	resource.states.assign(backing.SubresourceCount(), initial);
@@ -492,14 +522,19 @@ void Image::Synchronize(CommandBuffer& command, uint32_t resource) {
 	const auto source = backing.current;
 	EXIT_IF(source == resource);
 	std::vector<vk::ImageCopy> copies;
-	const auto                 aspect = FullAspectMask(backing.format) & ~vk::ImageAspectFlagBits::eStencil;
+	const auto                 aspect     = FullAspectMask(backing.format) & ~vk::ImageAspectFlagBits::eStencil;
+	const auto                 from_block = ResourceCopyBlock(backing, source, aspect);
+	const auto                 to_block   = ResourceCopyBlock(backing, resource, aspect);
 	for (uint32_t level = 0; level < backing.mip_levels; level++) {
+		// In the source's texels (a block view's are blocks), no more blocks than the destination holds.
+		const auto from = LevelExtent(backing, source, level);
+		const auto to   = LevelExtent(backing, resource, level);
 		vk::ImageCopy copy {};
 		copy.srcSubresource = {aspect, level, 0, backing.layers};
 		copy.dstSubresource = copy.srcSubresource;
-		copy.extent         = {std::max(backing.extent.width >> level, 1u),
-		                       std::max(backing.extent.height >> level, 1u),
-		                       std::max(backing.extent.depth >> level, 1u)};
+		copy.extent         = {std::min<uint32_t>(from.width, static_cast<uint32_t>(DivCeil(to.width, to_block.width)) * from_block.width),
+		                       std::min<uint32_t>(from.height, static_cast<uint32_t>(DivCeil(to.height, to_block.height)) * from_block.height),
+		                       from.depth};
 		copies.push_back(copy);
 	}
 	CopyContents(command, *this, source, resource, copies);
@@ -508,6 +543,11 @@ void Image::Synchronize(CommandBuffer& command, uint32_t resource) {
 
 void Image::Use(CommandBuffer& command, uint32_t state, std::optional<ImageSubresourceRange> range,
                 std::optional<ImageViewHandle> view) {
+	if (!view && backing.resources[backing.current].block_view) {
+		// The image as a whole (its copies, uploads and downloads) is in its own format: a block view's contents go back first.
+		Synchronize(command, 0);
+		backing.current = 0;
+	}
 	const auto resource = view ? backing.views[view->index].resource : backing.current;
 	Synchronize(command, resource);
 	// Shaders read a CopiedView from its copy; copies and targets use the image itself.
@@ -530,15 +570,15 @@ void Image::UseCopy(CommandBuffer& command, ImageViewDescriptors& view, uint32_t
 	auto&       copy   = view.copy;
 	auto&       from   = backing.resources[view.resource];
 	const bool  volume = backing.image_type == vk::ImageType::e3D;
-	const auto  width  = std::max(backing.extent.width >> info.base_level, 1u);
-	const auto  height = std::max(backing.extent.height >> info.base_level, 1u);
+	const auto  width  = LevelExtent(backing, view.resource, info.base_level).width;
+	const auto  height = LevelExtent(backing, view.resource, info.base_level).height;
 	// The copy's subresources: its levels are the view's, its layers the view's layers (or slices); the planes as the image's.
 	const auto subresource = [&](uint32_t level, uint32_t layer, uint32_t plane) {
 		return level + (layer + plane * info.layer_count) * info.level_count;
 	};
 	if (copy.resource == nullptr) {
 		// A block-compressed texture's size is whole blocks (a level of the image can be smaller).
-		const auto block = GetCopyBlock(backing.format, vk::ImageAspectFlagBits::eColor);
+		const auto block = ResourceCopyBlock(backing, view.resource, vk::ImageAspectFlagBits::eColor);
 		EXIT_NOT_IMPLEMENTED(width % block.width != 0 || height % block.height != 0);
 		EXIT_NOT_IMPLEMENTED(volume && info.level_count != 1);
 		D3D12_RESOURCE_DESC desc {};
@@ -593,7 +633,7 @@ void Image::UseCopy(CommandBuffer& command, ImageViewDescriptors& view, uint32_t
 	};
 	if (copy.version != backing.version && copy.cpu_written) {
 		// Such an image only changes by the CPU's uploads (UploadWithCpu), which wait for the GPU.
-		const auto           block = GetCopyBlock(backing.format, vk::ImageAspectFlagBits::eColor);
+		const auto           block = ResourceCopyBlock(backing, view.resource, vk::ImageAspectFlagBits::eColor);
 		std::vector<uint8_t> data;
 		for (uint32_t level = 0; level < info.level_count; level++) {
 			const uint64_t row_pitch   = DivCeil(std::max(width >> level, 1u), block.width) * block.bytes;
@@ -1197,8 +1237,8 @@ void Image::CopyContents(CommandBuffer& command, Image& source, uint32_t source_
 		                       ? 1u
 		                       : std::max(copy.srcSubresource.layerCount, copy.dstSubresource.layerCount);
 		const auto depth = source_volume && destination_volume ? copy.extent.depth : 1u;
-		const auto block = GetCopyBlock(source.backing.format, copy.srcSubresource.aspectMask);
-		const auto destination_block = GetCopyBlock(backing.format, copy.dstSubresource.aspectMask);
+		const auto block             = ResourceCopyBlock(source.backing, source_resource, copy.srcSubresource.aspectMask);
+		const auto destination_block = ResourceCopyBlock(backing, destination_resource, copy.dstSubresource.aspectMask);
 		EXIT_NOT_IMPLEMENTED(block.bytes != destination_block.bytes ||
 		                     (direct && (block.width != destination_block.width || block.height != destination_block.height)));
 		for (uint32_t i = 0; i < count; i++) {
