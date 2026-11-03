@@ -10,6 +10,7 @@ The D3D12 backend turns the SPIR-V that Kyty's shader recompiler makes into DXIL
 - mesh shaders (shader model 6.5; not available on the Xbox): output counts, per-vertex and per-primitive outputs, triangle indices, `SV_CullPrimitive`
 - fixes for DXIL validator 1.8 and for wave operations in helper lanes
 - Y and Z flips per viewport: a shader that writes the viewport index takes that viewport's bit of the flip masks
+- half to 32-bit integer conversions without 16-bit ops: NIR folds the shader's unpack to a float away, which left a 16-bit float conversion a device without 16-bit ops (the Xbox) rejects
 
 Build it once, with the static C runtime so that the DLL imports nothing a UWP app does not have (it imports only `KERNEL32.dll` and an API set):
 
