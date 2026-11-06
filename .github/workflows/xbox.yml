@@ -102,24 +102,15 @@ jobs:
           C:\msys64\usr\bin\bash.exe -lc 'pacman -Sy --noconfirm --needed mingw-w64-ucrt-x86_64-libwinpthread'
           if (-not (Test-Path $env:KYTY_WINPTHREAD_DLL)) { throw "missing $env:KYTY_WINPTHREAD_DLL" }
 
-      - name: Locate vcpkg
-        id: vcpkg
-        run: |
-          $port = Get-FileHash "$env:VCPKG_INSTALLATION_ROOT\ports\glslang\vcpkg.json" -Algorithm SHA256
-          "port_hash=$($port.Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
-
-      - name: Cache glslang
-        id: glslang-cache
-        uses: actions/cache@v4
-        with:
-          path: C:\vcpkg\installed\x64-windows
-          key: glslang-windows-2025-vs2026-${{ steps.vcpkg.outputs.port_hash }}-tools-opt
-
+      # The build only runs glslang's compiler, so it comes ready-made from Khronos. (Built with vcpkg it took 16 minutes, and as GitHub's caches
+      # are per branch, every new series built it again.)
       - name: glslang
         run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          if ('${{ steps.glslang-cache.outputs.cache-hit }}' -ne 'true') { vcpkg install glslang[tools,opt]:x64-windows }
-          "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\tools\glslang" >> $env:GITHUB_PATH
+          $zip = "$env:RUNNER_TEMP\glslang.zip"
+          Invoke-WebRequest https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne '82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b') { throw 'glslang: unexpected download' }
+          Expand-Archive $zip "$env:RUNNER_TEMP\glslang"
+          (Get-ChildItem "$env:RUNNER_TEMP\glslang" -Recurse -Filter glslang.exe | Select-Object -First 1).DirectoryName >> $env:GITHUB_PATH
 
       - name: Configure
         run: .\src\uwp\uwp.ps1 configure
