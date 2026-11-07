@@ -176,6 +176,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.texture_lod_bias            = settings.texture_lod_bias;
 		config.anisotropic_filtering       = settings.anisotropic_filtering;
 		config.gpu_memory_savings          = settings.gpu_memory_savings;
+		config.swap_pool_mb                = settings.swap_pool_mb;
 		config.video_decode_threads        = settings.video_decode_threads;
 		config.gpu_memory_log              = settings.gpu_memory_log;
 		config.gpu_crash_diagnostics       = settings.gpu_crash_diagnostics;
