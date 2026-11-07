@@ -2163,6 +2163,10 @@ int KYTY_SYSV_ABI PthreadAttrSetschedparam(PthreadAttr* attr, const KernelSchedP
 	} else {
 		pparam.sched_priority = 0;
 	}
+#if defined(KYTY_PLATFORM_UWP)
+	// All at normal priority: at +2, worker threads that fill every CPU starve whoever holds a kernel lock until Windows rescues it seconds later.
+	pparam.sched_priority = 0;
+#endif
 
 	if (pthread_attr_setschedparam(&attr_value->p, &pparam) != 0) {
 		return KERNEL_ERROR_EINVAL;
@@ -3518,6 +3522,10 @@ int KYTY_SYSV_ABI PthreadSetprio(Pthread thread, int prio) {
 	} else {
 		param.sched_priority = 0;
 	}
+#if defined(KYTY_PLATFORM_UWP)
+	// All at normal priority: at +2, worker threads that fill every CPU starve whoever holds a kernel lock until Windows rescues it seconds later.
+	param.sched_priority = 0;
+#endif
 
 	if (pthread_setschedparam(thread->p, pol, &param) != 0) {
 		return KERNEL_ERROR_EINVAL;
