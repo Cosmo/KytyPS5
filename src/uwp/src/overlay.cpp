@@ -7,6 +7,7 @@
 #include "settings.h"
 
 #include "common/compileActivity.h"
+#include "common/pipelinePrewarm.h"
 
 #include <windows.h>
 #include <fileapifromapp.h>
@@ -795,7 +796,9 @@ void GameOverlay::State::Update() {
 		drawing_shaders.Text(std::to_wstring(statistics->drawing_shaders));
 		compute_shaders.Text(std::to_wstring(statistics->compute_shaders));
 		new_shaders.Text(std::to_wstring(statistics->new_shaders));
-		pipelines.Text(std::to_wstring(statistics->pipelines));
+		// Pipelines the game used, and the ones built ahead for it.
+		const auto ready = Common::PipelinePrewarm::Detail::built.load();
+		pipelines.Text(std::to_wstring(statistics->pipelines) + (ready != 0 ? L" (" + std::to_wstring(ready) + L" ready)" : std::wstring()));
 		new_pipelines.Text(std::to_wstring(statistics->pipelines - std::min(statistics->cached_pipelines, statistics->pipelines)));
 		saved_pipelines.Text(std::to_wstring(statistics->saved_pipelines));
 	}
