@@ -1299,9 +1299,11 @@ public:
 		struct Swept {
 			uint64_t         window;
 			Clock::time_point at;
+			bool             convert = false; // swept to become private memory, not to leave
 		};
 		std::deque<Swept>    swept;
-		uint64_t             hand = 0;
+		uint64_t             hand      = 0;
+		uint64_t             view_hand = 0; // where the sweep for views to make private goes on
 		std::vector<uint8_t> copy(kWindow);
 		auto                 last_report = Clock::now();
 		uint64_t             previous[6] = {}; // swept, evicted, aborted, page ins, page in ns, written
@@ -1352,7 +1354,8 @@ public:
 			const uint64_t low = effective - effective / 16;
 			// 1. Windows swept a second ago: the ones nobody touched leave memory while the guest is above the low mark; the others are let go.
 			while (!swept.empty() && now - swept.front().at >= kDwell && !stop.stop_requested()) {
-				const uint64_t window = swept.front().window;
+				const uint64_t window  = swept.front().window;
+				const bool     convert = swept.front().convert;
 				swept.pop_front();
 				std::shared_lock copy_lock(m_copy_lock); // an unmap waits for us: the window is not freed while it is copied
 				LazyHost         host;
@@ -1363,7 +1366,8 @@ public:
 				bool       begun     = false;
 				{
 					std::lock_guard lock(m_lazy_mutex);
-					if (enough) {
+					// A window swept to become private memory never leaves: it becomes private, or stays as it is.
+					if (enough || convert) {
 						privatize = m_pager_mode != 1 && Xbox::Lazy::GetCounters().views.load(std::memory_order_relaxed) > view_cap && m_lazy.IsView(window);
 						if (!privatize) {
 							m_lazy.Touch(window, host);
@@ -1460,6 +1464,39 @@ public:
 					}
 				}
 				counters.swept += count;
+				// Too many views while the guest is over its budget (swapping hard): every window swept above leaves, the page-ins come back as views, and
+				// views pile up to the console's limit of mappings (~16800: page-ins fail). Cold views beyond the cap are swept as well, to become private
+				// memory: they stay in RAM.
+				if (over_budget && m_pager_mode != 1 && views_now > view_cap) {
+					const uint64_t convert_target = std::min<uint64_t>(static_cast<uint64_t>(views_now - view_cap), 8192);
+					uint64_t       converts       = 0;
+					bool           view_wrapped   = false;
+					while (converts < convert_target && !stop.stop_requested()) {
+						std::lock_guard lock(m_lazy_mutex);
+						LazyHost        host;
+						uint64_t        in_chunk = 0;
+						uint64_t        visited  = 0;
+						bool            any      = false;
+						m_lazy.ForEachFullWindow(view_hand, [&](uint64_t window) {
+							any       = true;
+							view_hand = window + 1;
+							if (m_lazy.IsView(window) && m_lazy.SweepIfCold(window, host)) {
+								swept.push_back({window, now, true});
+								++converts;
+								++in_chunk;
+							}
+							return ++visited >= 8192 || in_chunk >= kSweepChunk || converts >= convert_target;
+						});
+						if (!any) { // the end of the address space: start again at the top, once
+							if (view_wrapped) {
+								break;
+							}
+							view_wrapped = true;
+							view_hand    = 0;
+						}
+					}
+					counters.swept += converts;
+				}
 			}
 			if (now - last_report >= std::chrono::seconds(10)) {
 				size_t evicted_now = 0;
@@ -1477,6 +1514,17 @@ public:
 				    "Swap: {:.1f} GB in RAM (limit {:.1f} GB), {:.1f} GB in the file; last {:.0f} s: {} MB out, {} MB in{}\n", gigabytes(resident()),
 				    gigabytes(effective), gigabytes(evicted_now * kWindow), seconds, (current[5] - previous[5]) >> 20u, (page_ins * kWindow) >> 20u,
 				    page_ins != 0 ? fmt::format(" ({:.1f} ms each)", static_cast<double>(current[4] - previous[4]) / 1e6 / static_cast<double>(page_ins)) : std::string()));
+				{
+					// Views of sections (page-ins) against the cap and the console's limit of mappings.
+					static uint64_t last_private = 0;
+					const int64_t   views_count  = Xbox::Lazy::GetCounters().views.load(std::memory_order_relaxed);
+					const uint64_t  made_private = counters.privatized.load();
+					if (views_count > view_cap || made_private != last_private) {
+						Log::WriteToConsoleAndLog(fmt::format("Swap: {} views (cap {}, the console maps ~16800), {} made private in the last {:.0f} s\n", views_count,
+						                                      view_cap, made_private - last_private, seconds));
+					}
+					last_private = made_private;
+				}
 				// Problems, only when there were some.
 				const uint64_t problems[4] = {counters.errors.load(), counters.torn.load(), counters.corrupt.load(), counters.emergency.load()};
 				std::string    problem_text;
@@ -1673,6 +1721,15 @@ public:
 		}
 		std::shared_lock                           copy_lock(m_copy_lock);
 		std::vector<std::pair<uint64_t, uint64_t>> pieces;
+		// The pieces stay pinned for the copy: without the lock held, a window evicted on the spot (Regions::MakeRoom, a failed commit on another thread)
+		// would leave under the copy, and what was copied into it so far would be lost when it came back from the store.
+		std::vector<uint64_t> pins;
+		const auto            unpin = [&] {
+			std::lock_guard lock(m_lazy_mutex);
+			for (const auto pin: pins) {
+				m_lazy.TempUnpin(pin);
+			}
+		};
 		{
 			std::lock_guard lock(m_lazy_mutex);
 			LazyHost        host;
@@ -1683,7 +1740,11 @@ public:
 					cursor = std::min(end, m_lazy.NextStart(cursor));
 					continue;
 				}
+				pins.push_back(m_lazy.TempPin(cursor, length)); // (first: committing the next windows may evict)
 				if (!m_lazy.EnsureCommitted(cursor, length, host)) {
+					for (const auto pin: pins) {
+						m_lazy.TempUnpin(pin);
+					}
 					return false;
 				}
 				pieces.emplace_back(cursor, length);
@@ -1699,6 +1760,7 @@ public:
 				HostCopyToGuest(address, source, bytes);
 			}
 		}
+		unpin();
 		return true;
 #else
 		(void)vaddr;
