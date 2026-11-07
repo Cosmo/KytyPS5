@@ -147,6 +147,8 @@ struct ConfigOptions {
 	// filtering when it is off.
 	uint32_t texture_lod_bias      = 0;
 	bool     anisotropic_filtering = true;
+	// The size of the compressed pool in front of the pager's swap file, in MB; 0: none.
+	uint32_t swap_pool_mb = 0;
 	// GPU memory savings (a scratch buffer made when needed, committed small pool buffers, 16 MB allocator blocks) and the video decoder's threads: on in the UWP app, unless a
 	// setting turns them off for testing; off in the desktop build, which keeps upstream's behaviour.
 #if defined(KYTY_PLATFORM_UWP)
@@ -260,6 +262,7 @@ bool     TextureMipSkipUncompressed();
 uint32_t TextureLodBias();
 bool     AnisotropicFiltering();
 bool GpuMemorySavings();
+uint32_t SwapPoolMb();
 bool GpuMemoryLog();
 bool PipelineCacheAnyBuild();
 bool GpuCrashDiagnostics();

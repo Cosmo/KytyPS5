@@ -319,6 +319,10 @@ bool GpuMemorySavings() {
 	return g_config == nullptr || g_config->gpu_memory_savings;
 }
 
+uint32_t SwapPoolMb() {
+	return g_config != nullptr ? g_config->swap_pool_mb : 0;
+}
+
 bool GpuMemoryLog() {
 	return g_config != nullptr && g_config->gpu_memory_log;
 }
