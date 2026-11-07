@@ -131,6 +131,8 @@ struct AppSettings {
 	uint32_t frame_dump_snapshots = 0;
 	// The settings page, for testing: the GPU memory savings (Config::GpuMemorySavings) and the video decoder's threads (Config::VideoDecodeThreads). On.
 	bool gpu_memory_savings   = true;
+	// The size of the compressed pool in front of the swap file, in MB; 0: none (Config::SwapPoolMb).
+	uint32_t swap_pool_mb     = 0;
 	bool video_decode_threads = true;
 	// The settings page, Developer: the detailed memory report in the log every 10 seconds (GPU memory by kind, the pager's counters, the game's memory
 	// ranges; Config::GpuMemoryLog). Off: short lines only.
