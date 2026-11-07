@@ -105,6 +105,7 @@ AppSettings LoadSettings() {
 	read("frame_dump_after_s", settings.frame_dump_after_s);
 	read("frame_dump_snapshots", settings.frame_dump_snapshots);
 	read("gpu_memory_savings", settings.gpu_memory_savings);
+	read("swap_pool_mb", settings.swap_pool_mb);
 	read("video_decode_threads", settings.video_decode_threads);
 	read("gpu_memory_log", settings.gpu_memory_log);
 	read("gpu_crash_diagnostics", settings.gpu_crash_diagnostics);
@@ -184,6 +185,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["texture_lod_bias"]           = settings.texture_lod_bias;
 	json["anisotropic_filtering"]      = settings.anisotropic_filtering;
 	json["gpu_memory_savings"]         = settings.gpu_memory_savings;
+	json["swap_pool_mb"]               = settings.swap_pool_mb;
 	json["video_decode_threads"]       = settings.video_decode_threads;
 	json["gpu_memory_log"]             = settings.gpu_memory_log;
 	json["gpu_crash_diagnostics"]      = settings.gpu_crash_diagnostics;
