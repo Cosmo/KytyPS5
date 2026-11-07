@@ -888,6 +888,9 @@ public:
 			totals.swapped_in   = m_pager_store->counters.page_ins.load(std::memory_order_relaxed) * kWindow;
 			totals.swap_wait_ns = m_pager_store->counters.page_in_ns.load(std::memory_order_relaxed);
 			totals.pager        = true;
+			totals.pool_bytes   = m_pager_store->counters.pool_bytes.load(std::memory_order_relaxed);
+			totals.pool_hits    = m_pager_store->counters.pool_hits.load(std::memory_order_relaxed);
+			totals.pool_misses  = m_pager_store->counters.pool_misses.load(std::memory_order_relaxed);
 		}
 #endif
 		return totals;
@@ -1105,7 +1108,14 @@ public:
 			if (!store->Read(slot, 0, scratch, size)) {
 				EXIT("Memory: the pager could not read a window of guest memory back (slot %u)\n", slot);
 			}
-			if (!store->CheckChecksum(slot, Xbox::PagerStore::Checksum(scratch, size) ^ (window * 0x9E3779B97F4A7C15ull))) {
+			bool same = store->CheckChecksum(slot, Xbox::PagerStore::Checksum(scratch, size) ^ (window * 0x9E3779B97F4A7C15ull));
+			if (!same && store->pool_read != nullptr) {
+				// The file has the window as it was written.
+				store->counters.pool_bad++;
+				same = store->ReadFromFile(slot, scratch, size) &&
+				       store->CheckChecksum(slot, Xbox::PagerStore::Checksum(scratch, size) ^ (window * 0x9E3779B97F4A7C15ull));
+			}
+			if (!same) {
 				store->counters.corrupt++;
 				PagerLog("\t pager: slot %u came back different from what was written\n", slot);
 			}
@@ -1228,6 +1238,12 @@ public:
 		if (!store->Open(L"guest-store.tmp")) {
 			LOGF_COLOR(Log::Color::Red, "\t pager: could not create its store file, error %u: guest memory stays in memory\n", static_cast<uint32_t>(GetLastError()));
 			return;
+		}
+		if (const uint64_t pool_mb = Config::SwapPoolMb(); pool_mb != 0 && Xbox::StartPagerPool(pool_mb << 20u)) {
+			store->pool_put  = Xbox::PagerPoolPut;
+			store->pool_read = Xbox::PagerPoolRead;
+			store->pool_drop = Xbox::PagerPoolDrop;
+			Log::WriteToConsoleAndLog(fmt::format("Swap pool: on, up to {} MB of compressed windows in RAM\n", pool_mb));
 		}
 		m_pager_store = std::move(store);
 		g_pager_store.store(m_pager_store.get(), std::memory_order_release);
@@ -1514,6 +1530,17 @@ public:
 				    "Swap: {:.1f} GB in RAM (limit {:.1f} GB), {:.1f} GB in the file; last {:.0f} s: {} MB out, {} MB in{}\n", gigabytes(resident()),
 				    gigabytes(effective), gigabytes(evicted_now * kWindow), seconds, (current[5] - previous[5]) >> 20u, (page_ins * kWindow) >> 20u,
 				    page_ins != 0 ? fmt::format(" ({:.1f} ms each)", static_cast<double>(current[4] - previous[4]) / 1e6 / static_cast<double>(page_ins)) : std::string()));
+				if (m_pager_store->pool_read != nullptr && counters.pool_raw.load() != 0) {
+					// The compressed pool.
+					static uint64_t last_pool[4] = {};
+					const uint64_t  pool[4]      = {counters.pool_hits.load(), counters.pool_misses.load(), counters.pool_dropped.load(), counters.pool_skipped.load()};
+					const auto      hits         = pool[0] - last_pool[0];
+					const auto      misses       = pool[1] - last_pool[1];
+					Log::WriteToConsoleAndLog(fmt::format("Swap pool: {} MB holds {} MB; last {:.0f} s: {} reads from it, {} from the file, {} left it for room, {} not kept, {} bad\n",
+					                                      counters.pool_bytes.load() >> 20u, counters.pool_raw.load() >> 20u, seconds, hits, misses, pool[2] - last_pool[2],
+					                                      pool[3] - last_pool[3], counters.pool_bad.load()));
+					std::copy(std::begin(pool), std::end(pool), std::begin(last_pool));
+				}
 				{
 					// Views of sections (page-ins) against the cap and the console's limit of mappings.
 					static uint64_t last_private = 0;
