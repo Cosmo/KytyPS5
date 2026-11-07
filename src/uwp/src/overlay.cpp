@@ -65,7 +65,7 @@ constexpr size_t LOG_LINES    = 20;
 // The rates and the values per frame are over at least this many seconds.
 constexpr double RATE_SECONDS = 1.0;
 // The rows of the swap file in the statistics (OverlayMarkup): its group and its row in Waiting, and the gap above the group.
-constexpr std::array<int32_t, 4> SWAP_ROWS {16, 17, 18, 29};
+constexpr std::array<int32_t, 5> SWAP_ROWS {16, 17, 18, 19, 30};
 constexpr uint32_t               SWAP_GAP_ROW = 15;
 // The compile notice: how long the emulator has to compile (with gaps shorter than the grace) before it shows, and how long it stays after the
 // last compile.
@@ -167,6 +167,7 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
           <RowDefinition Height="8" />
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
@@ -184,9 +185,9 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
         <TextBlock Grid.Row="8" Text="System" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
         <TextBlock Grid.Row="11" Text="RAM" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
         <TextBlock Grid.Row="16" Text="Swap file" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="20" Text="Shaders" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="24" Text="Pipelines" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Grid.Row="28" Text="Waiting" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="21" Text="Shaders" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="25" Text="Pipelines" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Grid.Row="29" Text="Waiting" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
         <!-- Draws made per frame; draws skipped per frame as not supported here (with the last reason); the GPU's time per frame. -->
         <TextBlock Grid.Row="0" Grid.Column="1" Text="Draws" />
         <TextBlock Grid.Row="1" Grid.Column="1" Text="Skipped" />
@@ -204,21 +205,23 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
         <TextBlock Grid.Row="12" Grid.Column="1" Text="Game" />
         <TextBlock Grid.Row="13" Grid.Column="1" Text="GPU" />
         <TextBlock Grid.Row="14" Grid.Column="1" Text="Other" />
-        <!-- The game's memory in the swap file (not in RAM), written to it and read back from it. -->
+        <!-- The game's memory in the swap file (not in RAM), the compressed pool in RAM in front of it (its size and the share of reads it
+             served; - without one), and what was written to the file and read back from it. -->
         <TextBlock Grid.Row="16" Grid.Column="1" Text="Size" />
-        <TextBlock Grid.Row="17" Grid.Column="1" Text="Out" />
-        <TextBlock Grid.Row="18" Grid.Column="1" Text="In" />
+        <TextBlock Grid.Row="17" Grid.Column="1" Text="Pool" />
+        <TextBlock Grid.Row="18" Grid.Column="1" Text="Out" />
+        <TextBlock Grid.Row="19" Grid.Column="1" Text="In" />
         <!-- The game's shaders so far, and the shaders translated in this run (not taken from the cache an earlier run saved). -->
-        <TextBlock Grid.Row="20" Grid.Column="1" Text="Drawing" />
-        <TextBlock Grid.Row="21" Grid.Column="1" Text="Compute" />
-        <TextBlock Grid.Row="22" Grid.Column="1" Text="New" />
+        <TextBlock Grid.Row="21" Grid.Column="1" Text="Drawing" />
+        <TextBlock Grid.Row="22" Grid.Column="1" Text="Compute" />
+        <TextBlock Grid.Row="23" Grid.Column="1" Text="New" />
         <!-- The pipelines this run made, those of them not made from the cache, and the cache file's. -->
-        <TextBlock Grid.Row="24" Grid.Column="1" Text="This run" />
-        <TextBlock Grid.Row="25" Grid.Column="1" Text="New" />
-        <TextBlock Grid.Row="26" Grid.Column="1" Text="In cache" />
+        <TextBlock Grid.Row="25" Grid.Column="1" Text="This run" />
+        <TextBlock Grid.Row="26" Grid.Column="1" Text="New" />
+        <TextBlock Grid.Row="27" Grid.Column="1" Text="In cache" />
         <!-- The time per second the work stood still for compiling shaders and making pipelines, and for the swap file. -->
-        <TextBlock Grid.Row="28" Grid.Column="1" Text="Compiling" />
-        <TextBlock Grid.Row="29" Grid.Column="1" Text="Swap file" />
+        <TextBlock Grid.Row="29" Grid.Column="1" Text="Compiling" />
+        <TextBlock Grid.Row="30" Grid.Column="1" Text="Swap file" />
         <TextBlock x:Name="Draws" Grid.Row="0" Grid.Column="2" />
         <TextBlock x:Name="Skipped" Grid.Row="1" Grid.Column="2" />
         <TextBlock x:Name="GpuTime" Grid.Row="2" Grid.Column="2" />
@@ -232,16 +235,17 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
         <TextBlock x:Name="GpuMemory" Grid.Row="13" Grid.Column="2" />
         <TextBlock x:Name="OtherMemory" Grid.Row="14" Grid.Column="2" />
         <TextBlock x:Name="SwappedMemory" Grid.Row="16" Grid.Column="2" />
-        <TextBlock x:Name="SwapOut" Grid.Row="17" Grid.Column="2" />
-        <TextBlock x:Name="SwapIn" Grid.Row="18" Grid.Column="2" />
-        <TextBlock x:Name="DrawingShaders" Grid.Row="20" Grid.Column="2" />
-        <TextBlock x:Name="ComputeShaders" Grid.Row="21" Grid.Column="2" />
-        <TextBlock x:Name="NewShaders" Grid.Row="22" Grid.Column="2" />
-        <TextBlock x:Name="Pipelines" Grid.Row="24" Grid.Column="2" />
-        <TextBlock x:Name="NewPipelines" Grid.Row="25" Grid.Column="2" />
-        <TextBlock x:Name="SavedPipelines" Grid.Row="26" Grid.Column="2" />
-        <TextBlock x:Name="CompileWait" Grid.Row="28" Grid.Column="2" />
-        <TextBlock x:Name="SwapWait" Grid.Row="29" Grid.Column="2" />
+        <TextBlock x:Name="SwapPool" Grid.Row="17" Grid.Column="2" />
+        <TextBlock x:Name="SwapOut" Grid.Row="18" Grid.Column="2" />
+        <TextBlock x:Name="SwapIn" Grid.Row="19" Grid.Column="2" />
+        <TextBlock x:Name="DrawingShaders" Grid.Row="21" Grid.Column="2" />
+        <TextBlock x:Name="ComputeShaders" Grid.Row="22" Grid.Column="2" />
+        <TextBlock x:Name="NewShaders" Grid.Row="23" Grid.Column="2" />
+        <TextBlock x:Name="Pipelines" Grid.Row="25" Grid.Column="2" />
+        <TextBlock x:Name="NewPipelines" Grid.Row="26" Grid.Column="2" />
+        <TextBlock x:Name="SavedPipelines" Grid.Row="27" Grid.Column="2" />
+        <TextBlock x:Name="CompileWait" Grid.Row="29" Grid.Column="2" />
+        <TextBlock x:Name="SwapWait" Grid.Row="30" Grid.Column="2" />
       </Grid>
       <!-- Compact: the GPU's time per frame, RAM in use and the game's memory in the swap file (where there is one), as in Statistics. -->
       <Grid x:Name="Compact" ColumnSpacing="12" Visibility="Collapsed">
@@ -507,6 +511,7 @@ enum Stat : size_t {
 	STAT_OTHER,
 	// The game's memory in the swap file (not in RAM), written to it and read back from it per second, and the time the game waited for it.
 	STAT_SWAP_SIZE,
+	STAT_SWAP_POOL, // the compressed pool in RAM and the share of reads it served
 	STAT_SWAP_TRAFFIC,
 	STAT_SWAP_WAIT,
 	// I/O and audio: the game's file reads and writes per second, and the times its sound ran out before it gave more.
@@ -545,14 +550,14 @@ const std::array<std::vector<StatGroup>, 3>& DetailedPanels() {
 	      {{L"Direct", STAT_DIRECT}, {L"  Mapped", STAT_MAPPED}, {L"  Pool", STAT_POOL}, {L"Flexible", STAT_FLEXIBLE}, {L"Extended", STAT_EXTENDED},
 	       {L"Page table (2 MB)", STAT_PAGE_TABLE}}},
 	     {L"App memory", {{L"Used", STAT_USED}, {L"Game in RAM", STAT_GAME}, {L"Other", STAT_OTHER}}},
-	     {L"Swap file", {{L"Size", STAT_SWAP_SIZE}, {L"Out / in", STAT_SWAP_TRAFFIC}, {L"Waits", STAT_SWAP_WAIT}}},
+	     {L"Swap file", {{L"Size", STAT_SWAP_SIZE}, {L"Pool", STAT_SWAP_POOL}, {L"Out / in", STAT_SWAP_TRAFFIC}, {L"Waits", STAT_SWAP_WAIT}}},
 	     {L"I/O & audio", {{L"File read / write", STAT_FILES}, {L"Audio underruns", STAT_AUDIO}}}},
 	}};
 	return panels;
 }
 
 bool IsSwapStat(Stat stat) {
-	return stat == STAT_SWAP_SIZE || stat == STAT_SWAP_TRAFFIC || stat == STAT_SWAP_WAIT;
+	return stat == STAT_SWAP_SIZE || stat == STAT_SWAP_POOL || stat == STAT_SWAP_TRAFFIC || stat == STAT_SWAP_WAIT;
 }
 
 // Upstream's panel's colours: good, look at it, bad.
@@ -583,6 +588,15 @@ std::wstring Formatted(const wchar_t* pattern, ...) {
 	vswprintf_s(text, pattern, arguments);
 	va_end(arguments);
 	return text;
+}
+
+// The compressed swap pool: its size (as `size`) and the share of reads it served so far; - without one.
+std::wstring SwapPoolText(const MemoryTotals& totals, std::wstring size) {
+	const auto reads = totals.pool_hits + totals.pool_misses;
+	if (totals.pool_bytes == 0 && reads == 0) {
+		return L"-";
+	}
+	return size + Formatted(L", %.0f%% hits", reads != 0 ? static_cast<double>(totals.pool_hits) * 100.0 / static_cast<double>(reads) : 0.0);
 }
 
 } // namespace
@@ -634,6 +648,7 @@ struct GameOverlay::State {
 	xaml::Controls::TextBlock  gpu_memory {nullptr};
 	xaml::Controls::TextBlock  other_memory {nullptr};
 	xaml::Controls::TextBlock  swapped_memory {nullptr};
+	xaml::Controls::TextBlock  swap_pool {nullptr};
 	xaml::Controls::TextBlock  swap_out {nullptr};
 	xaml::Controls::TextBlock  swap_in {nullptr};
 	xaml::Controls::TextBlock  drawing_shaders {nullptr};
@@ -770,6 +785,7 @@ void GameOverlay::State::Update() {
 	// The swap file, where there is one (the pager: by default on the Xbox only).
 	ShowSwapFile(totals.pager);
 	swapped_memory.Text(Megabytes(totals.swapped));
+	swap_pool.Text(SwapPoolText(totals, Megabytes(totals.pool_bytes)));
 	UpdateRates(totals);
 
 	// CPU: the process's share of all processor cores since the last update.
@@ -1250,6 +1266,7 @@ void GameOverlay::State::UpdateDetailed(const std::vector<double>& times, uint64
 		    LevelOf(static_cast<double>(totals.gpu) * 100.0 / static_cast<double>(totals.gpu_budget), 80, 95));
 	}
 	Set(STAT_SWAP_SIZE, Bytes(totals.swapped));
+	Set(STAT_SWAP_POOL, SwapPoolText(totals, Bytes(totals.pool_bytes)));
 	// The CPU as Full has it, with the cores it makes.
 	if (cpu_share >= 0.0) {
 		const auto cores = std::max(1u, std::thread::hardware_concurrency());
@@ -1438,6 +1455,7 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.gpu_memory        = find(L"GpuMemory").as<xaml::Controls::TextBlock>();
 	state.other_memory      = find(L"OtherMemory").as<xaml::Controls::TextBlock>();
 	state.swapped_memory    = find(L"SwappedMemory").as<xaml::Controls::TextBlock>();
+	state.swap_pool         = find(L"SwapPool").as<xaml::Controls::TextBlock>();
 	state.swap_out          = find(L"SwapOut").as<xaml::Controls::TextBlock>();
 	state.swap_in           = find(L"SwapIn").as<xaml::Controls::TextBlock>();
 	state.drawing_shaders   = find(L"DrawingShaders").as<xaml::Controls::TextBlock>();
