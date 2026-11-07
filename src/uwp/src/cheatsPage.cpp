@@ -40,9 +40,9 @@ constexpr char PROCESS[] = "eboot.bin";
 // The categories, in the list's order.
 enum Category : int32_t { LOCAL = 0, REMOTE = 1, INFO = 2 };
 
-// As the settings page: the header (with the game's cover, as the trophies page), the categories on the left in the Xbox's green, the chosen
-// one's tiles, the explanation of the one with the focus, the hints. A remote file opens in a panel at the right, as a game's options do in
-// the library.
+// As the settings page: the header (with the game's cover, as the trophies page), the categories on the left in the Xbox's green with the
+// explanation of the tile with the focus under them, the chosen one's tiles in the rest of the width (cheats have long names), the hints. A remote
+// file opens in a panel at the right, as a game's options do in the library.
 constexpr wchar_t PageMarkup[] = LR"xaml(
 <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -68,9 +68,14 @@ constexpr wchar_t PageMarkup[] = LR"xaml(
 
     <Grid Grid.Row="1" ColumnSpacing="24">
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="220" />
+        <ColumnDefinition Width="280" />
         <ColumnDefinition Width="*" />
       </Grid.ColumnDefinitions>
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
       <ListView x:Name="Categories" SelectionMode="Single" Padding="0">
         <ListView.Resources>
           <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="#54A81B" />
@@ -89,40 +94,34 @@ constexpr wchar_t PageMarkup[] = LR"xaml(
         <x:String>Remote</x:String>
         <x:String>Info</x:String>
       </ListView>
+        <StackPanel x:Name="Explanation" Grid.Row="1" Margin="48,20,12,0" VerticalAlignment="Top" Spacing="12" />
+      </Grid>
 
-      <Grid Grid.Column="1" Margin="0,0,48,0">
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="Auto" />
-          <ColumnDefinition Width="*" />
-        </Grid.ColumnDefinitions>
-        <ScrollViewer x:Name="Panels" VerticalScrollBarVisibility="Hidden" Padding="0,0,0,16">
+        <ScrollViewer x:Name="Panels" Grid.Column="1" Margin="0,0,48,0" VerticalScrollBarVisibility="Hidden" Padding="0,0,0,16">
           <Grid>
             <!-- The cheats saved for the game, a check box each. -->
-            <StackPanel x:Name="Local" Width="219" Spacing="8">
+            <StackPanel x:Name="Local" Spacing="8">
               <TextBlock x:Name="LocalCaption" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                          Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
               <StackPanel x:Name="LocalTiles" Spacing="8" />
             </StackPanel>
             <!-- The collection's files for the game. -->
-            <StackPanel x:Name="Remote" Width="219" Spacing="8" Visibility="Collapsed">
+            <StackPanel x:Name="Remote" Spacing="8" Visibility="Collapsed">
               <StackPanel Orientation="Horizontal" Spacing="8">
                 <ProgressRing x:Name="RemoteLoading" Width="16" Height="16" VerticalAlignment="Top" />
-                <TextBlock x:Name="RemoteCaption" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" MaxWidth="195"
+                <TextBlock x:Name="RemoteCaption" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" MaxWidth="560"
                            Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
               </StackPanel>
               <StackPanel x:Name="RemoteTiles" Spacing="8" />
             </StackPanel>
             <!-- Where the game's cheat file is, from a folder the player knows, and how to reach it from a PC. -->
-            <StackPanel x:Name="Info" Width="474" Spacing="8" Visibility="Collapsed">
+            <StackPanel x:Name="Info" Width="474" HorizontalAlignment="Left" Spacing="8" Visibility="Collapsed">
               <TextBlock Text="File location" Style="{StaticResource BodyTextBlockStyle}" />
               <TextBlock x:Name="InfoLocation" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap" Margin="0,0,0,8" />
               <StackPanel x:Name="InfoText" Spacing="8" />
             </StackPanel>
           </Grid>
         </ScrollViewer>
-        <StackPanel x:Name="Explanation" Grid.Column="1" Margin="36,0,0,0" MaxWidth="230" HorizontalAlignment="Left" VerticalAlignment="Top"
-                    Spacing="12" />
-      </Grid>
     </Grid>
     <Border x:Name="Hints" Grid.Row="2" Style="{StaticResource HintBarStyle}" Margin="48,16,48,0" />
   </Grid>
