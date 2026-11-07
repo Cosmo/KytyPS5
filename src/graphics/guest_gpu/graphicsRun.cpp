@@ -413,6 +413,7 @@ void GuestGpu::ThreadRun(void* data) {
 	EXIT_IF(gpu == nullptr);
 	KYTY_PROFILER_THREAD("Thread_Gpu");
 	Common::Thread::SetCurrentName("GPU");
+	Common::Thread::RaiseCurrentPriority();
 	g_gpu_state = gpu;
 	if (const auto processor = Common::Thread::ReserveCoreForCurrentThread(); processor >= 0) {
 		Log::WriteToConsoleAndLog(fmt::format(
