@@ -12,6 +12,7 @@
 #include "launcher.h"
 #include "log.h"
 #include "graphics/host_gpu/d3d12/presentationStubs.h"
+#include "common/pipelinePrewarm.h"
 #include "graphics/host_gpu/frameDump.h"
 #include "overlay.h"
 #include "settingsPage.h"
@@ -447,6 +448,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 	const auto settings    = MenuEntry(L"Overlay", true);
 	const auto controllers = MenuEntry(L"Controllers", true);
 	const auto trophies    = MenuEntry(L"Trophies", true);
+	const auto compile     = MenuEntry(L"Compile pipelines");
 	const auto dump        = MenuEntry(L"Save frame dump");
 	const auto quit        = MenuEntry(L"Quit to library");
 	// The tools under a line.
@@ -462,7 +464,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		line.IsEnabled(false);
 		line.IsTabStop(false);
 	}
-	for (const auto& entry: {resume, settings, controllers, trophies, line, dump, quit}) {
+	for (const auto& entry: {resume, settings, controllers, trophies, line, compile, dump, quit}) {
 		items.Items().Append(entry);
 	}
 	// What each entry does, next to the panel while it has the focus.
@@ -481,6 +483,10 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 	            L"over your network."
 	          : L"Choose which controllers play, and as which player."}},
 	    {trophies, L"Trophies", {L"See this game's trophies and which ones you've earned."}},
+	    {compile,
+	     L"Compile pipelines",
+	     {L"Compiles the pipelines this game used before, in the background, so that new areas stutter less.",
+	      L"Best at the title screen: it takes a few minutes, and it uses memory until the game ends."}},
 	    {dump, L"Save frame dump", {L"Saves the next frame's render targets as PNG files, to help find graphics problems."}},
 	    {quit, L"Quit to library", {L"Closes the game and goes back to the library. Progress the game hasn't saved is lost."}},
 	};
@@ -597,7 +603,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		});
 	};
 
-	items.ItemClick([show, open_settings, open_controllers, open_trophies, status, items, resume, settings, controllers, trophies, dump,
+	items.ItemClick([show, open_settings, open_controllers, open_trophies, status, items, resume, settings, controllers, trophies, compile, dump,
 	                 quit](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
 		// The entry, or its content: an entry is its own container, and the list may report either.
 		const auto clicked = args.ClickedItem();
@@ -616,6 +622,27 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		}
 		if (is(trophies)) {
 			open_trophies();
+			return;
+		}
+		if (is(compile)) {
+			// The pipeline cache takes the request at the next flip and builds in the background: the line under the menu follows it.
+			Common::PipelinePrewarm::Request();
+			auto text = status.try_as<xaml::Controls::TextBlock>();
+			if (text == nullptr) {
+				return;
+			}
+			text.Text(L"Compiling pipelines...");
+			status.Visibility(xaml::Visibility::Visible);
+			xaml::DispatcherTimer timer;
+			timer.Interval(std::chrono::milliseconds(500));
+			timer.Tick([timer, text](auto const&, auto const&) {
+				const auto line = Common::PipelinePrewarm::GetStatus();
+				text.Text(winrt::to_hstring(line));
+				if (line.rfind("Compiling", 0) != 0) {
+					timer.Stop();
+				}
+			});
+			timer.Start();
 			return;
 		}
 		if (is(dump)) {
