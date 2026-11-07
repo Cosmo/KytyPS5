@@ -112,6 +112,12 @@ int Thread::GetThreadIdUnique() {
 	return tid;
 }
 
+void Thread::RaiseCurrentPriority() {
+#if defined(KYTY_PLATFORM_UWP)
+	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+#endif
+}
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 Mutex::Mutex() {
 	static_assert(sizeof(CRITICAL_SECTION) == sizeof(m_cs) &&
