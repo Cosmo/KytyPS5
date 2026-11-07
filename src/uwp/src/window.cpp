@@ -134,6 +134,9 @@ MemoryTotals CurrentMemoryTotals() {
 	                     .swapped      = guest.swapped,
 	                     .swapped_out  = guest.swapped_out,
 	                     .swapped_in   = guest.swapped_in,
+	                     .pool_bytes   = guest.pool_bytes,
+	                     .pool_hits    = guest.pool_hits,
+	                     .pool_misses  = guest.pool_misses,
 	                     .swap_wait_ns = guest.swap_wait_ns,
 	                     .pager        = guest.pager};
 	if (const auto* window = Libs::Graphics::g_window.get(); window != nullptr && window->graphic_ctx.CanReportMemoryUsage()) {
