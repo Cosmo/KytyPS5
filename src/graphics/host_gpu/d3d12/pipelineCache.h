@@ -225,6 +225,63 @@ private:
 	void                 InitializeDiskCache();
 	[[nodiscard]] std::string CacheSignature() const;
 
+	// Where the driver keeps no compiled pipelines (no pipeline library), the cache file describes each pipeline instead (its
+	// stream, root signature and shaders), so that a later run can build them in the background before the game asks for them: the game menu's
+	// "Compile pipelines" (Common::PipelinePrewarm).
+	struct PipelineRecord {
+		std::wstring                          name;
+		std::vector<uint8_t>                  stream;      // the stream as it was built; its pointers are set again on loading
+		uint64_t                              root_blob = 0; // the root signature's serialized blob, by hash
+		std::array<uint64_t, 3>               shaders {};  // the stream's bytecode by hash, in stream order (0: none)
+		std::vector<D3D12_INPUT_ELEMENT_DESC> elements;    // all named TEXCOORD
+	};
+	enum class PrewarmState : uint8_t { Queued, Building, Done, Taken };
+	struct Prewarm {
+		PrewarmState         state    = PrewarmState::Queued;
+		ID3D12PipelineState* pipeline = nullptr;
+	};
+	// Keeps the record of a pipeline made or taken in this session (once).
+	void                 RecordPipeline(const std::wstring& name, const D3D12_PIPELINE_STATE_STREAM_DESC& desc);
+	// The root signature made from `blob` (one per blob, shared by the renderer and the prewarm threads).
+	ID3D12RootSignature* RootSignatureFromBlob(uint64_t hash, std::span<const uint8_t> blob);
+	// Builds a pipeline from its record; nullptr when the record doesn't fit this build.
+	ID3D12PipelineState* BuildFromRecord(const PipelineRecord& record);
+	uint64_t             AppendRecords(std::vector<uint8_t>& payload); // returns how many it wrote
+	bool                 ParseRecords(std::span<const uint8_t> data);
+	// Called every frame: takes the request of the game menu or the library.
+	void                 PrewarmTick();
+	void                 StartPrewarm();
+	void                 PrewarmWorker();
+	// What the pager leaves the game: the app's limit without what the others take and the pager's headroom (UINT64_MAX without a limit).
+	[[nodiscard]] uint64_t PrewarmGameRoom() const;
+	// The prewarmed pipeline `name`, waiting while a thread builds it; nullptr when there is none (or it is still queued, which leaves it
+	// to the caller).
+	ID3D12PipelineState* TakePrewarmed(const std::wstring& name);
+
+	std::mutex                                         m_record_mutex;
+	std::unordered_map<uint64_t, std::vector<uint8_t>> m_blobs;
+	std::unordered_map<ID3D12RootSignature*, uint64_t> m_root_blob_of;
+	std::unordered_map<uint64_t, ID3D12RootSignature*> m_root_by_blob;
+	std::vector<PipelineRecord>                        m_records;      // this session's, in the order they were first needed
+	std::unordered_map<std::wstring, size_t>           m_record_index; // into m_records
+	std::vector<PipelineRecord>                        m_file_records; // the file's
+	std::mutex                                         m_prewarm_mutex;
+	std::condition_variable                            m_prewarm_done;
+	std::unordered_map<std::wstring, Prewarm>          m_prewarm;
+	size_t                                             m_prewarm_next = 0; // into m_file_records
+	std::vector<std::thread>                           m_prewarm_threads;
+	std::atomic_bool                                   m_prewarm_stop {false};
+	std::atomic_bool                                   m_prewarm_running {false};
+	uint64_t                                           m_prewarm_start_ms = 0;
+	uint64_t                                           m_prewarm_built    = 0;
+	uint64_t                                           m_prewarm_build_us = 0;
+	uint64_t                                           m_prewarm_peak_us  = 0;
+	uint64_t                                           m_taken_prewarmed  = 0;
+	uint64_t                                           m_waited_us        = 0;
+	// One CreatePipelineState at a time, the prewarm thread's or the GPU thread's: the Xbox's driver compiler made a null call on a driver thread with two at
+	// once.
+	std::mutex                                         m_create_mutex;
+
 	GraphicContext&                                                     m_graphics;
 	D3D12::ComPtr<ID3D12Device2>                                        m_device;
 	bool                                                                m_alpha_blend_factor = false;

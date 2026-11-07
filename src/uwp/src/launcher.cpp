@@ -1,5 +1,6 @@
 #include "launcher.h"
 
+#include "common/pipelinePrewarm.h"
 #include "fileAccess.h"
 #include "gameImages.h"
 #include "input.h"
@@ -273,9 +274,10 @@ struct Launcher {
 	size_t                    options_index = 0;
 };
 
-constexpr wchar_t OPTION_PLAY[]   = L"Play";
-constexpr wchar_t OPTION_CHEATS[] = L"Cheats";
-constexpr wchar_t OPTION_HIDE[]   = L"Hide game";
+constexpr wchar_t OPTION_PLAY[]       = L"Play";
+constexpr wchar_t OPTION_PLAY_BUILD[] = L"Play and build known pipelines";
+constexpr wchar_t OPTION_CHEATS[]     = L"Cheats";
+constexpr wchar_t OPTION_HIDE[]       = L"Hide game";
 
 bool OptionsOpen(const Launcher& launcher) {
 	return launcher.options.Visibility() == xaml::Visibility::Visible;
@@ -566,12 +568,17 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	         {{XboxButton::A, L"Play"}, {XboxButton::Y, L"Scan again"}, {XboxButton::Menu, L"Options"}});
 	SetHints(find(L"OptionsHints").as<xaml::Controls::Border>(), {{XboxButton::A, L"Select"}, {XboxButton::B, L"Back"}});
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_PLAY));
+	launcher->options_items.Items().Append(winrt::box_value(OPTION_PLAY_BUILD));
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_CHEATS));
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_HIDE));
 	launcher->options_items.ItemClick([launcher](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
 		const auto  item = winrt::unbox_value<winrt::hstring>(args.ClickedItem());
 		const auto& game = launcher->games[launcher->options_index];
 		if (item == OPTION_PLAY) {
+			launcher->actions.play(game);
+		} else if (item == OPTION_PLAY_BUILD) {
+			// The pipeline cache takes the request at the game's first frame and builds in the background.
+			Common::PipelinePrewarm::Request();
 			launcher->actions.play(game);
 		} else if (item == OPTION_CHEATS) {
 			launcher->actions.open_cheats(game);
