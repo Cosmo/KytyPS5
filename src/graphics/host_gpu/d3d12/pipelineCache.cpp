@@ -5,6 +5,7 @@
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
+#include "common/pipelinePrewarm.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -21,6 +22,7 @@
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/rectListShader.h"
 #include "kytyGitVersion.h"
+#include "xbox/lazyCounters.h"
 
 #include <algorithm>
 #include <atomic>
@@ -629,10 +631,19 @@ void PipelineCache::InitializeDiskCache() {
 		}
 	}
 
+	// Without a pipeline library the file's library part holds the pipelines' descriptions: the game menu's "Compile pipelines" builds them.
+	const auto describe_pipelines = [&] {
+		if (!m_library_data.empty() && ParseRecords(m_library_data)) {
+			m_cache_file.Log("{} pipeline descriptions", m_file_records.size());
+			m_saved_pipelines = m_file_records.size(); // (the header counts differently: what the overlay's In cache should say is these)
+		}
+		m_library_data.clear();
+	};
 	// The Xbox's driver (SraKmd) removes the device in CreatePipelineLibrary: its pipelines aren't
 	// kept, the translated shaders are.
 	if (std::string_view(m_graphics.DeviceName()).starts_with("SraKmd")) {
 		m_cache_file.Log("pipeline library off (this driver removes the device with one)");
+		describe_pipelines();
 		return;
 	}
 	D3D12::ComPtr<ID3D12Device1> device;
@@ -669,8 +680,8 @@ void PipelineCache::Save() {
 	const auto     translations = m_compiler.SaveCache();
 	const uint64_t size         = translations.size();
 	// The pipelines the file had, and those made since without it.
-	const uint64_t pipelines = m_file_pipelines + m_compute_pipelines.size() +
-	                           m_graphics_pipelines.size() - m_cached_pipelines;
+	uint64_t pipelines = m_file_pipelines + m_compute_pipelines.size() +
+	                     m_graphics_pipelines.size() - m_cached_pipelines;
 	std::vector<uint8_t> payload(sizeof(pipelines) + sizeof(size));
 	std::memcpy(payload.data(), &pipelines, sizeof(pipelines));
 	std::memcpy(payload.data() + sizeof(pipelines), &size, sizeof(size));
@@ -683,6 +694,9 @@ void PipelineCache::Save() {
 			m_cache_file.Log("failed to serialize the pipeline library");
 			payload.resize(offset);
 		}
+	} else {
+		pipelines = AppendRecords(payload); // the pipelines' descriptions instead
+		std::memcpy(payload.data(), &pipelines, sizeof(pipelines));
 	}
 	m_cache_file.Log("saving {} bytes of translated shaders and {} pipelines ({} were loaded)",
 	                 translations.size(), m_compute_pipelines.size() + m_graphics_pipelines.size(),
@@ -697,6 +711,7 @@ void PipelineCache::SaveWhenIdle() {
 	// Pipelines are compiled in bursts (a game's start, new areas): the save follows one, in the
 	// background. Frames don't wait for it; only a new pipeline meanwhile would.
 	constexpr uint64_t IDLE_MS = 5000;
+	PrewarmTick();
 	const auto         changes = m_changes.load();
 	if (changes == 0 || changes == m_saved_changes || m_saving ||
 	    GetTickCount64() - m_last_change_ms.load() < IDLE_MS) {
@@ -762,7 +777,12 @@ ID3D12PipelineState* PipelineCache::LoadOrCreate(const std::wstring&            
 		m_loaded_pipelines++;
 		return pipeline;
 	}
+	if (auto* prewarmed = TakePrewarmed(name); prewarmed != nullptr) {
+		RecordPipeline(name, desc);
+		return prewarmed;
+	}
 	const HRESULT result = [&] {
+		std::lock_guard                    create_lock(m_create_mutex);
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
@@ -791,10 +811,461 @@ ID3D12PipelineState* PipelineCache::LoadOrCreate(const std::wstring&            
 		m_last_change_ms = GetTickCount64();
 		m_changes++;
 	}
+	RecordPipeline(name, desc);
+	return pipeline;
+}
+
+namespace {
+
+// The pointers in a stream this file builds; each kind of stream has a size of its own.
+static_assert(sizeof(ComputePipelineStream) != sizeof(GraphicsPipelineStream) &&
+              sizeof(ComputePipelineStream) != sizeof(MeshPipelineStream) &&
+              sizeof(GraphicsPipelineStream) != sizeof(MeshPipelineStream));
+struct StreamPointers {
+	ID3D12RootSignature**                  root = nullptr;
+	std::array<D3D12_SHADER_BYTECODE*, 3> code {};
+	D3D12_INPUT_LAYOUT_DESC*               layout = nullptr;
+};
+
+StreamPointers PointersOf(std::vector<uint8_t>& stream) {
+	StreamPointers pointers;
+	if (stream.size() == sizeof(ComputePipelineStream)) {
+		auto* s       = reinterpret_cast<ComputePipelineStream*>(stream.data());
+		pointers.root = &s->root.value;
+		pointers.code = {&s->cs.value, nullptr, nullptr};
+	} else if (stream.size() == sizeof(GraphicsPipelineStream)) {
+		auto* s         = reinterpret_cast<GraphicsPipelineStream*>(stream.data());
+		pointers.root   = &s->root.value;
+		pointers.code   = {&s->vs.value, &s->gs.value, &s->ps.value};
+		pointers.layout = &s->input_layout.value;
+	} else if (stream.size() == sizeof(MeshPipelineStream)) {
+		auto* s       = reinterpret_cast<MeshPipelineStream*>(stream.data());
+		pointers.root = &s->root.value;
+		pointers.code = {&s->ms.value, &s->ps.value, nullptr};
+	}
+	return pointers;
+}
+
+// The records' part of the cache file: "KPR1", the three stream sizes, the blobs (hash, size, bytes), then the records (name, stream, root
+// blob, three shader blobs, input elements).
+constexpr uint32_t RecordsMagic = 0x3152504Bu;
+
+class Writer {
+public:
+	explicit Writer(std::vector<uint8_t>& out): m_out(out) {}
+	template <typename T>
+	void Put(const T& value) {
+		const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+		m_out.insert(m_out.end(), bytes, bytes + sizeof(T));
+	}
+	void Bytes(std::span<const uint8_t> bytes) {
+		Put(static_cast<uint32_t>(bytes.size()));
+		m_out.insert(m_out.end(), bytes.begin(), bytes.end());
+	}
+
+private:
+	std::vector<uint8_t>& m_out;
+};
+
+class Reader {
+public:
+	explicit Reader(std::span<const uint8_t> data): m_data(data) {}
+	template <typename T>
+	bool Get(T& value) {
+		if (m_data.size() - m_offset < sizeof(T)) {
+			return false;
+		}
+		std::memcpy(&value, m_data.data() + m_offset, sizeof(T));
+		m_offset += sizeof(T);
+		return true;
+	}
+	bool Bytes(std::vector<uint8_t>& bytes) {
+		uint32_t size = 0;
+		if (!Get(size) || m_data.size() - m_offset < size) {
+			return false;
+		}
+		bytes.assign(m_data.begin() + static_cast<ptrdiff_t>(m_offset), m_data.begin() + static_cast<ptrdiff_t>(m_offset + size));
+		m_offset += size;
+		return true;
+	}
+
+private:
+	std::span<const uint8_t> m_data;
+	size_t                   m_offset = 0;
+};
+
+} // namespace
+
+ID3D12RootSignature* PipelineCache::RootSignatureFromBlob(uint64_t hash, std::span<const uint8_t> blob) {
+	{
+		std::lock_guard lock(m_record_mutex);
+		if (const auto found = m_root_by_blob.find(hash); found != m_root_by_blob.end()) {
+			found->second->AddRef();
+			return found->second;
+		}
+	}
+	ID3D12RootSignature* created = nullptr;
+	if (FAILED(m_graphics.device->CreateRootSignature(0, blob.data(), blob.size(), IID_PPV_ARGS(&created)))) {
+		return nullptr;
+	}
+	std::lock_guard lock(m_record_mutex);
+	const auto [found, inserted] = m_root_by_blob.try_emplace(hash, created);
+	if (!inserted) {
+		created->Release(); // another thread made it meanwhile
+	} else {
+		m_root_blob_of[created] = hash;
+		m_blobs.try_emplace(hash, blob.begin(), blob.end());
+	}
+	found->second->AddRef(); // the caller's
+	return found->second;
+}
+
+void PipelineCache::RecordPipeline(const std::wstring& name, const D3D12_PIPELINE_STATE_STREAM_DESC& desc) {
+	if (m_library != nullptr) {
+		return;
+	}
+	std::lock_guard lock(m_record_mutex);
+	if (m_record_index.contains(name)) {
+		return;
+	}
+	PipelineRecord record;
+	record.name         = name;
+	const auto* stream = static_cast<const uint8_t*>(desc.pPipelineStateSubobjectStream);
+	record.stream.assign(stream, stream + desc.SizeInBytes);
+	const auto pointers = PointersOf(record.stream);
+	if (pointers.root == nullptr) {
+		return;
+	}
+	const auto root = m_root_blob_of.find(*pointers.root);
+	if (root == m_root_blob_of.end()) {
+		return;
+	}
+	record.root_blob = root->second;
+	for (size_t i = 0; i < pointers.code.size(); i++) {
+		const auto* code = pointers.code[i];
+		if (code == nullptr || code->BytecodeLength == 0) {
+			continue;
+		}
+		const auto* bytes  = static_cast<const uint8_t*>(code->pShaderBytecode);
+		record.shaders[i] = XXH3_64bits(bytes, code->BytecodeLength);
+		m_blobs.try_emplace(record.shaders[i], bytes, bytes + code->BytecodeLength);
+	}
+	if (pointers.layout != nullptr && pointers.layout->NumElements != 0) {
+		record.elements.assign(pointers.layout->pInputElementDescs, pointers.layout->pInputElementDescs + pointers.layout->NumElements);
+	}
+	m_record_index.emplace(name, m_records.size());
+	m_records.push_back(std::move(record));
+}
+
+ID3D12PipelineState* PipelineCache::BuildFromRecord(const PipelineRecord& record) {
+	std::vector<uint8_t> stream   = record.stream;
+	const auto           pointers = PointersOf(stream);
+	if (pointers.root == nullptr) {
+		return nullptr;
+	}
+	const std::vector<uint8_t>*                root_blob = nullptr;
+	std::array<const std::vector<uint8_t>*, 3> code {};
+	{
+		// (The blobs' nodes stay where they are while others are added.)
+		std::lock_guard lock(m_record_mutex);
+		const auto      root = m_blobs.find(record.root_blob);
+		if (root == m_blobs.end()) {
+			return nullptr;
+		}
+		root_blob = &root->second;
+		for (size_t i = 0; i < code.size(); i++) {
+			if (record.shaders[i] == 0) {
+				continue;
+			}
+			const auto found = m_blobs.find(record.shaders[i]);
+			if (found == m_blobs.end()) {
+				return nullptr;
+			}
+			code[i] = &found->second;
+		}
+	}
+	auto* root = RootSignatureFromBlob(record.root_blob, *root_blob);
+	if (root == nullptr) {
+		return nullptr;
+	}
+	*pointers.root = root;
+	for (size_t i = 0; i < code.size(); i++) {
+		if (pointers.code[i] != nullptr) {
+			*pointers.code[i] = code[i] != nullptr ? D3D12_SHADER_BYTECODE {code[i]->data(), code[i]->size()} : D3D12_SHADER_BYTECODE {};
+		}
+	}
+	auto elements = record.elements;
+	for (auto& element: elements) {
+		element.SemanticName = "TEXCOORD";
+	}
+	if (pointers.layout != nullptr) {
+		*pointers.layout = {elements.empty() ? nullptr : elements.data(), static_cast<UINT>(elements.size())};
+	}
+	const D3D12_PIPELINE_STATE_STREAM_DESC desc {stream.size(), stream.data()};
+	ID3D12PipelineState*                   pipeline = nullptr;
+	const HRESULT                          result   = [&] {
+		  std::lock_guard                      create_lock(m_create_mutex); // (one at a time: see m_create_mutex)
+		  const Common::CompileActivity::Scope activity(Common::CompileActivity::Kind::Pipeline);
+		  return m_device->CreatePipelineState(&desc, IID_PPV_ARGS(&pipeline));
+	}();
+	root->Release();
+	return SUCCEEDED(result) ? pipeline : nullptr;
+}
+
+uint64_t PipelineCache::AppendRecords(std::vector<uint8_t>& payload) {
+	std::lock_guard lock(m_record_mutex);
+	// This session's first, then the file's others; the prewarm builds them in this order.
+	std::vector<const PipelineRecord*> records;
+	for (const auto& record: m_records) {
+		records.push_back(&record);
+	}
+	for (const auto& record: m_file_records) {
+		if (records.size() < 4096 && !m_record_index.contains(record.name)) {
+			records.push_back(&record);
+		}
+	}
+	std::set<uint64_t> blobs;
+	for (const auto* record: records) {
+		blobs.insert(record->root_blob);
+		for (const auto shader: record->shaders) {
+			if (shader != 0) {
+				blobs.insert(shader);
+			}
+		}
+	}
+	Writer out(payload);
+	out.Put(RecordsMagic);
+	out.Put(static_cast<uint32_t>(sizeof(ComputePipelineStream)));
+	out.Put(static_cast<uint32_t>(sizeof(GraphicsPipelineStream)));
+	out.Put(static_cast<uint32_t>(sizeof(MeshPipelineStream)));
+	out.Put(static_cast<uint32_t>(blobs.size()));
+	for (const auto hash: blobs) {
+		const auto found = m_blobs.find(hash);
+		out.Put(hash);
+		out.Bytes(found != m_blobs.end() ? std::span<const uint8_t> {found->second} : std::span<const uint8_t> {});
+	}
+	out.Put(static_cast<uint32_t>(records.size()));
+	for (const auto* record: records) {
+		out.Put(static_cast<uint32_t>(record->name.size()));
+		for (const auto c: record->name) {
+			out.Put(static_cast<uint16_t>(c));
+		}
+		out.Bytes(record->stream);
+		out.Put(record->root_blob);
+		for (const auto shader: record->shaders) {
+			out.Put(shader);
+		}
+		out.Put(static_cast<uint32_t>(record->elements.size()));
+		for (const auto& element: record->elements) {
+			for (const uint32_t value: {static_cast<uint32_t>(element.SemanticIndex), static_cast<uint32_t>(element.Format),
+			                            static_cast<uint32_t>(element.InputSlot), static_cast<uint32_t>(element.AlignedByteOffset),
+			                            static_cast<uint32_t>(element.InputSlotClass), static_cast<uint32_t>(element.InstanceDataStepRate)}) {
+				out.Put(value);
+			}
+		}
+	}
+	return records.size();
+}
+
+bool PipelineCache::ParseRecords(std::span<const uint8_t> data) {
+	Reader   in(data);
+	uint32_t magic   = 0;
+	uint32_t sizes[3] {};
+	uint32_t count   = 0;
+	if (!in.Get(magic) || magic != RecordsMagic || !in.Get(sizes[0]) || !in.Get(sizes[1]) || !in.Get(sizes[2]) ||
+	    sizes[0] != sizeof(ComputePipelineStream) || sizes[1] != sizeof(GraphicsPipelineStream) || sizes[2] != sizeof(MeshPipelineStream) ||
+	    !in.Get(count)) {
+		return false;
+	}
+	std::unordered_map<uint64_t, std::vector<uint8_t>> blobs;
+	for (uint32_t i = 0; i < count; i++) {
+		uint64_t             hash = 0;
+		std::vector<uint8_t> bytes;
+		if (!in.Get(hash) || !in.Bytes(bytes)) {
+			return false;
+		}
+		blobs.emplace(hash, std::move(bytes));
+	}
+	std::vector<PipelineRecord> records;
+	if (!in.Get(count)) {
+		return false;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		PipelineRecord record;
+		uint32_t       length = 0;
+		if (!in.Get(length) || length > 64) {
+			return false;
+		}
+		for (uint32_t c = 0; c < length; c++) {
+			uint16_t value = 0;
+			if (!in.Get(value)) {
+				return false;
+			}
+			record.name.push_back(static_cast<wchar_t>(value));
+		}
+		uint32_t elements = 0;
+		if (!in.Bytes(record.stream) || !in.Get(record.root_blob) || !in.Get(record.shaders[0]) || !in.Get(record.shaders[1]) ||
+		    !in.Get(record.shaders[2]) || !in.Get(elements) || elements > 64) {
+			return false;
+		}
+		for (uint32_t e = 0; e < elements; e++) {
+			uint32_t values[6] {};
+			for (auto& value: values) {
+				if (!in.Get(value)) {
+					return false;
+				}
+			}
+			record.elements.push_back({nullptr, values[0], static_cast<DXGI_FORMAT>(values[1]), values[2], values[3],
+			                           static_cast<D3D12_INPUT_CLASSIFICATION>(values[4]), values[5]});
+		}
+		records.push_back(std::move(record));
+	}
+	std::lock_guard lock(m_record_mutex);
+	for (auto& [hash, bytes]: blobs) {
+		m_blobs.try_emplace(hash, std::move(bytes));
+	}
+	m_file_records = std::move(records);
+	return true;
+}
+
+uint64_t PipelineCache::PrewarmGameRoom() const {
+	constexpr uint64_t PagerHeadroom = uint64_t {768} << 20u;
+	const auto         limit         = Config::AppMemoryLimit();
+	if (limit == 0) {
+		return UINT64_MAX;
+	}
+	const auto app   = Config::AppMemoryUsage();
+	const auto game  = Xbox::Lazy::GetCounters().committed.load(std::memory_order_relaxed);
+	const auto taken = (app > game ? app - game : 0) + PagerHeadroom;
+	return limit > taken ? limit - taken : 0;
+}
+
+void PipelineCache::PrewarmTick() {
+	if (m_library == nullptr && Common::PipelinePrewarm::TakeRequest()) {
+		StartPrewarm();
+	}
+}
+
+void PipelineCache::StartPrewarm() {
+	namespace Prewarm = Common::PipelinePrewarm;
+	if (m_prewarm_running.load()) {
+		return;
+	}
+	for (auto& thread: m_prewarm_threads) {
+		thread.join();
+	}
+	m_prewarm_threads.clear();
+	uint32_t queued = 0;
+	{
+		std::scoped_lock lock(m_prewarm_mutex, m_record_mutex);
+		for (const auto& record: m_file_records) {
+			if (m_record_index.contains(record.name)) {
+				continue; // the game has made it in this run
+			}
+			queued += m_prewarm.try_emplace(record.name).first->second.state == PrewarmState::Queued ? 1 : 0;
+		}
+		m_prewarm_next = 0;
+	}
+	Prewarm::Detail::built  = 0;
+	Prewarm::Detail::failed = 0;
+	Prewarm::Detail::total  = queued;
+	if (queued == 0) {
+		Prewarm::SetState(m_file_records.empty() ? Prewarm::State::NothingKnown : Prewarm::State::AllReady);
+		m_cache_file.Log("prewarm: nothing to build ({} pipelines described)", m_file_records.size());
+		return;
+	}
+	Prewarm::SetState(Prewarm::State::Running);
+	m_prewarm_running  = true;
+	m_prewarm_start_ms = GetTickCount64();
+	m_cache_file.Log("prewarm: building {} of the {} described pipelines", queued, m_file_records.size());
+	m_prewarm_threads.emplace_back([this] { PrewarmWorker(); });
+}
+
+void PipelineCache::PrewarmWorker() {
+	namespace Prewarm = Common::PipelinePrewarm;
+	Common::Thread::SetCurrentName("Pipeline prewarm");
+	constexpr uint64_t PauseBelow = uint64_t {512} << 20u; // what the pager leaves the game
+	uint32_t           paused     = 0;
+	for (;;) {
+		// The game's room in RAM comes first: the work waits while it is short, and goes on by itself. (Before a record is taken: the game would wait for one
+		// that is being built. Built pipelines hold next to no memory, so this is for what their compiling needs.)
+		while (!m_prewarm_stop && PrewarmGameRoom() < PauseBelow) {
+			paused++;
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+		}
+		const PipelineRecord* record = nullptr;
+		{
+			std::lock_guard lock(m_prewarm_mutex);
+			while (record == nullptr && m_prewarm_next < m_file_records.size()) {
+				const auto& candidate = m_file_records[m_prewarm_next++];
+				const auto  entry     = m_prewarm.find(candidate.name);
+				if (entry != m_prewarm.end() && entry->second.state == PrewarmState::Queued) {
+					entry->second.state = PrewarmState::Building;
+					record              = &candidate;
+				}
+			}
+		}
+		if (record == nullptr || m_prewarm_stop) {
+			break;
+		}
+		const auto start    = std::chrono::steady_clock::now();
+		auto*      pipeline = BuildFromRecord(*record);
+		const auto us       = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+		{
+			std::lock_guard lock(m_prewarm_mutex);
+			auto&           entry = m_prewarm.find(record->name)->second;
+			entry.state           = PrewarmState::Done;
+			entry.pipeline        = pipeline;
+			m_prewarm_built++;
+			m_prewarm_build_us += us;
+			m_prewarm_peak_us = std::max(m_prewarm_peak_us, us);
+		}
+		(pipeline != nullptr ? Prewarm::Detail::built : Prewarm::Detail::failed)++;
+		m_prewarm_done.notify_all();
+	}
+	{
+		std::lock_guard lock(m_prewarm_mutex);
+		m_cache_file.Log("prewarm: {} pipelines built in {:.1f} s (driver time {:.1f} s, average {} ms, peak {} ms){}; {} taken so far, {:.1f} s waited for", m_prewarm_built,
+		                 static_cast<double>(GetTickCount64() - m_prewarm_start_ms) / 1000.0, static_cast<double>(m_prewarm_build_us) / 1e6,
+		                 m_prewarm_built != 0 ? m_prewarm_build_us / m_prewarm_built / 1000 : 0, m_prewarm_peak_us / 1000,
+		                 paused != 0 ? fmt::format(", paused for {} s", paused) : std::string(), m_taken_prewarmed, static_cast<double>(m_waited_us) / 1e6);
+	}
+	Prewarm::SetState(Prewarm::State::Done);
+	m_prewarm_running = false;
+}
+
+ID3D12PipelineState* PipelineCache::TakePrewarmed(const std::wstring& name) {
+	std::unique_lock lock(m_prewarm_mutex);
+	const auto       found = m_prewarm.find(name);
+	if (found == m_prewarm.end() || found->second.state == PrewarmState::Taken) {
+		return nullptr;
+	}
+	auto& entry = found->second;
+	if (entry.state == PrewarmState::Queued) {
+		entry.state = PrewarmState::Taken; // the caller builds it now
+		return nullptr;
+	}
+	const auto start = std::chrono::steady_clock::now();
+	m_prewarm_done.wait(lock, [&] { return entry.state == PrewarmState::Done; });
+	m_waited_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+	entry.state    = PrewarmState::Taken;
+	auto* pipeline = entry.pipeline;
+	entry.pipeline = nullptr;
+	m_taken_prewarmed += pipeline != nullptr ? 1 : 0;
 	return pipeline;
 }
 
 PipelineCache::~PipelineCache() {
+	m_prewarm_stop = true;
+	for (auto& thread: m_prewarm_threads) {
+		thread.join();
+	}
+	for (auto& [name, entry]: m_prewarm) {
+		(void)name;
+		if (entry.pipeline != nullptr) {
+			entry.pipeline->Release();
+		}
+	}
 	if (m_save_thread.joinable()) {
 		m_save_thread.join();
 	}
@@ -813,6 +1284,10 @@ PipelineCache::~PipelineCache() {
 	}
 	for (const auto& [layout, root_signature]: m_root_signatures) {
 		(void)layout;
+		root_signature->Release();
+	}
+	for (const auto& [hash, root_signature]: m_root_by_blob) {
+		(void)hash;
 		root_signature->Release();
 	}
 }
@@ -974,7 +1449,10 @@ ID3D12RootSignature* PipelineCache::GetRootSignature(const RootLayout& layout) {
 	D3D12::ComPtr<ID3DBlob> error;
 	HRESULT result = D3D12SerializeVersionedRootSignature(&desc, &blob, &error);
 	if (SUCCEEDED(result)) {
-		result = m_graphics.device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&found->second));
+		// One root signature per blob, shared with the pipelines the prewarm threads build.
+		const std::span<const uint8_t> bytes {static_cast<const uint8_t*>(blob->GetBufferPointer()), blob->GetBufferSize()};
+		found->second = RootSignatureFromBlob(XXH3_64bits(bytes.data(), bytes.size()), bytes);
+		result        = found->second != nullptr ? S_OK : E_FAIL;
 	}
 	if (FAILED(result)) {
 		// E.g. shaders that index the descriptor heap directly (shader model 6.6) on a device without it: reported once, their pipelines are skipped.
