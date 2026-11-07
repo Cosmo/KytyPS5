@@ -507,6 +507,7 @@ enum Stat : size_t {
 	STAT_OTHER,
 	// The game's memory in the swap file (not in RAM), written to it and read back from it per second, and the time the game waited for it.
 	STAT_SWAP_SIZE,
+	STAT_SWAP_POOL, // the compressed pool in RAM and the share of reads it served
 	STAT_SWAP_TRAFFIC,
 	STAT_SWAP_WAIT,
 	// I/O and audio: the game's file reads and writes per second, and the times its sound ran out before it gave more.
@@ -545,14 +546,14 @@ const std::array<std::vector<StatGroup>, 3>& DetailedPanels() {
 	      {{L"Direct", STAT_DIRECT}, {L"  Mapped", STAT_MAPPED}, {L"  Pool", STAT_POOL}, {L"Flexible", STAT_FLEXIBLE}, {L"Extended", STAT_EXTENDED},
 	       {L"Page table (2 MB)", STAT_PAGE_TABLE}}},
 	     {L"App memory", {{L"Used", STAT_USED}, {L"Game in RAM", STAT_GAME}, {L"Other", STAT_OTHER}}},
-	     {L"Swap file", {{L"Size", STAT_SWAP_SIZE}, {L"Out / in", STAT_SWAP_TRAFFIC}, {L"Waits", STAT_SWAP_WAIT}}},
+	     {L"Swap file", {{L"Size", STAT_SWAP_SIZE}, {L"Pool", STAT_SWAP_POOL}, {L"Out / in", STAT_SWAP_TRAFFIC}, {L"Waits", STAT_SWAP_WAIT}}},
 	     {L"I/O & audio", {{L"File read / write", STAT_FILES}, {L"Audio underruns", STAT_AUDIO}}}},
 	}};
 	return panels;
 }
 
 bool IsSwapStat(Stat stat) {
-	return stat == STAT_SWAP_SIZE || stat == STAT_SWAP_TRAFFIC || stat == STAT_SWAP_WAIT;
+	return stat == STAT_SWAP_SIZE || stat == STAT_SWAP_POOL || stat == STAT_SWAP_TRAFFIC || stat == STAT_SWAP_WAIT;
 }
 
 // Upstream's panel's colours: good, look at it, bad.
@@ -1250,6 +1251,11 @@ void GameOverlay::State::UpdateDetailed(const std::vector<double>& times, uint64
 		    LevelOf(static_cast<double>(totals.gpu) * 100.0 / static_cast<double>(totals.gpu_budget), 80, 95));
 	}
 	Set(STAT_SWAP_SIZE, Bytes(totals.swapped));
+	if (const auto reads = totals.pool_hits + totals.pool_misses; totals.pool_bytes != 0 || reads != 0) {
+		Set(STAT_SWAP_POOL, Bytes(totals.pool_bytes) + Formatted(L", %.0f%% hits", reads != 0 ? static_cast<double>(totals.pool_hits) * 100.0 / static_cast<double>(reads) : 0.0));
+	} else {
+		Set(STAT_SWAP_POOL, L"-");
+	}
 	// The CPU as Full has it, with the cores it makes.
 	if (cpu_share >= 0.0) {
 		const auto cores = std::max(1u, std::thread::hardware_concurrency());
