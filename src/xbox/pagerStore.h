@@ -31,11 +31,25 @@ struct PagerCounters {
 	std::atomic<uint64_t> emergency {0};
 	// views turned into private memory (too many views of sections: Regions::CommitPrivatize)
 	std::atomic<uint64_t> privatized {0};
+	// The compressed pool: what it takes, what its windows are uncompressed, reads served by it and by the file, windows that went for room, windows not
+	// kept, and copies that came back wrong.
+	std::atomic<uint64_t> pool_bytes {0}, pool_raw {0}, pool_hits {0}, pool_misses {0}, pool_dropped {0}, pool_skipped {0}, pool_bad {0};
 };
+
+// The compressed pool in front of the file (kernel/pagerPool.cpp).
+bool StartPagerPool(uint64_t bytes);
+void PagerPoolPut(uint32_t slot, const void* data, uint64_t size, PagerCounters& counters);
+bool PagerPoolRead(uint32_t slot, void* data, PagerCounters& counters);
+void PagerPoolDrop(uint32_t slot, PagerCounters& counters);
 
 class PagerStore {
 public:
 	static constexpr uint64_t kSlotSize = uint64_t {64} * 1024;
+
+	// Set: windows written are kept in the compressed pool too, read from it when it has them, and a slot that is freed leaves it.
+	void (*pool_put)(uint32_t slot, const void* data, uint64_t size, PagerCounters& counters) = nullptr;
+	bool (*pool_read)(uint32_t slot, void* data, PagerCounters& counters)                     = nullptr;
+	void (*pool_drop)(uint32_t slot, PagerCounters& counters)                                 = nullptr;
 
 	~PagerStore() { Close(); }
 
@@ -68,6 +82,9 @@ public:
 		return m_next++;
 	}
 	void Free(uint32_t slot) {
+		if (pool_drop != nullptr) {
+			pool_drop(slot, counters);
+		}
 		std::lock_guard lock(m_mutex);
 		--m_in_use;
 		m_free.push_back(slot);
@@ -99,9 +116,23 @@ public:
 	}
 
 	bool Write(uint32_t slot, const void* data, uint64_t size) {
-		return Transfer(slot, 0, const_cast<void*>(data), size, true);
+		const bool written = Transfer(slot, 0, const_cast<void*>(data), size, true);
+		if (written && pool_put != nullptr) {
+			pool_put(slot, data, size, counters);
+		}
+		return written;
 	}
-	bool Read(uint32_t slot, uint64_t offset, void* data, uint64_t size) { return Transfer(slot, offset, data, size, false); }
+	bool Read(uint32_t slot, uint64_t offset, void* data, uint64_t size) {
+		if (pool_read != nullptr && offset == 0 && size == kSlotSize) {
+			if (pool_read(slot, data, counters)) {
+				return true;
+			}
+			counters.pool_misses++;
+		}
+		return Transfer(slot, offset, data, size, false);
+	}
+	// The file's copy, when the pool's did not come back as it was written.
+	bool ReadFromFile(uint32_t slot, void* data, uint64_t size) { return Transfer(slot, 0, data, size, false); }
 #endif
 
 	PagerCounters counters;
