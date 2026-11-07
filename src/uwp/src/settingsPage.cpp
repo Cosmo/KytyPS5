@@ -775,6 +775,28 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    save();
 	    },
 	    {L"Reports the textures a game binds in the GPU's mip statistics, which games can read."});
+	{
+		std::vector<std::pair<uint32_t, std::wstring>> choices = {{0, L"Off"}, {128, L"128 MB"}, {256, L"256 MB"}, {512, L"512 MB"}, {768, L"768 MB"}, {1024, L"1024 MB"}};
+		if (std::none_of(choices.begin(), choices.end(), [&](const auto& choice) { return choice.first == settings.swap_pool_mb; })) {
+			choices.emplace_back(settings.swap_pool_mb, std::to_wstring(settings.swap_pool_mb) + L" MB, from the settings file");
+		}
+		std::vector<std::wstring> names;
+		size_t                    selected = choices.size();
+		for (size_t index = 0; index < choices.size(); index++) {
+			names.push_back(choices[index].second);
+			if (choices[index].first == settings.swap_pool_mb) {
+				selected = index;
+			}
+		}
+		AddChoice(
+		    memory, explanation, L"Compressed swap pool", std::move(names), selected,
+		    [state, choices, save](size_t index) {
+			    state->settings.swap_pool_mb = choices[index].first;
+			    save();
+		    },
+		    {L"Keeps recently swapped game memory compressed in RAM, so it comes back faster than from the swap file.",
+		     L"A bigger pool holds more, but leaves the game less RAM. Takes effect the next time a game starts."});
+	}
 	AddSwitch(
 	    memory, explanation, L"Compact GPU memory allocation", settings.gpu_memory_savings,
 	    [state, save](bool on) {
