@@ -348,8 +348,12 @@ public:
 		}
 		for (int attempt = 0; attempt < 2 && !committed; ++attempt) {
 			// the second attempt follows a failure (the process is at its limit of memory): some windows leave first
-			if (attempt == 1 && MakeRoom(kRoomWindows, host) == 0) {
-				break;
+			// (A window from the store comes back as a view, and what failed may be the console's limit of mappings: only a view that leaves helps that.)
+			if (attempt == 1) {
+				const bool from_store = m_evicted.find(w) != m_evicted.end();
+				if ((!from_store || MakeRoom(kRoomWindows, host, true) == 0) && MakeRoom(kRoomWindows, host) == 0) {
+					break;
+				}
 			}
 			const auto ev = m_evicted.find(w); // (found again: MakeRoom adds to the map)
 			if (ev != m_evicted.end()) {
@@ -581,7 +585,7 @@ public:
 	// Evicts up to `count` windows on the spot, the coldest it finds (swept ones first in effect: they were not touched for a while; then the ones
 	// not touched since the last look; then any), so that the commit can be tried again. Under the caller's exclusive lock, which also holds off
 	// every thread that writes to a window while it is copied: that one waits for the lock at its fault. Returns how many windows left.
-	uint64_t MakeRoom(uint64_t count, HostOps& host) {
+	uint64_t MakeRoom(uint64_t count, HostOps& host, bool views_only = false) {
 		uint64_t done     = 0;
 		int      failures = 0; // in a row: when the host cannot spill (no store), trying 128 windows each time would only cost
 		bool     give_up  = false;
@@ -598,7 +602,7 @@ public:
 					}
 					m_room_hand = w + 1;
 					const uint8_t f = m_flags.Get(w);
-					if ((f & kFull) == 0 || (f & (kProt | kNoAccess | kEvicting)) != 0 || IsPinned(w)) {
+					if ((f & kFull) == 0 || (f & (kProt | kNoAccess | kEvicting)) != 0 || IsPinned(w) || (views_only && !IsView(w))) {
 						return false;
 					}
 					if (pass == 0 && (f & (kSwept | kTouched)) == kTouched) {
