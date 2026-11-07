@@ -163,6 +163,9 @@ struct GuestMemoryTotals {
 	uint64_t swapped      = 0;
 	uint64_t swapped_out  = 0;
 	uint64_t swapped_in   = 0;
+	uint64_t pool_bytes   = 0; // the compressed pool in RAM, and the reads it and the file served
+	uint64_t pool_hits    = 0;
+	uint64_t pool_misses  = 0;
 	uint64_t swap_wait_ns = 0;
 	bool     pager        = false;
 };
