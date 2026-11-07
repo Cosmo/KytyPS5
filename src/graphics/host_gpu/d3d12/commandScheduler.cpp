@@ -310,6 +310,7 @@ void CommandScheduler::DeferPriorityOperation(Common::UniqueFunction<void>&& ope
 }
 
 void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
+	Common::Thread::RaiseCurrentPriority(); // it signals the guest's interrupts and labels
 	while (!stop.stop_requested()) {
 		PendingOperation operation;
 		{
