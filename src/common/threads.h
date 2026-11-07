@@ -23,6 +23,8 @@ void SleepNano(uint64_t nanos);
 bool IsMainThread();
 // The calling thread's name, as debuggers and the overlay's busiest threads show it (Linux keeps 15 characters).
 void SetCurrentName(const std::string& name);
+// The UWP app: above the game's threads, for the emulator's threads they wait on. Elsewhere it does nothing.
+void RaiseCurrentPriority();
 // Unique per thread; never reused by another thread.
 int GetThreadIdUnique();
 
