@@ -575,7 +575,10 @@ void DefineGetBdaPointer(EmitterState& state);
 // byte offset in it in the low 32 bits): a physical storage buffer load, or a read through the
 // guest buffer table where the host has no physical pointers. 4-byte aligned; `bda` is not 0.
 // `coherent` (RDNA2 DLC) makes the load volatile, through a Coherent block for physical pointers.
-uint32_t LoadGuestPointerDword(EmitterState& state, uint32_t bda, bool coherent = false);
+// `uniform`: every lane of the wave reads the same address (SMEM), so the guest buffer table is
+// read through the first lane's slot directly, without the waterfall loop.
+uint32_t LoadGuestPointerDword(EmitterState& state, uint32_t bda, bool coherent = false,
+                               bool uniform = false);
 void DefineIndirectBufferLoads(ValueEmitContext& ctx);
 void DefineBvhIntersect(EmitterState& state);
 void DefineTrinityBvhIntersect(EmitterState& state);
