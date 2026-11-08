@@ -235,7 +235,8 @@ void RecordBdaFault(EmitterState& state, uint32_t page) {
 	                          Binary(state, spv::OpBitwiseOr, TypeU32(state), value, bit));
 }
 
-uint32_t LoadBdaDword(ValueEmitContext& ctx, uint32_t address, bool coherent = false) {
+uint32_t LoadBdaDword(ValueEmitContext& ctx, uint32_t address, bool coherent = false,
+                      bool uniform = false) {
 	auto&      state   = ctx.state;
 	const auto bda     = GetBdaPointer(state, address);
 	const auto present =
@@ -245,7 +246,7 @@ uint32_t LoadBdaDword(ValueEmitContext& ctx, uint32_t address, bool coherent = f
 	// on negative links and would advance over zero entries forever.
 	const auto missing = ConstantU32(state, state.program.info.bvh ? ~0u : 0u);
 	return EmitValueOrDefaultIfCondition(state, present, TypeU32(state), missing,
-	                                     [&]() { return LoadGuestPointerDword(state, bda, coherent); });
+	                                     [&]() { return LoadGuestPointerDword(state, bda, coherent, uniform); });
 }
 
 uint32_t LoadBda(ValueEmitContext& ctx, uint32_t address, uint32_t active, uint32_t bits,
@@ -1334,7 +1335,7 @@ void DefineIndirectBufferFormats(ValueEmitContext& ctx) {
 
 } // namespace
 
-uint32_t LoadGuestPointerDword(EmitterState& state, uint32_t bda, bool coherent) {
+uint32_t LoadGuestPointerDword(EmitterState& state, uint32_t bda, bool coherent, bool uniform) {
 	if (state.guest_buffer_table == 0) {
 		auto pointer = state.builder.AllocateId();
 		if (coherent) {
@@ -1369,6 +1370,23 @@ uint32_t LoadGuestPointerDword(EmitterState& state, uint32_t bda, bool coherent)
 	const auto offset = Unary(state, spv::OpUConvert, TypeU32(state), bda);
 	const auto index  = Binary(state, spv::OpShiftRightLogical, TypeU32(state), offset,
 	                           ConstantU32(state, 2));
+	if (uniform) {
+		// Every lane has this address: the first lane's slot is everyone's.
+		const auto first = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformBroadcastFirst, TypeU32(state), first,
+		                          ConstantU32(state, spv::ScopeSubgroup), slot);
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state, 32),
+		                          pointer, state.guest_buffer_table, first, ConstantU32(state, 0), index);
+		const auto value = state.builder.AllocateId();
+		if (coherent) {
+			state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, pointer,
+			                          spv::MemoryAccessVolatileMask);
+		} else {
+			state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, pointer);
+		}
+		return value;
+	}
 	// The lanes of a wave read through different slots, and the translator does not mark the
 	// table's index non-uniform (the SPIR-V decoration never reaches the DXIL): a waterfall loop
 	// makes the index uniform instead. Each pass takes the slot of the first lane still waiting
@@ -1997,7 +2015,7 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 	else if (shared_components > 1u)
 		value = LoadWideShared(ctx, inst, shared_components);
 	else if (mem.kind == IR::ResourceKind::ScalarAddress)
-		value = LoadBdaDword(ctx, GuestAddress(ctx, inst, mem));
+		value = LoadBdaDword(ctx, GuestAddress(ctx, inst, mem), false, true); // (SGPR address)
 	else if (address_info.access == IR::AddressAccess::Read &&
 	         mem.kind != IR::ResourceKind::Scratch)
 		value = LoadBda(ctx, GuestAddress(ctx, inst, mem), ctx.Arg(inst, inst.NumArgs() - 1),
