@@ -103,8 +103,8 @@ public:
 	// run starts from (the D3D12 counterpart of the Vulkan pipeline cache), when there are new ones.
 	void Save();
 	// Called every frame: saves, in the background, once no new pipeline was compiled for a few
-	// seconds, so the file is current even when the app isn't closed properly (on the Xbox, it may
-	// be ended any time).
+	// seconds (or a minute after the last save while they keep coming), so the file is current even
+	// when the app isn't closed properly (on the Xbox, it may be ended any time).
 	void SaveWhenIdle();
 
 	// A guest compute program translated to DXIL.
@@ -308,9 +308,14 @@ private:
 	std::atomic_uint64_t                  m_changes {0};
 	std::atomic_uint64_t                  m_last_change_ms {0};
 	std::atomic_uint64_t                  m_saved_changes {0};
-	// The save SaveWhenIdle started, in the background.
+	// The save ScheduleSave started, in the background, and when it started.
+	static constexpr uint64_t             SAVE_IDLE_MS  = 5000;
+	static constexpr uint64_t             SAVE_EVERY_MS = 60000;
+	void                                  ScheduleSave(uint64_t idle_ms, uint64_t every_ms);
 	std::thread                           m_save_thread;
 	std::atomic_bool                      m_saving {false};
+	std::mutex                            m_save_schedule_mutex;
+	uint64_t                              m_last_save_ms = 0; // under m_save_schedule_mutex
 	mutable Common::Mutex                 m_mutex;
 	// GetStatistics' last numbers, for while m_mutex is held.
 	mutable std::mutex                    m_statistics_mutex;
