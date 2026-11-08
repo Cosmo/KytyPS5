@@ -771,8 +771,7 @@ public:
 				// eviction in progress notices and gives up. (If another thread was first, there is nothing to do and the access can be retried.)
 				std::lock_guard lock(m_lazy_mutex);
 				LazyHost        host;
-				m_lazy.Touch(address >> Xbox::Lazy::Regions::kWindowBits, host);
-				return true;
+				return m_lazy.Touch(address >> Xbox::Lazy::Regions::kWindowBits, host);
 			}
 		}
 		// Fast path without any lock: a fault on a page that is committed cannot be a commit fault. It is a page watcher or a bad access, and
@@ -991,10 +990,16 @@ public:
 		if (!m_lazy_enabled || size == 0) {
 			return;
 		}
-		std::lock_guard lock(m_lazy_mutex);
-		LazyHost        host;
-		m_lazy.Pin(address, size);
-		m_lazy.Reclaim(address, size, host);
+		bool restored;
+		{
+			std::lock_guard lock(m_lazy_mutex);
+			LazyHost        host;
+			m_lazy.Pin(address, size);
+			restored = m_lazy.Reclaim(address, size, host);
+		}
+		if (!restored) {
+			PagerLog("\t pager: could not reclaim every window of the pinned stack at 0x%016" PRIx64 "\n", address);
+		}
 #else
 		(void)address;
 		(void)size;
@@ -1379,7 +1384,6 @@ public:
 				// there are too many views: this is the way back from the limit of mappings (see Privatize).
 				const bool enough    = m_pager_mode == 1 || resident() <= low;
 				bool       privatize = false;
-				bool       begun     = false;
 				{
 					std::lock_guard lock(m_lazy_mutex);
 					// A window swept to become private memory never leaves: it becomes private, or stays as it is.
@@ -1390,10 +1394,10 @@ public:
 							continue;
 						}
 					}
-					begun = m_lazy.BeginEvict(window, host);
-				}
-				if (!begun) {
-					continue; // touched meanwhile
+					if (!m_lazy.BeginEvict(window, host)) {
+						m_lazy.Touch(window, host);
+						continue;
+					}
 				}
 				if (privatize) {
 					// the window is read-only now: what is copied here is what it holds when it becomes private memory (a write is a fault that waits for the lock)
@@ -1672,8 +1676,8 @@ public:
 			uint64_t address, bytes;
 			int      kind; // 0 gap, 1 not committed, 2 committed
 		};
-		// Fast path: every window of the range is committed as a whole and has no no-access page (the window flags, no lock, no system call): a plain
-		// copy cannot fault, and the copy lock keeps unmapping away. Most host reads of guest memory (shader resource descriptors, buffer contents)
+		// Fast path: every window of the range is committed as a whole and has no no-access page (the window flags, no lock, no system call).
+		// The copy lock keeps unmapping away, and the pager handles its own faults. Most host reads of guest memory (shader resource descriptors, buffer contents)
 		// are small and end here.
 		if (m_lazy.AllReadable(vaddr, size)) {
 			std::memcpy(data, reinterpret_cast<const void*>(vaddr), size);
