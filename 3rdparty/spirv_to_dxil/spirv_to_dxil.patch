@@ -317,7 +317,7 @@ index a40ddce..b1cf335 100644
     };
  
 diff --git a/src/microsoft/compiler/nir_to_dxil.c b/src/microsoft/compiler/nir_to_dxil.c
-index 09a3203..79a7df7 100644
+index 09a3203..fbc406c 100644
 --- a/src/microsoft/compiler/nir_to_dxil.c
 +++ b/src/microsoft/compiler/nir_to_dxil.c
 @@ -229,6 +229,8 @@ get_shader_kind_str(enum dxil_shader_kind kind)
@@ -567,7 +567,50 @@ index 09a3203..79a7df7 100644
           vertex_id = get_src(ctx, &intr->src[0], 0, nir_type_int);
        } else if (attr_at_vertex) {
           vertex_id = dxil_module_get_int8_const(&ctx->mod, ctx->opts->provoking_vertex);
-@@ -4875,7 +4999,11 @@ emit_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *intr)
+@@ -4465,6 +4589,32 @@ emit_vulkan_resource_index(struct ntd_context *ctx, nir_intrinsic_instr *intr)
+    return true;
+ }
+ 
++/* Whether an access through this descriptor is marked non-uniform (SPIR-V NonUniform): the
++ * descriptor's index then differs between the lanes of a wave, and its handle has to say so.
++ * The accesses take the descriptor's index through moves (and vectors) of it.
++ */
++static bool
++descriptor_used_non_uniform(nir_def *descriptor, unsigned depth)
++{
++   nir_foreach_use(src, descriptor) {
++      nir_instr *use = nir_src_use_instr(src);
++      if (use->type == nir_instr_type_alu) {
++         nir_alu_instr *alu = nir_instr_as_alu(use);
++         if (depth < 4 && (alu->op == nir_op_mov || nir_op_is_vec(alu->op)) &&
++             descriptor_used_non_uniform(&alu->def, depth + 1))
++            return true;
++         continue;
++      }
++      if (use->type != nir_instr_type_intrinsic)
++         continue;
++      nir_intrinsic_instr *access = nir_instr_as_intrinsic(use);
++      if (nir_intrinsic_has_access(access) &&
++          (nir_intrinsic_access(access) & ACCESS_NON_UNIFORM))
++         return true;
++   }
++   return false;
++}
++
+ static bool
+ emit_load_vulkan_descriptor(struct ntd_context *ctx, nir_intrinsic_instr *intr)
+ {
+@@ -4503,7 +4653,8 @@ emit_load_vulkan_descriptor(struct ntd_context *ctx, nir_intrinsic_instr *intr)
+       if (!index_value)
+          return false;
+ 
+-      handle = emit_createhandle_call_dynamic(ctx, resource_class, space, binding, index_value, false);
++      handle = emit_createhandle_call_dynamic(ctx, resource_class, space, binding, index_value,
++                                              descriptor_used_non_uniform(&intr->def, 0));
+    } else {
+       const struct dxil_value *heap_index_value = get_src(ctx, &intr->src[0], 0, nir_type_uint32);
+       if (!heap_index_value)
+@@ -4875,7 +5026,11 @@ emit_intrinsic(struct ntd_context *ctx, nir_intrinsic_instr *intr)
        return emit_load_input_via_intrinsic(ctx, intr);
     case nir_intrinsic_store_output:
     case nir_intrinsic_store_per_vertex_output:
@@ -579,7 +622,7 @@ index 09a3203..79a7df7 100644
  
     case nir_intrinsic_load_barycentric_at_offset:
     case nir_intrinsic_load_barycentric_at_sample:
-@@ -5961,6 +6089,12 @@ emit_function(struct ntd_context *ctx, nir_function *func, nir_function_impl *im
+@@ -5961,6 +6116,12 @@ emit_function(struct ntd_context *ctx, nir_function *func, nir_function_impl *im
        attr_values[0] = "ftz";
     else if (ctx->shader->info.float_controls_execution_mode & FLOAT_CONTROLS_DENORM_PRESERVE_FP32)
        attr_values[0] = "preserve";
@@ -592,7 +635,7 @@ index 09a3203..79a7df7 100644
  
     const struct dxil_type *void_type = dxil_module_get_void_type(&ctx->mod);
     const struct dxil_type *func_type = dxil_module_add_function_type(&ctx->mod, void_type, NULL, 0);
-@@ -6185,6 +6319,8 @@ get_dxil_shader_kind(struct nir_shader *s)
+@@ -6185,6 +6346,8 @@ get_dxil_shader_kind(struct nir_shader *s)
     case MESA_SHADER_KERNEL:
     case MESA_SHADER_COMPUTE:
        return DXIL_COMPUTE_SHADER;
@@ -601,7 +644,7 @@ index 09a3203..79a7df7 100644
     default:
        UNREACHABLE("unknown shader stage in nir_to_dxil");
        return DXIL_COMPUTE_SHADER;
-@@ -6412,6 +6548,20 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
+@@ -6412,6 +6575,20 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
        psv0->ds.output_position_present = ctx->mod.info.has_out_position;
        psv1->sig_patch_const_or_prim_vectors = ctx->mod.num_psv_patch_consts;
        break;
@@ -622,7 +665,7 @@ index 09a3203..79a7df7 100644
     default:
        assert(0 && "Shader type not (yet) supported");
     }
-@@ -6427,6 +6577,69 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
+@@ -6427,6 +6604,69 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
     }
  }
  
@@ -692,7 +735,7 @@ index 09a3203..79a7df7 100644
  static nir_variable *
  add_sysvalue(struct ntd_context *ctx,
                uint8_t value, char *name,
-@@ -6540,6 +6753,14 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
+@@ -6540,6 +6780,14 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
     return glsl_count_attribute_slots(type, false);
  }
  
@@ -707,7 +750,7 @@ index 09a3203..79a7df7 100644
  static const unsigned dxil_validator_min_capable_version = DXIL_VALIDATOR_1_4;
  static const unsigned dxil_validator_max_capable_version = DXIL_VALIDATOR_1_8;
  static const unsigned dxil_min_shader_model = SHADER_MODEL_6_0;
-@@ -6612,7 +6833,7 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6612,7 +6860,7 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     ctx->mod.major_validator = validator_version >> 16;
     ctx->mod.minor_validator = validator_version & 0xffff;
  
@@ -716,7 +759,7 @@ index 09a3203..79a7df7 100644
        uint64_t in_mask =
           s->info.stage == MESA_SHADER_VERTEX ?
           0 : (VARYING_BIT_PRIMITIVE_ID | VARYING_BIT_VIEWPORT | VARYING_BIT_LAYER);
-@@ -6632,7 +6853,16 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6632,7 +6880,16 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     s->info.disable_output_offset_src_constant_folding = true;
     NIR_PASS(_, s, dxil_nir_ensure_position_writes);
     NIR_PASS(_, s, dxil_nir_lower_system_values);
@@ -734,7 +777,7 @@ index 09a3203..79a7df7 100644
  
     /* Do a round of optimization to try to vectorize loads/stores. Otherwise the addresses used for loads
      * might be too opaque for the pass to see that they're next to each other. */
-@@ -6746,7 +6976,8 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6746,7 +7003,8 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     }
  
     if ((ctx->mod.shader_kind == DXIL_HULL_SHADER ||
@@ -1163,10 +1206,20 @@ index 62851f2..23f6dda 100644
      spirv_to_dxil_free
      spirv_to_dxil_get_version
 diff --git a/src/microsoft/spirv_to_dxil/spirv_to_dxil.h b/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
-index 8f4684c..e8452ae 100644
+index 8f4684c..9c69892 100644
 --- a/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
 +++ b/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
-@@ -46,6 +46,8 @@ typedef enum {
+@@ -24,6 +24,9 @@
+ #ifndef SPIRV_TO_DXIL_H
+ #define SPIRV_TO_DXIL_H
+ 
++/* A descriptor index that the SPIR-V marks NonUniform reaches the DXIL handle (CreateHandle's nonUniformIndex). */
++#define SPIRV_TO_DXIL_NON_UNIFORM_DESCRIPTOR_INDEX 1
++
+ #include "dxil_versions.h"
+ 
+ #include <stdbool.h>
+@@ -46,6 +49,8 @@ typedef enum {
     DXIL_SPIRV_SHADER_GEOMETRY = 3,
     DXIL_SPIRV_SHADER_FRAGMENT = 4,
     DXIL_SPIRV_SHADER_COMPUTE = 5,
@@ -1175,7 +1228,7 @@ index 8f4684c..e8452ae 100644
     DXIL_SPIRV_SHADER_KERNEL = 14,
  } dxil_spirv_shader_stage;
  
-@@ -199,6 +201,17 @@ struct dxil_spirv_runtime_conf {
+@@ -199,6 +204,17 @@ struct dxil_spirv_runtime_conf {
  
     // Affects which features can be used by the shader
     enum dxil_shader_model shader_model_max;
@@ -1193,7 +1246,7 @@ index 8f4684c..e8452ae 100644
  };
  
  struct dxil_spirv_debug_options {
-@@ -235,6 +248,30 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
+@@ -235,6 +251,30 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
                const struct dxil_spirv_logger *logger,
                struct dxil_spirv_object *out_dxil);
  
