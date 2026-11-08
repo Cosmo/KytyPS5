@@ -6,6 +6,7 @@
 #include "kernel/pthread.h"
 #include "libs/audio.h"
 #include "libs/libs.h"
+#include "libs/videoHardware.h"
 
 #include <algorithm>
 #include <atomic>
@@ -24,6 +25,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 extern "C" {
@@ -32,6 +34,8 @@ extern "C" {
 #include <libavformat/avio.h>
 #include <libavutil/avutil.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
@@ -1078,6 +1082,10 @@ private:
 		if (swr != nullptr) {
 			swr_free(&swr);
 		}
+		if (video_ctx != nullptr && video_ctx->hw_device_ctx != nullptr) {
+			// Freeing the hardware decoder calls D3D12: on a thread of the app's own (VideoHardware::Device).
+			std::thread([this] { avcodec_free_context(&video_ctx); }).join();
+		}
 		if (video_ctx != nullptr) {
 			avcodec_free_context(&video_ctx);
 		}
@@ -1126,6 +1134,37 @@ private:
 		}
 		return true;
 	}
+	// Whether FFmpeg's decoder can decode on a D3D12 video device.
+	static bool TakesD3D12(const AVCodec* dec) {
+		for (int i = 0;; i++) {
+			const auto* config = avcodec_get_hw_config(dec, i);
+			if (config == nullptr) {
+				return false;
+			}
+			if (config->device_type == AV_HWDEVICE_TYPE_D3D12VA && (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0) {
+				return true;
+			}
+		}
+	}
+	// FFmpeg's choice of frame format: D3D12 (the hardware decoder) when offered, in a frame pool of the coded size
+	// (VideoHardware::MakeFrames), else the first CPU format. When the hardware decoder can't take the video (a profile or size it
+	// lacks), FFmpeg asks again without D3D12 and the video is decoded on the CPU.
+	static AVPixelFormat PickFormat(AVCodecContext* c, const AVPixelFormat* formats) {
+		const AVPixelFormat* first_cpu = nullptr;
+		for (const auto* f = formats; *f != AV_PIX_FMT_NONE; f++) {
+			if (*f == AV_PIX_FMT_D3D12) {
+				VideoHardware::MakeFrames(c);
+				return *f;
+			}
+			const auto* desc = av_pix_fmt_desc_get(*f);
+			if (first_cpu == nullptr && desc != nullptr && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL) == 0) {
+				first_cpu = f;
+			}
+		}
+		std::printf("AvPlayer: the hardware decoder does not take this video (%s, %dx%d): decoded on the CPU\n",
+		            c->codec != nullptr ? c->codec->name : "?", c->width, c->height);
+		return first_cpu != nullptr ? *first_cpu : AV_PIX_FMT_NONE;
+	}
 	bool OpenCodec(int id, AVCodecContext** out) {
 		auto* s   = fmt->streams[id];
 		auto* dec = find_decoder(s->codecpar->codec_id);
@@ -1147,6 +1186,15 @@ private:
 			// runs on a thread of its own and takes frames with send/receive, so the frames that frame threading holds back cost nothing.
 			c->thread_count = 0; // as many as there are cores
 			c->thread_type  = FF_THREAD_FRAME | FF_THREAD_SLICE;
+		}
+		if (c->codec_type == AVMEDIA_TYPE_VIDEO && Config::VideoHardwareDecode() && TakesD3D12(dec)) {
+			if (AVBufferRef* device = VideoHardware::Device(); device != nullptr) {
+				// The console's video decoder does the work: FFmpeg asks PickFormat, which takes D3D12 frames where the decoder can make
+				// them and the CPU's otherwise. One thread: more would only hold frames back.
+				c->hw_device_ctx = av_buffer_ref(device);
+				c->get_format    = PickFormat;
+				c->thread_count  = 1;
+			}
 		}
 		if (avcodec_open2(c, dec, nullptr) < 0) {
 			avcodec_free_context(&c);
@@ -1198,7 +1246,12 @@ private:
 		                       : static_cast<int64_t>(ms) * 1000;
 		avformat_seek_file(fmt, sid, INT64_MIN, ts, INT64_MAX, 0);
 		if (video_ctx != nullptr) {
-			avcodec_flush_buffers(video_ctx);
+			if (video_ctx->hw_device_ctx != nullptr) {
+				// D3D12 calls: on a thread of the app's own (VideoHardware::Device).
+				std::thread([this] { avcodec_flush_buffers(video_ctx); }).join();
+			} else {
+				avcodec_flush_buffers(video_ctx);
+			}
 		}
 		if (audio_ctx != nullptr) {
 			avcodec_flush_buffers(audio_ctx);
@@ -1235,7 +1288,13 @@ private:
 		demux_eof       = false;
 		video_done      = !video_id;
 		audio_done      = !audio_id;
-		if ((video_id && !CreateWorker(video_thread, VideoDecoderEntry, "AvPlayerVideoDecoder")) ||
+		// The hardware decoder's D3D12 calls need a thread of the app's own: on a game thread, an exception the Xbox driver raises and
+		// catches inside ends the app (VideoHardware::Device).
+		const bool host_video = video_id && video_ctx != nullptr && video_ctx->hw_device_ctx != nullptr;
+		if (host_video) {
+			video_host_thread = std::thread([this] { VideoDecoder(); });
+		}
+		if ((video_id && !host_video && !CreateWorker(video_thread, VideoDecoderEntry, "AvPlayerVideoDecoder")) ||
 		    (audio_id && !CreateWorker(audio_thread, AudioDecoderEntry, "AvPlayerAudioDecoder")) ||
 		    !CreateWorker(demux_thread, DemuxEntry, "AvPlayerDemuxer")) {
 			lock.unlock();
@@ -1265,6 +1324,9 @@ private:
 		if (video_thread != nullptr) {
 			LibKernel::PthreadJoin(video_thread, nullptr);
 			video_thread = nullptr;
+		}
+		if (video_host_thread.joinable()) {
+			video_host_thread.join();
 		}
 		if (audio_thread != nullptr) {
 			LibKernel::PthreadJoin(audio_thread, nullptr);
@@ -1527,6 +1589,25 @@ private:
 		    size > buffer->Size()) {
 			return false;
 		}
+		// A frame of the hardware decoder is in a GPU texture: FFmpeg copies it out (NV12, or P010 for 10 bits, converted below).
+		struct FrameHolder {
+			AVFrame* frame = nullptr;
+			~FrameHolder() { av_frame_free(&frame); }
+		} copied;
+		const bool hardware = src->hw_frames_ctx != nullptr;
+		if (hardware) {
+			copied.frame = av_frame_alloc();
+			if (copied.frame == nullptr || av_hwframe_transfer_data(copied.frame, src, 0) < 0 || av_frame_copy_props(copied.frame, src) < 0) {
+				return false;
+			}
+			src = copied.frame;
+		}
+		if (!hardware_logged) {
+			hardware_logged = true;
+			std::printf("AvPlayer: video %dx%d %s decoded %s\n", src->width, src->height,
+			            video_ctx != nullptr && video_ctx->codec != nullptr ? video_ctx->codec->name : "?",
+			            hardware ? "by the hardware decoder" : "on the CPU");
+		}
 		AVFrame* nv12 = src;
 		AVFrame* tmp  = nullptr;
 		if (src->format != AV_PIX_FMT_NV12) {
@@ -1674,6 +1755,7 @@ private:
 	AVFormatContext*                         fmt            = nullptr;
 	AVCodecContext*                          video_ctx      = nullptr;
 	AVCodecContext*                          audio_ctx      = nullptr;
+	bool                                     hardware_logged = false; // the decoder thread's first frame says where the video is decoded
 	SwsContext*                              sws            = nullptr;
 	SwrContext*                              swr            = nullptr;
 	int                                      sws_src_width  = 0;
@@ -1691,6 +1773,7 @@ private:
 	std::optional<ReadyFrame>                current_audio;
 	LibKernel::Pthread                       demux_thread = nullptr;
 	LibKernel::Pthread                       video_thread = nullptr;
+	std::thread                              video_host_thread; // the video decoder's thread with the hardware decoder
 	LibKernel::Pthread                       audio_thread = nullptr;
 	std::atomic_bool                         worker_stop {true};
 	std::atomic_bool                         interrupt_io {false};

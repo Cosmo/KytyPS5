@@ -347,6 +347,10 @@ bool VideoDecodeThreads() {
 	return g_config == nullptr || g_config->video_decode_threads;
 }
 
+bool VideoHardwareDecode() {
+	return g_config != nullptr && g_config->video_hardware_decode;
+}
+
 uint64_t AppMemoryUsage() {
 	return g_config != nullptr && g_config->app_memory_usage != nullptr ? g_config->app_memory_usage() : 0;
 }
