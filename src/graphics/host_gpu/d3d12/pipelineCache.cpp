@@ -710,15 +710,30 @@ void PipelineCache::Save() {
 void PipelineCache::SaveWhenIdle() {
 	// Pipelines are compiled in bursts (a game's start, new areas): the save follows one, in the
 	// background. Frames don't wait for it; only a new pipeline meanwhile would.
-	constexpr uint64_t IDLE_MS = 5000;
 	PrewarmTick();
-	const auto         changes = m_changes.load();
-	if (changes == 0 || changes == m_saved_changes || m_saving ||
-	    GetTickCount64() - m_last_change_ms.load() < IDLE_MS) {
+	ScheduleSave(SAVE_IDLE_MS, SAVE_EVERY_MS);
+}
+
+// Saves in the background once nothing new has come for `idle_ms`, or `every_ms` after the last save: a game can compile for minutes
+// without a pause (a start of hundreds of pipelines), presenting next to no frames, and the app can end without closing. Called at each
+// present (SaveWhenIdle) and after each new pipeline (LoadOrCreate).
+void PipelineCache::ScheduleSave(uint64_t idle_ms, uint64_t every_ms) {
+	std::unique_lock schedule(m_save_schedule_mutex, std::try_to_lock);
+	if (!schedule.owns_lock()) {
 		return;
 	}
+	const auto     changes = m_changes.load();
+	const uint64_t now     = GetTickCount64();
+	if (m_last_save_ms == 0) {
+		m_last_save_ms = now;
+	}
+	if (changes == 0 || changes == m_saved_changes || m_saving ||
+	    (now - m_last_change_ms.load() < idle_ms && now - m_last_save_ms < every_ms)) {
+		return;
+	}
+	m_last_save_ms = now;
 	if (m_save_thread.joinable()) {
-		m_save_thread.join();
+		m_save_thread.join(); // finished: m_saving is false
 	}
 	m_saving      = true;
 	m_save_thread = std::thread([this] {
@@ -812,6 +827,7 @@ ID3D12PipelineState* PipelineCache::LoadOrCreate(const std::wstring&            
 		m_changes++;
 	}
 	RecordPipeline(name, desc);
+	ScheduleSave(UINT64_MAX, SAVE_EVERY_MS); // a long compile presents no frames (ScheduleSave)
 	return pipeline;
 }
 
