@@ -891,6 +891,14 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    {L"Decodes the videos games play through the system video player on all CPU cores.",
 	     L"Off decodes them on one thread. Use it to test video problems."});
 	AddSwitch(
+	    testing, explanation, L"Hardware video decoding", settings.video_hardware_decode,
+	    [state, save](bool on) {
+		    state->settings.video_hardware_decode = on;
+		    save();
+	    },
+	    {L"Decodes the videos games play through the system video player with the console's video decoder, so the CPU stays free for the game.",
+	     L"Videos the decoder can't take are decoded on the CPU. Off decodes all of them on the CPU."});
+	AddSwitch(
 	    testing, explanation, L"PlayGo fallback", settings.playgo_fallback,
 	    [state, save](bool on) {
 		    state->settings.playgo_fallback = on;
