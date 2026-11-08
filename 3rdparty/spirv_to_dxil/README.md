@@ -11,6 +11,7 @@ The D3D12 backend turns the SPIR-V that Kyty's shader recompiler makes into DXIL
 - fixes for DXIL validator 1.8 and for wave operations in helper lanes
 - Y and Z flips per viewport: a shader that writes the viewport index takes that viewport's bit of the flip masks
 - half to 32-bit integer conversions without 16-bit ops: NIR folds the shader's unpack to a float away, which left a 16-bit float conversion a device without 16-bit ops (the Xbox) rejects
+- descriptor indices the SPIR-V marks `NonUniform` reach the DXIL handle (`CreateHandle`'s `nonUniformIndex`): every dynamic handle was uniform, so lanes with different indices read through the first lane's descriptor
 
 Build it once, with the static C runtime so that the DLL imports nothing a UWP app does not have (it imports only `KERNEL32.dll` and an API set):
 
