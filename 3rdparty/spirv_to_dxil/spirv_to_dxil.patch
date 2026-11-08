@@ -317,7 +317,7 @@ index a40ddce..b1cf335 100644
     };
  
 diff --git a/src/microsoft/compiler/nir_to_dxil.c b/src/microsoft/compiler/nir_to_dxil.c
-index 09a3203..fbc406c 100644
+index 09a3203..69e0a2f 100644
 --- a/src/microsoft/compiler/nir_to_dxil.c
 +++ b/src/microsoft/compiler/nir_to_dxil.c
 @@ -229,6 +229,8 @@ get_shader_kind_str(enum dxil_shader_kind kind)
@@ -644,7 +644,32 @@ index 09a3203..fbc406c 100644
     default:
        UNREACHABLE("unknown shader stage in nir_to_dxil");
        return DXIL_COMPUTE_SHADER;
-@@ -6412,6 +6575,20 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
+@@ -6323,7 +6486,7 @@ optimize_nir(struct nir_shader *s, const struct nir_to_dxil_options *opts)
+       NIR_PASS(progress, s, nir_opt_cse);
+ 
+       nir_opt_peephole_select_options peephole_select_options = {
+-         .limit = 8,
++         .limit = 64,
+          .indirect_load_ok = true,
+          .expensive_alu_ok = true,
+       };
+@@ -6350,6 +6513,15 @@ optimize_nir(struct nir_shader *s, const struct nir_to_dxil_options *opts)
+       NIR_PASS(progress, s, nir_opt_algebraic_late);
+    } while (progress);
+ 
++   /* Move code next to its uses. Shorter live ranges make the driver's own
++    * compile of large shaders much faster. */
++   const nir_move_options move_options =
++      nir_move_const_undef | nir_move_load_ubo | nir_move_load_input |
++      nir_move_comparisons | nir_move_copies | nir_move_load_ssbo | nir_move_alu;
++   NIR_PASS(_, s, nir_opt_sink, move_options);
++   NIR_PASS(_, s, nir_opt_move, move_options);
++   NIR_PASS(_, s, nir_opt_gcm, true);
++
+    NIR_PASS(_, s, nir_lower_undef_to_zero);
+ }
+ 
+@@ -6412,6 +6584,20 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
        psv0->ds.output_position_present = ctx->mod.info.has_out_position;
        psv1->sig_patch_const_or_prim_vectors = ctx->mod.num_psv_patch_consts;
        break;
@@ -665,7 +690,7 @@ index 09a3203..fbc406c 100644
     default:
        assert(0 && "Shader type not (yet) supported");
     }
-@@ -6427,6 +6604,69 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
+@@ -6427,6 +6613,69 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
     }
  }
  
@@ -735,7 +760,7 @@ index 09a3203..fbc406c 100644
  static nir_variable *
  add_sysvalue(struct ntd_context *ctx,
                uint8_t value, char *name,
-@@ -6540,6 +6780,14 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
+@@ -6540,6 +6789,14 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
     return glsl_count_attribute_slots(type, false);
  }
  
@@ -750,7 +775,7 @@ index 09a3203..fbc406c 100644
  static const unsigned dxil_validator_min_capable_version = DXIL_VALIDATOR_1_4;
  static const unsigned dxil_validator_max_capable_version = DXIL_VALIDATOR_1_8;
  static const unsigned dxil_min_shader_model = SHADER_MODEL_6_0;
-@@ -6612,7 +6860,7 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6612,7 +6869,7 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     ctx->mod.major_validator = validator_version >> 16;
     ctx->mod.minor_validator = validator_version & 0xffff;
  
@@ -759,7 +784,7 @@ index 09a3203..fbc406c 100644
        uint64_t in_mask =
           s->info.stage == MESA_SHADER_VERTEX ?
           0 : (VARYING_BIT_PRIMITIVE_ID | VARYING_BIT_VIEWPORT | VARYING_BIT_LAYER);
-@@ -6632,7 +6880,16 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6632,7 +6889,16 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     s->info.disable_output_offset_src_constant_folding = true;
     NIR_PASS(_, s, dxil_nir_ensure_position_writes);
     NIR_PASS(_, s, dxil_nir_lower_system_values);
@@ -777,7 +802,7 @@ index 09a3203..fbc406c 100644
  
     /* Do a round of optimization to try to vectorize loads/stores. Otherwise the addresses used for loads
      * might be too opaque for the pass to see that they're next to each other. */
-@@ -6746,7 +7003,8 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6746,7 +7012,8 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     }
  
     if ((ctx->mod.shader_kind == DXIL_HULL_SHADER ||
