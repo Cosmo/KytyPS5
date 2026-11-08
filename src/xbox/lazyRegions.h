@@ -177,26 +177,42 @@ public:
 			return false;
 		}
 		const uint64_t end = address + size;
-		uint64_t cursor    = address;
-		while (cursor < end) {
-			{
-				// A window that the range cuts through and that is in the store comes back first: the part that stays needs its contents.
-				const Region*  piece = Find(cursor);
-				const uint64_t pa = std::max(piece->start, cursor), pb = std::min(piece->end, end);
-				for (const uint64_t w: {pa >> kWindowBits, (pb - 1) >> kWindowBits}) {
-					if (pa <= (w << kWindowBits) && ((w + 1) << kWindowBits) <= pb) {
-						continue; // the range takes the whole window
-					}
-					if (m_evicted.count(w) != 0) {
-						CommitAt(w << kWindowBits, host);
-					}
-					// a view cannot be cut: the part that stays needs ordinary memory
-					Region* cut = FindMut(w << kWindowBits);
-					if (cut != nullptr && cut->committed[w - (cut->start >> kWindowBits)] == 2 && host.MakePrivate(w << kWindowBits, kWindow)) {
-						cut->committed[w - (cut->start >> kWindowBits)] = 1;
-					}
+		// Prepare both cut windows before removing any mappings. A page-in may evict other
+		// windows to make room, so keep the first edge pinned while preparing the second.
+		struct EdgePin {
+			Regions& regions;
+			uint64_t id = 0;
+			~EdgePin() {
+				if (id != 0) {
+					regions.TempUnpin(id);
 				}
 			}
+		} first_edge {*this};
+		for (const uint64_t edge: {address, end}) {
+			if ((edge & (kWindow - 1)) == 0) {
+				continue;
+			}
+			const uint64_t w = edge >> kWindowBits;
+			if (m_evicted.count(w) != 0 && CommitAt(w << kWindowBits, host) == CommitResult::Failed) {
+				return false;
+			}
+			if (!Touch(w, host)) {
+				return false;
+			}
+			// A view cannot be cut. Keep the surviving pages in private memory.
+			Region* cut = FindMut(w << kWindowBits);
+			if (cut != nullptr && cut->committed[w - (cut->start >> kWindowBits)] == 2) {
+				if (!host.MakePrivate(w << kWindowBits, kWindow)) {
+					return false;
+				}
+				cut->committed[w - (cut->start >> kWindowBits)] = 1;
+			}
+			if (edge == address && (end & (kWindow - 1)) != 0 && (end >> kWindowBits) != w) {
+				first_edge.id = TempPin(address, 1);
+			}
+		}
+		uint64_t cursor = address;
+		while (cursor < end) {
 			auto it = FindIt(cursor);
 			Region old = std::move(it->second);
 			m_regions.erase(it);
@@ -204,10 +220,6 @@ public:
 			// the windows lose their flags before anything is decommitted (a window the range cuts through is no longer committed as a whole);
 			// the windows in the store are gone, their slots are free
 			for (uint64_t w = a >> kWindowBits; w <= (b - 1) >> kWindowBits; ++w) {
-				// a swept window (no-access) or one being copied out (read-only) that the range cuts through keeps its other part: read-write again
-				if ((m_flags.Get(w) & (kSwept | kEvicting)) != 0 && !(a <= (w << kWindowBits) && ((w + 1) << kWindowBits) <= b)) {
-					Touch(w, host);
-				}
 				m_flags.Store(w, 0);
 				if (const auto ev = m_evicted.find(w); ev != m_evicted.end()) {
 					host.FreeSlot(ev->second);
@@ -238,7 +250,7 @@ public:
 				if (kind == 2) {
 					host.Decommit(lo, hi - lo, true);
 				} else if (kind == 3) {
-					host.Decommit(lo, hi - lo, false); // private memory, but a window that is an allocation of its own: a call never spans it with a neighbour
+					host.Decommit(lo, hi - lo, false); // converted private window, in its own allocation
 				}
 			}
 			if (run_end > run_start) {
@@ -279,12 +291,12 @@ public:
 				if (r.committed[w - (r.start >> kWindowBits)] != 0) {
 					// a window the pager swept (no-access) or is copying out (read-only) is made read-write first: the protection asked for applies to
 					// pages of a window that is read-write as a whole
-					if ((m_flags.Get(w) & (kSwept | kEvicting)) != 0) {
-						Touch(w, host);
+					if (!Touch(w, host)) {
+						return false;
 					}
 					NoteProtect(w, lo, hi, mode, clears);
 					if (r.committed[w - (r.start >> kWindowBits)] >= 2) {
-						// a view is a mapping of its own, a privatized window an allocation of its own: the call covers only this window
+						// Views and converted private windows are separate allocations.
 						if (!flush() || !host.Protect(lo, hi - lo, mode)) {
 							return false;
 						}
@@ -427,8 +439,8 @@ public:
 				if (result == CommitResult::Failed) {
 					return false;
 				}
-				if (result == CommitResult::AlreadyCommitted) {
-					Touch(w, host); // a host call is about to access the window: not cold, and not no-access
+				if (result == CommitResult::AlreadyCommitted && !Touch(w, host)) {
+					return false;
 				}
 				if ((m_flags.Get(w) & kFull) != 0) {
 					m_flags.Or(w, kTouched); // and the system may write into it after this call returns: the pager keeps its hands off it for a cycle
@@ -499,16 +511,20 @@ public:
 	}
 	// Gives back what the pager took from the windows of the range (swept or evicting windows are touched, evicted ones are paged in): for a
 	// range that was just pinned and may be in use as a stack already.
-	void Reclaim(uint64_t address, uint64_t size, HostOps& host) {
+	bool Reclaim(uint64_t address, uint64_t size, HostOps& host) {
 		if (size == 0) {
-			return;
+			return true;
 		}
+		bool restored = true;
 		for (uint64_t w = address >> kWindowBits; w <= (address + size - 1) >> kWindowBits; ++w) {
-			Touch(w, host);
-			if (m_evicted.count(w) != 0) {
-				CommitAt(w << kWindowBits, host);
+			if (!Touch(w, host)) {
+				restored = false;
+			}
+			if (m_evicted.count(w) != 0 && CommitAt(w << kWindowBits, host) == CommitResult::Failed) {
+				restored = false;
 			}
 		}
+		return restored;
 	}
 	// A window the pager may sweep: committed as a whole, read-write, nothing protected, not swept or on its way out, and not a stack.
 	[[nodiscard]] bool CanSweep(uint64_t window) const {
@@ -540,25 +556,28 @@ public:
 		}
 		return true;
 	}
-	// A touch of a swept window or of one on its way out: read-write again, and not cold. False when the window is neither.
+	// Restores the permissions of a window held by the pager. Other windows need no change.
 	bool Touch(uint64_t window, HostOps& host) {
-		if ((m_flags.Get(window) & (kSwept | kEvicting)) == 0) {
+		const uint8_t flags = m_flags.Get(window);
+		if ((flags & (kSwept | kEvicting)) == 0) {
+			return true;
+		}
+		if (!host.Protect(window << kWindowBits, kWindow, Mode::ReadWrite)) {
 			return false;
 		}
-		host.Protect(window << kWindowBits, kWindow, Mode::ReadWrite);
-		m_flags.Or(window, kTouched);
-		m_flags.And(window, static_cast<uint8_t>(~(kSwept | kEvicting)));
+		m_flags.Store(window, static_cast<uint8_t>((flags | kTouched) & ~(kSwept | kEvicting)));
 		return true;
 	}
-	// A swept window that nobody touched: read-only, so that it can be copied out and a write is noticed. False: touched, or not swept.
+	// A swept window that nobody touched: read-only, so that it can be copied out and a write is noticed. Returns false if no change was made.
 	bool BeginEvict(uint64_t window, HostOps& host) {
 		const uint8_t f = m_flags.Get(window);
 		if ((f & kSwept) == 0 || (f & kTouched) != 0) {
 			return false;
 		}
-		m_flags.Or(window, kEvicting);
-		m_flags.And(window, static_cast<uint8_t>(~kSwept));
-		host.Protect(window << kWindowBits, kWindow, Mode::Read);
+		if (!host.Protect(window << kWindowBits, kWindow, Mode::Read)) {
+			return false;
+		}
+		m_flags.Store(window, static_cast<uint8_t>((f & ~kSwept) | kEvicting));
 		return true;
 	}
 	// The copy is in `slot`: the window leaves memory unless it was written meanwhile (Touch made it read-write; the slot is then not used).
@@ -652,7 +671,7 @@ public:
 			return false;
 		}
 		flag = 3; // private memory that is an allocation of its own (neighbours are not one call with it)
-		m_flags.Store(window, kFull | kTouched); // read-write, in use for a cycle| kTouched); // read-write, in use for a cycle
+		m_flags.Store(window, kFull | kTouched); // Read-write and in use for a cycle.
 		return true;
 	}
 
@@ -706,7 +725,7 @@ public:
 
 	// Lock-free answers from the window flags (see WindowFlag); false means: ask the slow way.
 	[[nodiscard]] uint8_t FlagsOf(uint64_t address) const { return m_flags.Get(address >> kWindowBits); }
-	// Every window of the range is committed as a whole and has no no-access page: a host read cannot fault.
+	// Every window is fully committed with no guest or watcher no-access pages. Pager faults can still occur.
 	[[nodiscard]] bool AllReadable(uint64_t address, uint64_t size) const {
 		if (size == 0) {
 			return false;
@@ -718,7 +737,7 @@ public:
 		}
 		return true;
 	}
-	// Every window of the range is committed as a whole and read-write: a host write cannot fault.
+	// Every window is fully committed with no guest or watcher protection. The caller pins it before writing.
 	[[nodiscard]] bool AllWritable(uint64_t address, uint64_t size) const {
 		if (size == 0) {
 			return false;
@@ -848,6 +867,7 @@ private:
 	bool EvictNow(uint64_t window, HostOps& host) {
 		if ((m_flags.Get(window) & kSwept) != 0) {
 			if (!BeginEvict(window, host)) {
+				m_room_failures[0]++;
 				return false;
 			}
 		} else {
