@@ -608,6 +608,9 @@ void PipelineCache::InitializeDiskCache() {
 	if (Config::PipelineCacheAnyBuild()) {
 		m_cache_file.Log("kept across builds (developer setting): translations of another build may draw wrongly or crash");
 	}
+	// This driver removes the device in CreatePipelineLibrary. Read its pipeline records directly
+	// from the cache payload so we don't keep another copy of the whole record section.
+	const bool use_records = std::string_view(m_graphics.DeviceName()).starts_with("SraKmd");
 	const auto payload = m_cache_file.Load(CacheSignature());
 	if (!payload.empty()) {
 		uint64_t         pipelines    = 0;
@@ -623,27 +626,23 @@ void PipelineCache::InitializeDiskCache() {
 			m_cache_file.Log("invalidating the saved data (malformed)");
 		} else {
 			const auto library = rest.subspan(translations);
-			m_library_data.assign(library.begin(), library.end());
-			m_file_pipelines  = pipelines;
-			m_saved_pipelines = pipelines;
+			if (use_records) {
+				if (!library.empty() && ParseRecords(library)) {
+					m_cache_file.Log("{} pipeline descriptions", m_file_records.size());
+				}
+				m_saved_pipelines = m_file_records.size();
+			} else {
+				m_library_data.assign(library.begin(), library.end());
+				m_saved_pipelines = pipelines;
+			}
+			m_file_pipelines = pipelines;
 			m_cache_file.Log("loaded {} bytes of translated shaders ({} pipelines)", translations,
 			                 pipelines);
 		}
 	}
 
-	// Without a pipeline library the file's library part holds the pipelines' descriptions: the game menu's "Compile pipelines" builds them.
-	const auto describe_pipelines = [&] {
-		if (!m_library_data.empty() && ParseRecords(m_library_data)) {
-			m_cache_file.Log("{} pipeline descriptions", m_file_records.size());
-			m_saved_pipelines = m_file_records.size(); // (the header counts differently: what the overlay's In cache should say is these)
-		}
-		m_library_data.clear();
-	};
-	// The Xbox's driver (SraKmd) removes the device in CreatePipelineLibrary: its pipelines aren't
-	// kept, the translated shaders are.
-	if (std::string_view(m_graphics.DeviceName()).starts_with("SraKmd")) {
+	if (use_records) {
 		m_cache_file.Log("pipeline library off (this driver removes the device with one)");
-		describe_pipelines();
 		return;
 	}
 	D3D12::ComPtr<ID3D12Device1> device;
@@ -913,15 +912,17 @@ ID3D12RootSignature* PipelineCache::RootSignatureFromBlob(uint64_t hash, std::sp
 	if (!inserted) {
 		created->Release(); // another thread made it meanwhile
 	} else {
-		m_root_blob_of[created] = hash;
-		m_blobs.try_emplace(hash, blob.begin(), blob.end());
+		if (m_library == nullptr && m_cache_file.Enabled()) {
+			m_root_blob_of[created] = hash;
+			m_blobs.try_emplace(hash, blob.begin(), blob.end());
+		}
 	}
 	found->second->AddRef(); // the caller's
 	return found->second;
 }
 
 void PipelineCache::RecordPipeline(const std::wstring& name, const D3D12_PIPELINE_STATE_STREAM_DESC& desc) {
-	if (m_library != nullptr) {
+	if (m_library != nullptr || !m_cache_file.Enabled()) {
 		return;
 	}
 	std::lock_guard lock(m_record_mutex);
