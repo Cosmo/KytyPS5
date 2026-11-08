@@ -1194,8 +1194,11 @@ void PipelineCache::StartPrewarm() {
 	Prewarm::SetState(Prewarm::State::Running);
 	m_prewarm_running  = true;
 	m_prewarm_start_ms = GetTickCount64();
-	m_cache_file.Log("prewarm: building {} of the {} described pipelines", queued, m_file_records.size());
-	m_prewarm_threads.emplace_back([this] { PrewarmWorker(); });
+	m_cache_file.Log("prewarm: building {} of the {} described pipelines, {} at a time", queued, m_file_records.size(), PREWARM_WORKERS);
+	m_prewarm_active = PREWARM_WORKERS;
+	for (uint32_t i = 0; i < PREWARM_WORKERS; i++) {
+		m_prewarm_threads.emplace_back([this] { PrewarmWorker(); });
+	}
 }
 
 void PipelineCache::PrewarmWorker() {
@@ -1239,6 +1242,9 @@ void PipelineCache::PrewarmWorker() {
 		}
 		(pipeline != nullptr ? Prewarm::Detail::built : Prewarm::Detail::failed)++;
 		m_prewarm_done.notify_all();
+	}
+	if (m_prewarm_active.fetch_sub(1) != 1) {
+		return; // the last worker reports
 	}
 	{
 		std::lock_guard lock(m_prewarm_mutex);
