@@ -78,8 +78,12 @@ SettingTile MakeTile(const wchar_t* name, TileKind kind) {
 	tile.button.CornerRadius(xaml::CornerRadiusHelper::FromUniformRadius(0));
 	tile.button.BorderThickness(xaml::ThicknessHelper::FromUniformLength(0));
 	tile.button.Background(normal);
-	tile.button.GotFocus([button = tile.button, focused](auto const&, auto const&) { button.Background(focused); });
-	tile.button.LostFocus([button = tile.button, normal](auto const&, auto const&) { button.Background(normal); });
+	tile.button.GotFocus([focused](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
+		sender.as<xaml::Controls::Button>().Background(focused);
+	});
+	tile.button.LostFocus([normal](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
+		sender.as<xaml::Controls::Button>().Background(normal);
+	});
 
 	xaml::Controls::Grid content;
 	content.ColumnSpacing(12);
@@ -277,8 +281,12 @@ xaml::Controls::Button MakeEntry(const wchar_t* symbol, const wchar_t* name, std
 	entry.CornerRadius(xaml::CornerRadiusHelper::FromUniformRadius(0));
 	entry.BorderThickness(xaml::ThicknessHelper::FromUniformLength(0));
 	entry.Background(normal);
-	entry.GotFocus([entry, focused](auto const&, auto const&) { entry.Background(focused); });
-	entry.LostFocus([entry, normal](auto const&, auto const&) { entry.Background(normal); });
+	entry.GotFocus([focused](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
+		sender.as<xaml::Controls::Button>().Background(focused);
+	});
+	entry.LostFocus([normal](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
+		sender.as<xaml::Controls::Button>().Background(normal);
+	});
 	xaml::Controls::StackPanel content;
 	content.Orientation(xaml::Controls::Orientation::Horizontal);
 	xaml::Controls::FontIcon icon;
@@ -312,7 +320,7 @@ xaml::Controls::Button AddChoice(xaml::Controls::Panel const& panel, xaml::Contr
 	auto tile = MakeTile(name, TileKind::Choice);
 	tile.value.Text(selected < choices.size() ? winrt::hstring(choices[selected]) : winrt::hstring());
 	auto current = std::make_shared<size_t>(selected);
-	tile.button.Click([button = tile.button, value = tile.value, choices = std::move(choices), current, chosen = std::move(chosen)](auto const&, auto const&) {
+	tile.button.Click([value = tile.value, choices = std::move(choices), current, chosen = std::move(chosen)](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
 		xaml::Controls::MenuFlyout flyout;
 		for (size_t index = 0; index < choices.size(); index++) {
 			xaml::Controls::ToggleMenuFlyoutItem item;
@@ -325,7 +333,7 @@ xaml::Controls::Button AddChoice(xaml::Controls::Panel const& panel, xaml::Contr
 			});
 			flyout.Items().Append(item);
 		}
-		flyout.ShowAt(button);
+		flyout.ShowAt(sender.as<xaml::Controls::Button>());
 	});
 	Explain(tile.button, explanation, help);
 	panel.Children().Append(tile.button);
