@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/d3d12/selfTest.h"
 #include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "kernel/memory.h"
+#include "libs/videoHardware.h"
 
 #include <D3D12MemAlloc.h>
 #include <algorithm>
@@ -315,6 +316,10 @@ void GraphicContext::Create(bool enable_debug_layer) {
 		EXIT("D3D12: no hardware adapter with D3D12\n");
 	}
 	D3D12::g_device = device;
+	// The system video player decodes on this device (D3D12 video).
+	if (Config::VideoHardwareDecode()) {
+		Libs::VideoHardware::UseDevice(device);
+	}
 	if (Config::GpuCrashDiagnostics() || Config::GpuHangExitSeconds() != 0) {
 		D3D12::GetGpuTrace().Create(device);
 	}
