@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <semaphore>
 #include <span>
 #include <string>
 #include <thread>
@@ -272,15 +273,22 @@ private:
 	std::vector<std::thread>                           m_prewarm_threads;
 	std::atomic_bool                                   m_prewarm_stop {false};
 	std::atomic_bool                                   m_prewarm_running {false};
+	std::atomic<uint32_t>                              m_prewarm_active {0}; // workers still building
+	static constexpr uint32_t                          PREWARM_WORKERS = 2;
 	uint64_t                                           m_prewarm_start_ms = 0;
 	uint64_t                                           m_prewarm_built    = 0;
 	uint64_t                                           m_prewarm_build_us = 0;
 	uint64_t                                           m_prewarm_peak_us  = 0;
 	uint64_t                                           m_taken_prewarmed  = 0;
 	uint64_t                                           m_waited_us        = 0;
-	// One CreatePipelineState at a time, the prewarm thread's or the GPU thread's: the Xbox's driver compiler made a null call on a driver thread with two at
-	// once.
-	std::mutex                                         m_create_mutex;
+	// Two CreatePipelineState at a time, of the prewarm workers and the GPU thread. (One at a time before: the Xbox's driver compiler once made a null call on a
+	// driver thread with two at once. Runs of a game's start with two and four at once did not, and two build its known pipelines in about 60% of the time.)
+	struct CreateSlots {
+		std::counting_semaphore<2> slots {2};
+		void                       lock() { slots.acquire(); }
+		void                       unlock() { slots.release(); }
+	};
+	CreateSlots                                        m_create_mutex;
 
 	GraphicContext&                                                     m_graphics;
 	D3D12::ComPtr<ID3D12Device2>                                        m_device;
