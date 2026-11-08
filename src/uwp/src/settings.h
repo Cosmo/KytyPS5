@@ -134,6 +134,8 @@ struct AppSettings {
 	// The size of the compressed pool in front of the swap file, in MB; 0: none (Config::SwapPoolMb).
 	uint32_t swap_pool_mb     = 0;
 	bool video_decode_threads = true;
+	// The settings page, for testing: videos decoded by the hardware video decoder where it takes them (Config::VideoHardwareDecode). On.
+	bool video_hardware_decode = true;
 	// The settings page, Developer: the detailed memory report in the log every 10 seconds (GPU memory by kind, the pager's counters, the game's memory
 	// ranges; Config::GpuMemoryLog). Off: short lines only.
 	bool gpu_memory_log = false;

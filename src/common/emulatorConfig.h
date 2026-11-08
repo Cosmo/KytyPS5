@@ -160,6 +160,13 @@ struct ConfigOptions {
 	bool gpu_memory_savings   = false;
 	bool video_decode_threads = false;
 #endif
+	// The system video player's videos decoded by the hardware video decoder where it takes them (Libs::VideoHardware), the CPU otherwise: on
+	// in the UWP app unless a setting turns it off; off in the desktop build, which keeps upstream's behaviour.
+#if defined(KYTY_PLATFORM_UWP)
+	bool video_hardware_decode = true;
+#else
+	bool video_hardware_decode = false;
+#endif
 	// Debugging: where the GPU memory is (images and buffers by kind and size) in the log every 10 seconds. It walks every image and buffer under the
 	// texture cache's lock, so it is off unless a setting turns it on.
 	bool gpu_memory_log = false;
@@ -271,6 +278,7 @@ bool GpuMemoryLog();
 bool PipelineCacheAnyBuild();
 bool GpuCrashDiagnostics();
 bool VideoDecodeThreads();
+bool VideoHardwareDecode();
 uint64_t AppMemoryUsage();
 uint64_t AppMemoryLimit();
 #endif
