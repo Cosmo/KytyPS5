@@ -114,7 +114,12 @@ struct Mock final: Xbox::Lazy::HostOps {
 			lone[w] = 0; // decommitted: nothing is left of what was private memory of its own that this call is about
 		}
 	}
+	bool reject_protection = false;
+
 	bool Protect(uint64_t address, uint64_t size, Mode m) override {
+		if (reject_protection) {
+			return false;
+		}
 		const uint64_t first = Page(address), end = Page(address + size);
 		CheckNoLone(first, end, "protect");
 		CHECK(!AnyView(first, end) || (first / kWindowP == (end - 1) / kWindowP), "protect call spans two windows and one of them is a view (pages %llu..%llu)",
@@ -397,7 +402,7 @@ void RandomRun(uint64_t seed, int steps) {
 			const uint64_t w     = rng.Below(kPages / kWindowP - 3);
 			const uint64_t count = 1 + rng.Below(3);
 			regions.Pin(Addr(w * kWindowP), count * kWindowP * kPage);
-			regions.Reclaim(Addr(w * kWindowP), count * kWindowP * kPage, host);
+			CHECK(regions.Reclaim(Addr(w * kWindowP), count * kWindowP * kPage, host), "reclaim failed");
 			for (uint64_t i = w; i < w + count; ++i) {
 				model.pinned.insert(i);
 				if (model.evicted.count(i) != 0) {
@@ -540,9 +545,40 @@ void RoomRun(uint64_t seed) {
 	}
 }
 
+void RejectedProtection() {
+	Regions regions;
+	Mock host;
+	const uint64_t address = Addr(0);
+	const uint64_t window = Abs(0);
+	const uint64_t size = kWindowP * kPage;
+	CHECK(regions.Map(address, size), "map refused");
+	CHECK(regions.CommitAt(address, host) == Regions::CommitResult::Committed, "commit failed");
+	CHECK(regions.Sweep(window, host), "sweep failed");
+	host.reject_protection = true;
+	CHECK(!regions.BeginEvict(window, host), "eviction started on a no-access window");
+	CHECK(!regions.Touch(window, host), "touch reported success after a failed protection change");
+	CHECK(!regions.Reclaim(address, size, host), "reclaim hid a protection failure");
+	CHECK(!regions.EnsureCommitted(address, size, host), "host access was allowed after a failed protection change");
+	CHECK(!regions.Unmap(address + kPage, kPage, host), "unmap split an inaccessible window");
+	CHECK(regions.Contains(address, size), "failed unmap removed pages");
+	CHECK((regions.FlagsOf(address) & Xbox::Lazy::kSwept) != 0, "failed protection cleared the swept flag");
+	CHECK(host.mode[0] == Mode::NoAccess, "failed protection changed host mode");
+
+	host.reject_protection = false;
+	CHECK(regions.BeginEvict(window, host), "eviction retry failed");
+	host.reject_protection = true;
+	CHECK(!regions.Touch(window, host), "touch reported success on a read-only window");
+	CHECK((regions.FlagsOf(address) & Xbox::Lazy::kEvicting) != 0 && host.mode[0] == Mode::Read, "failed touch changed the evicting state");
+
+	host.reject_protection = false;
+	CHECK(regions.Touch(window, host), "touch retry failed");
+	CHECK(regions.AllWritable(address, size) && host.mode[0] == Mode::ReadWrite, "window did not recover");
+}
+
 } // namespace
 
 int main() {
+	RejectedProtection();
 	for (uint64_t seed = 1; seed <= 80; ++seed) {
 		RandomRun(seed, 1500);
 	}
