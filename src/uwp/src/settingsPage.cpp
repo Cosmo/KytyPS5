@@ -227,42 +227,45 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
 enum class ControllerPage { Players, Servers, Feedback };
 
 struct SettingsState {
-	AppSettings                               settings = LoadSettings();
-	// The open pages (Detail), the shown one last; empty while the categories show. Leaving one goes back to the one under it, or to the
-	// entry that opened it.
+	AppSettings settings = LoadSettings();
+	// The open pages (Detail), the shown one last. Empty while the categories show.
 	std::vector<ControllerPage> pages;
-	// The control to focus when the page shows again (back from the controls page), instead of the categories.
-	xaml::Controls::Control return_focus {nullptr};
-	winrt::event_token      back_token {};
-	bool                                      folders_changed = false;
-	bool                                      left            = false;
-	std::function<void(bool)>                 back;
-	xaml::Controls::StackPanel                folders {nullptr};
-	xaml::Controls::TextBlock                 user_data_path {nullptr};
-	xaml::Controls::TextBlock                 user_data_status {nullptr};
+	// Focus to restore when returning from the Button layout page.
+	winrt::weak_ref<xaml::Controls::Control> return_focus;
+	winrt::event_token back_token {};
+	bool folders_changed = false;
+	bool left = false;
+	std::function<void(bool)> back;
+	winrt::weak_ref<xaml::Controls::StackPanel> folders;
+	// Held, not weak: with weak references these lines stayed empty on the Xbox. They have no handlers, so nothing leads from them
+	// back to the state.
+	xaml::Controls::TextBlock user_data_path {nullptr};
+	xaml::Controls::TextBlock user_data_status {nullptr};
 };
 
 void ListFolders(const std::shared_ptr<SettingsState>& state);
 
 // The user data folder, and whether the app may write in it (with the command that allows it where it may not).
 void ShowUserData(const std::shared_ptr<SettingsState>& state) {
+	const auto& path_text = state->user_data_path;
+	const auto& status    = state->user_data_status;
 	auto path = state->settings.user_data_path;
 	if (path.empty()) {
-		state->user_data_path.Text(L"The app's own folder");
-		state->user_data_status.Text(L"");
+		path_text.Text(L"The app's own folder");
+		status.Text(L"");
 		return;
 	}
-	state->user_data_path.Text(path.make_preferred().wstring());
+	path_text.Text(path.make_preferred().wstring());
 	// Windows' "file not found", "path not found" and "device not ready": the folder or its drive is not there, which no access helps.
 	constexpr std::array<uint32_t, 3> MISSING = {2, 3, 21};
 	const auto                        error   = WriteError(path);
 	if (error == 0) {
-		state->user_data_status.Text(L"Writable");
+		status.Text(L"Writable");
 	} else if (std::find(MISSING.begin(), MISSING.end(), error) != MISSING.end()) {
-		state->user_data_status.Text(L"Can't be found. Plug in the drive or choose another folder.");
+		status.Text(L"Can't be found. Plug in the drive or choose another folder.");
 	} else {
 		// Only a PC can give apps access to a folder: on the Xbox, the drive goes to a PC for it, where its letter differs (GrantCommand writes X:).
-		state->user_data_status.Text(L"Can't be written. Error code " + std::to_wstring(error) + L".\n" +
+		status.Text(L"Can't be written. Error code " + std::to_wstring(error) + L".\n" +
 		                             (IsXbox() ? L"To allow it, plug the drive into a PC and run this there as administrator, with the drive's letter for X:\n"
 		                                       : L"To allow it, run this as administrator:\n") +
 		                             GrantCommand(path, true));
@@ -300,11 +303,15 @@ winrt::fire_and_forget AddFolder(std::shared_ptr<SettingsState> state) {
 
 // A row per game folder: the path, whether the app may read it, and Remove.
 void ListFolders(const std::shared_ptr<SettingsState>& state) {
-	state->folders.Children().Clear();
+	const auto panel = state->folders.get();
+	if (panel == nullptr) {
+		return;
+	}
+	panel.Children().Clear();
 	if (state->settings.game_folders.empty()) {
 		xaml::Controls::TextBlock none;
 		none.Text(L"No folders added.");
-		state->folders.Children().Append(none);
+		panel.Children().Append(none);
 	}
 	for (size_t index = 0; index < state->settings.game_folders.size(); index++) {
 		auto folder = state->settings.game_folders[index];
@@ -342,7 +349,7 @@ void ListFolders(const std::shared_ptr<SettingsState>& state) {
 		row.Children().Append(text);
 		row.Children().Append(remove);
 		xaml::Controls::Grid::SetColumn(remove, 1);
-		state->folders.Children().Append(row);
+		panel.Children().Append(row);
 	}
 }
 
@@ -361,7 +368,7 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	auto page       = xaml::Markup::XamlReader::Load(SettingsMarkup).as<xaml::Controls::Grid>();
 	auto state      = std::make_shared<SettingsState>();
 	state->back     = std::move(back);
-	state->folders  = page.FindName(L"Folders").as<xaml::Controls::StackPanel>();
+	state->folders  = winrt::make_weak(page.FindName(L"Folders").as<xaml::Controls::StackPanel>());
 	auto& settings  = state->settings;
 	const auto save = [state] { SaveSettings(state->settings); };
 
@@ -444,9 +451,11 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	const auto hints        = page.FindName(L"Hints").as<xaml::Controls::Border>();
 	// Shows a page; set below, as the pages open each other.
 	auto show_page = std::make_shared<std::function<void(ControllerPage)>>();
-	const auto open_page = [state, show_page](ControllerPage which) {
-		state->pages.push_back(which);
-		(*show_page)(which);
+	const auto open_page = [state, weak_show = std::weak_ptr(show_page)](ControllerPage which) {
+		if (const auto show = weak_show.lock()) {
+			state->pages.push_back(which);
+			(*show)(which);
+		}
 	};
 	const auto entries = panel(L"Controller");
 	// The entries have no text, as the Xbox's: their names say where they go (the focus on one clears the text column).
@@ -464,12 +473,12 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	const auto        feedback_entry  = MakeEntry(VOLUME_SYMBOL, L"Feedback and audio", [open_page] { open_page(ControllerPage::Feedback); });
 	// The controls page, and back here with the focus on its entry.
 	auto layout_entry = MakeEntry(GAME_SYMBOL, L"Button layout", [] {});
-	layout_entry.Click([state, weak_page = winrt::make_weak(page), weak_entry = winrt::make_weak(layout_entry)](auto const&, auto const&) {
+	layout_entry.Click([state, weak_page = winrt::make_weak(page)](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
 		auto shown = weak_page.get();
 		if (shown == nullptr) {
 			return;
 		}
-		state->return_focus = weak_entry.get();
+		state->return_focus = winrt::make_weak(sender.as<xaml::Controls::Control>());
 		xaml::Window::Current().Content(CreateControlsPage([shown] { xaml::Window::Current().Content(shown); }, L"Controller"));
 	});
 	for (const auto& entry: {players_entry, servers_entry, feedback_entry, layout_entry}) {
@@ -603,8 +612,8 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 			args.Cancel(true);
 		}
 	});
-	user_name.TextChanged([state, user_name, save](auto const&, auto const&) {
-		state->settings.user_name = winrt::to_string(user_name.Text());
+	user_name.TextChanged([state, save](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
+		state->settings.user_name = winrt::to_string(sender.as<xaml::Controls::TextBox>().Text());
 		save();
 	});
 	Explain(user_name, explanation,
@@ -994,13 +1003,13 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	              : L"On the Xbox, turning a memory option off can crash games that need the memory."},
 	    {},
 	};
-	const auto explain_category = [categories, explanation, category_explanations] {
-		if (const auto index = categories.SelectedIndex(); index >= 0 && static_cast<size_t>(index) < category_explanations.size()) {
+	const auto explain_category = [explanation, category_explanations](int32_t index) {
+		if (index >= 0 && static_cast<size_t>(index) < category_explanations.size()) {
 			ShowExplanation(explanation, category_explanations[static_cast<size_t>(index)]);
 		}
 	};
-	categories.SelectionChanged([categories, panels, category_panels, explain_category](auto const&, auto const&) {
-		const auto index = categories.SelectedIndex();
+	categories.SelectionChanged([panels, category_panels, explain_category](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
+		const auto index = sender.as<xaml::Controls::ListView>().SelectedIndex();
 		if (index < 0) {
 			return;
 		}
@@ -1008,15 +1017,15 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 			category_panels[panel_index].Visibility(panel_index == static_cast<size_t>(index) ? xaml::Visibility::Visible : xaml::Visibility::Collapsed);
 		}
 		panels.ChangeView(nullptr, 0.0, nullptr, true);
-		explain_category();
+		explain_category(index);
 	});
 	categories.SelectedIndex(0);
 	// Whether the focus is in the settings (B goes back to the categories) or in the categories (B leaves the page).
 	auto in_panel = std::make_shared<bool>(false);
 	panels.GotFocus([in_panel](auto const&, auto const&) { *in_panel = true; });
-	categories.GotFocus([in_panel, explain_category](auto const&, auto const&) {
+	categories.GotFocus([in_panel, explain_category](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
 		*in_panel = false;
-		explain_category();
+		explain_category(sender.as<xaml::Controls::ListView>().SelectedIndex());
 	});
 
 	// Back: B, Escape or the window's back button (shown while the page is open).
@@ -1049,9 +1058,9 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 			args.Handled(true);
 			leave();
 		});
-		if (state->return_focus != nullptr) {
-			state->return_focus.Focus(xaml::FocusState::Keyboard);
-			state->return_focus = nullptr;
+		if (const auto control = state->return_focus.get()) {
+			control.Focus(xaml::FocusState::Keyboard);
+			state->return_focus = {};
 		} else {
 			categories.Focus(xaml::FocusState::Keyboard);
 		}
