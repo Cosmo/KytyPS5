@@ -778,6 +778,15 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	     L"from them, for example for water physics.",
 	     L"Can make games slower."});
 	AddSwitch(
+	    textures, explanation, L"Read back storage images", settings.readback_storage_images,
+	    [state, save](bool on) {
+		    state->settings.readback_storage_images = on;
+		    save();
+	    },
+	    {L"Copies images that shaders write back to the game's memory when the game asks the GPU for its results. The images of the two "
+	     L"switches above are copied then too.",
+	     L"Can make games slower."});
+	AddSwitch(
 	    textures, explanation, L"Mip statistics", settings.lod_stats,
 	    [state, save](bool on) {
 		    state->settings.lod_stats = on;
@@ -935,6 +944,14 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    },
 	    {L"Counts on the GPU what games ask to check for visibility, so hidden lights and objects stay hidden.",
 	     L"When off, games are told that everything is visible. On costs some performance."});
+	AddSwitch(
+	    testing, explanation, L"Relaxed shader float math", settings.relaxed_shader_float,
+	    [state, save](bool on) {
+		    state->settings.relaxed_shader_float = on;
+		    save();
+	    },
+	    {L"Shaders use the GPU's own float operations.", L"Can be faster when the GPU is the limit, but some effects can look wrong.",
+	     L"Games compile their shaders again after a change."});
 	AddSwitch(
 	    testing, explanation, L"Keep compiled shaders across app builds", settings.shader_cache_any_build,
 	    [state, save](bool on) {
