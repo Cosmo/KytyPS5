@@ -276,6 +276,7 @@ struct Launcher {
 
 constexpr wchar_t OPTION_PLAY[]       = L"Play";
 constexpr wchar_t OPTION_PLAY_BUILD[] = L"Play and build known pipelines";
+constexpr wchar_t OPTION_BUILD_PLAY[] = L"Build known pipelines, then play";
 constexpr wchar_t OPTION_CHEATS[]     = L"Cheats";
 constexpr wchar_t OPTION_HIDE[]       = L"Hide game";
 
@@ -569,6 +570,7 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	SetHints(find(L"OptionsHints").as<xaml::Controls::Border>(), {{XboxButton::A, L"Select"}, {XboxButton::B, L"Back"}});
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_PLAY));
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_PLAY_BUILD));
+	launcher->options_items.Items().Append(winrt::box_value(OPTION_BUILD_PLAY));
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_CHEATS));
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_HIDE));
 	launcher->options_items.ItemClick([launcher](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
@@ -579,6 +581,10 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 		} else if (item == OPTION_PLAY_BUILD) {
 			// The pipeline cache takes the request at the game's first frame and builds in the background.
 			Common::PipelinePrewarm::Request();
+			launcher->actions.play(game);
+		} else if (item == OPTION_BUILD_PLAY) {
+			// The game's code starts once the pipeline cache built them (Emulator::Run); the launch screen shows how far it is.
+			Common::PipelinePrewarm::RequestBeforeStart();
 			launcher->actions.play(game);
 		} else if (item == OPTION_CHEATS) {
 			launcher->actions.open_cheats(game);
