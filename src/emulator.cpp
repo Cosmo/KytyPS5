@@ -5,6 +5,7 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
+#include "common/pipelinePrewarm.h"
 #include "common/profiler.h"
 #include "common/singleton.h"
 #include "common/stringUtils.h"
@@ -133,6 +134,8 @@ static void LoadElf(const std::filesystem::path& elf, bool dbg_print_reloc = fal
 
 static void Execute(const std::filesystem::path& game_patch) {
 	std::thread([game_patch] {
+		// The library's "Build known pipelines, then play": the game's code runs once they are built, four at a time (Xbox).
+		Common::PipelinePrewarm::BuildBeforeStart(4);
 		Common::Singleton<Loader::RuntimeLinker>::Instance()->Execute(game_patch);
 	}).detach();
 	Libs::Graphics::WindowRun();
