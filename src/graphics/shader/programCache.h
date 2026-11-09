@@ -49,6 +49,8 @@ struct HostShaderLimits {
 	bool     maintenance8           = false;
 	// The device's own float min/max give the guest's NaN and signed-zero results (AMD GPUs).
 	bool     native_float_min_max   = false;
+	// The user's relaxed float option: native float ops whose NaN, signed-zero and denormal results may differ from the guest's.
+	bool     relaxed_float          = false;
 	// The shader-readable device clock's tick in picoseconds; 0 without one.
 	uint32_t device_clock_period_ps = 0;
 };
