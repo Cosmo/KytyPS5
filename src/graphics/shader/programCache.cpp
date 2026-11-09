@@ -382,7 +382,8 @@ struct ShaderProgramCache::Impl {
 	    : image_heap(image_heap),
 	      profile {.maintenance8           = limits.maintenance8,
 	               .native_float_min_max   = limits.native_float_min_max,
-	               .device_clock_period_ps = limits.device_clock_period_ps} {
+	               .device_clock_period_ps = limits.device_clock_period_ps,
+	               .relaxed_float          = limits.relaxed_float} {
 		lookup_key.static_state.reserve(MaxStaticKeyWords);
 	}
 
