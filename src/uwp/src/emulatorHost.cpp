@@ -140,10 +140,12 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.readback_linear_images    = settings.readback_linear_images;
 		config.lod_stats_enabled         = settings.lod_stats;
 		config.readback_tiled_images     = settings.readback_tiled_images;
+		config.readback_storage_images   = settings.readback_storage_images;
 		config.sync_raw_image_buffers    = settings.accurate_texture_sync;
 		config.playgo_hack_enabled       = settings.playgo_fallback;
 		config.vr_enabled                = settings.virtual_vr_headset;
 		config.occlusion_queries_enabled = settings.occlusion_queries;
+		config.relaxed_shader_float      = settings.relaxed_shader_float;
 		config.vulkan_validation_enabled = settings.debug_layer; // the D3D12 debug layer
 		config.printf_direction          = settings.game_output ? Config::LogDirection::Console : Config::LogDirection::Silent;
 		// The fonts that stand in for the console's system fonts come with the package (uwp.cmake).
