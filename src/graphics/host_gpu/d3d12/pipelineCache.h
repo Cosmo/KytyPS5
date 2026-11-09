@@ -251,8 +251,10 @@ private:
 	bool                 ParseRecords(std::span<const uint8_t> data);
 	// Called every frame: takes the request of the game menu or the library.
 	void                 PrewarmTick();
-	void                 StartPrewarm();
+	void                 StartPrewarm(uint32_t workers = PREWARM_WORKERS);
 	void                 PrewarmWorker();
+	// Common::PipelinePrewarm::BuildBeforeStart: all described pipelines, `workers` at a time, before the game runs; returns when they are built.
+	void                 BuildBeforeStart(uint32_t workers);
 	// What the pager leaves the game: the app's limit without what the others take and the pager's headroom (UINT64_MAX without a limit).
 	[[nodiscard]] uint64_t PrewarmGameRoom() const;
 	// The prewarmed pipeline `name`, waiting while a thread builds it; nullptr when there is none (or it is still queued, which leaves it
@@ -284,9 +286,16 @@ private:
 	// Two CreatePipelineState at a time, of the prewarm workers and the GPU thread. (One at a time before: the Xbox's driver compiler once made a null call on a
 	// driver thread with two at once. Runs of a game's start with two and four at once did not, and two build its known pipelines in about 60% of the time.)
 	struct CreateSlots {
-		std::counting_semaphore<2> slots {2};
-		void                       lock() { slots.acquire(); }
-		void                       unlock() { slots.release(); }
+		static constexpr ptrdiff_t Most = 4; // while the game waits for its pipelines (BuildBeforeStart)
+		std::counting_semaphore<Most> slots {2};
+		void                          lock() { slots.acquire(); }
+		void                          unlock() { slots.release(); }
+		void                          Widen(ptrdiff_t more) { slots.release(more); }
+		void                          Narrow(ptrdiff_t less) {
+			for (ptrdiff_t i = 0; i < less; i++) {
+				slots.acquire();
+			}
+		}
 	};
 	CreateSlots                                        m_create_mutex;
 
