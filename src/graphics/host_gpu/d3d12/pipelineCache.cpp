@@ -107,6 +107,7 @@ HostShaderLimits ShaderLimits(GraphicContext& graphics, const D3D12::DxilCompile
 	    // D3D12 allows 32 KiB of group shared memory; a program that needs more keeps its shared memory in a buffer.
 	    .max_compute_shared_memory = D3D12_CS_TGSM_REGISTER_COUNT * sizeof(uint32_t),
 	    .native_float_min_max      = NativeFloatMinMax(graphics, compiler),
+	    .relaxed_float             = Config::RelaxedShaderFloatEnabled(),
 	};
 }
 
