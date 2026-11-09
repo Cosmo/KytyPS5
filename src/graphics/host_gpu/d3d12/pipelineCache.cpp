@@ -591,6 +591,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	    options13.AlphaBlendFactorSupported;
 #endif
 	InitializeDiskCache();
+	Common::PipelinePrewarm::Detail::build_and_wait = [this](uint32_t workers) { BuildBeforeStart(workers); };
 }
 
 std::string PipelineCache::CacheSignature() const {
@@ -1164,7 +1165,23 @@ void PipelineCache::PrewarmTick() {
 	}
 }
 
-void PipelineCache::StartPrewarm() {
+void PipelineCache::BuildBeforeStart(uint32_t workers) {
+	if (m_library != nullptr) {
+		return; // (a pipeline library keeps the built pipelines itself)
+	}
+	workers           = std::clamp<uint32_t>(workers, PREWARM_WORKERS, static_cast<uint32_t>(CreateSlots::Most));
+	const auto extra  = static_cast<ptrdiff_t>(workers - PREWARM_WORKERS);
+	const auto start  = GetTickCount64();
+	m_create_mutex.Widen(extra);
+	StartPrewarm(workers);
+	while (m_prewarm_running.load() && !m_prewarm_stop.load()) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
+	m_create_mutex.Narrow(extra);
+	m_cache_file.Log("prewarm: the game started after {:.1f} s of building", static_cast<double>(GetTickCount64() - start) / 1000.0);
+}
+
+void PipelineCache::StartPrewarm(uint32_t workers) {
 	namespace Prewarm = Common::PipelinePrewarm;
 	if (m_prewarm_running.load()) {
 		return;
@@ -1195,9 +1212,9 @@ void PipelineCache::StartPrewarm() {
 	Prewarm::SetState(Prewarm::State::Running);
 	m_prewarm_running  = true;
 	m_prewarm_start_ms = GetTickCount64();
-	m_cache_file.Log("prewarm: building {} of the {} described pipelines, {} at a time", queued, m_file_records.size(), PREWARM_WORKERS);
-	m_prewarm_active = PREWARM_WORKERS;
-	for (uint32_t i = 0; i < PREWARM_WORKERS; i++) {
+	m_cache_file.Log("prewarm: building {} of the {} described pipelines, {} at a time", queued, m_file_records.size(), workers);
+	m_prewarm_active = workers;
+	for (uint32_t i = 0; i < workers; i++) {
 		m_prewarm_threads.emplace_back([this] { PrewarmWorker(); });
 	}
 }
@@ -1280,6 +1297,7 @@ ID3D12PipelineState* PipelineCache::TakePrewarmed(const std::wstring& name) {
 }
 
 PipelineCache::~PipelineCache() {
+	Common::PipelinePrewarm::Detail::build_and_wait = nullptr;
 	m_prewarm_stop = true;
 	for (auto& thread: m_prewarm_threads) {
 		thread.join();
