@@ -31,6 +31,13 @@ struct PagerCounters {
 	std::atomic<uint64_t> emergency {0};
 	// views turned into private memory (too many views of sections: Regions::CommitPrivatize)
 	std::atomic<uint64_t> privatized {0};
+	// How well the pager chooses: windows that came back within 5 s and within 30 s of leaving (the second includes the first), windows that
+	// were all zero when they left, and the time the game's threads waited for windows to come back.
+	std::atomic<uint64_t> returns_5s {0}, returns_30s {0}, zero_windows {0}, fault_wait_ns {0};
+	// The emulator's own reads of windows in the store (host copies): their time, and the windows brought back because they were read again and again.
+	std::atomic<uint64_t> read_ns {0}, promoted {0};
+	// Windows that came back right after the window before them in the address space (what reading ahead could have brought along).
+	std::atomic<uint64_t> page_ins_in_a_row {0};
 	// The compressed pool: what it takes, what its windows are uncompressed, reads served by it and by the file, windows that went for room, windows not
 	// kept, and copies that came back wrong.
 	std::atomic<uint64_t> pool_bytes {0}, pool_raw {0}, pool_hits {0}, pool_misses {0}, pool_dropped {0}, pool_skipped {0}, pool_bad {0};
