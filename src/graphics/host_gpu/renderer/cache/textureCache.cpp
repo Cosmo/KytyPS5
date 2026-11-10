@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cinttypes>
 #include <cstring>
@@ -902,6 +903,17 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId source_id) {
 
 bool TextureCache::CanDownload(const Image& image) const {
 	const auto& info = image.info;
+	// Low quality: a reduced host image has no finest levels, so it cannot give the guest's memory its contents back.
+	if (info.host_skip != 0) {
+		static std::atomic_bool noted = false;
+		if (image.IsGpuModified() && !noted.exchange(true, std::memory_order_relaxed)) {
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "Textures: a texture loaded at a lower resolution that the GPU wrote is not read back to the game's memory: {}x{}, {} levels "
+			    "(noted once)\n",
+			    info.extent.width, info.extent.height, info.resources.levels));
+		}
+		return false;
+	}
 	if (info.samples != 1 || image.backing.samples != 1 || info.resources.layers == 0 ||
 	    info.data.size % info.resources.layers != 0) {
 		return false;
@@ -1413,6 +1425,20 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			if (exact_format && resolved.info.pixel_format != desc.info.pixel_format) {
 				result = {};
 			} else if (resolved.info.resources < desc.info.resources) {
+				FreeImage(result);
+				result = {};
+			} else if (resolved.info.host_skip != 0 && desc.type != BindingType::Texture) {
+				// Low quality: a reduced image is a sampled copy of the guest's texture without its finest levels. What the GPU is about
+				// to write (a render target, a storage image) or to show gets an image of the guest's size instead: the reduced one has
+				// no place for those levels. (A game sampled a 1920x1080 image with six levels, then wrote it; the read-back of the
+				// written image asked the reduced host image for levels and sizes it does not have, and D3D12 refused the command list.)
+				static std::atomic_bool noted = false;
+				if (!noted.exchange(true, std::memory_order_relaxed)) {
+					Log::WriteToConsoleAndLog(fmt::format(
+					    "Textures: a texture loaded at a lower resolution is written by the GPU and gets its full size: {}x{}, {} levels "
+					    "(noted once)\n",
+					    resolved.info.extent.width, resolved.info.extent.height, resolved.info.resources.levels));
+				}
 				FreeImage(result);
 				result = {};
 			}
