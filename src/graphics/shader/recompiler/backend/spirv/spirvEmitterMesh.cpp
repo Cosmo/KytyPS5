@@ -287,21 +287,40 @@ void EmitMeshEntryPoint(EmitterState& state) {
 	state.builder.AddFunction(spv::OpFunction, TypeVoid(state), state.main_func,
 	                          spv::FunctionControlMaskNone, TypeFunction(state));
 	EmitLabel(state, state.builder.AllocateId());
-	state.builder.AddFunction(spv::OpFunctionCall, TypeVoid(state), state.builder.AllocateId(),
-	                          state.mesh_guest_func);
-	// All guest waves finish before the uniform Vulkan allocation and output stores.
-	EmitBarrier(state);
-	const auto vertices   = MeshLoad(state, state.mesh_allocation, spv::StorageClassWorkgroup,
-	                                 TypeU32(state), ConstantU32(state, 0));
-	const auto primitives = MeshLoad(state, state.mesh_allocation, spv::StorageClassWorkgroup,
-	                                 TypeU32(state), ConstantU32(state, 1));
+	// The guest's program, and what it allocated: {vertices, primitives}.
+	const auto run_guest = [&] {
+		state.builder.AddFunction(spv::OpFunctionCall, TypeVoid(state), state.builder.AllocateId(),
+		                          state.mesh_guest_func);
+		// All guest waves finish before the uniform Vulkan allocation and output stores.
+		EmitBarrier(state);
+		const auto vertex_count    = MeshLoad(state, state.mesh_allocation, spv::StorageClassWorkgroup,
+		                                      TypeU32(state), ConstantU32(state, 0));
+		const auto primitive_count = MeshLoad(state, state.mesh_allocation, spv::StorageClassWorkgroup,
+		                                      TypeU32(state), ConstantU32(state, 1));
+		return std::pair {vertex_count, primitive_count};
+	};
 	if (state.mesh_compute) {
-		EmitMeshComputeEpilogue(state, vertices, primitives);
+		const auto compute = [&] {
+			const auto [vertex_count, primitive_count] = run_guest();
+			EmitMeshComputeEpilogue(state, vertex_count, primitive_count);
+		};
+		if (const auto lanes = MeshComputeWaveLanes(state); lanes != 0) {
+			// On a host of wide waves each of the guest's waves has a host wave of its own: of every `lanes` threads the first 32
+			// run, the others do nothing and count in no wave operation (HostShaderFeatures::mesh_compute_wave_lanes).
+			const auto raw = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpLoad, TypeU32(state), raw,
+			                          InputVariableForKind(state, IR::StageInputKind::LocalInvocationIndex));
+			const auto lane = EmitBinaryU32(state, spv::OpBitwiseAnd, raw, ConstantU32(state, lanes - 1u));
+			EmitIfCondition(state, MeshCompare(state, spv::OpULessThan, lane, ConstantU32(state, 32)), compute);
+		} else {
+			compute();
+		}
 		state.lane_half = 0;
 		state.builder.AddFunction(spv::OpReturn);
 		state.builder.AddFunction(spv::OpFunctionEnd);
 		return;
 	}
+	const auto [vertices, primitives] = run_guest();
 	state.builder.AddFunction(spv::OpSetMeshOutputsEXT, vertices,
 	                          primitives); // OpSetMeshOutputsEXT
 	for (uint32_t half = 0; half < state.lane_count; half++) {

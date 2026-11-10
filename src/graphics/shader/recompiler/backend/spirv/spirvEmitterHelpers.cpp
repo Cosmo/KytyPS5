@@ -146,13 +146,32 @@ uint32_t EmitInputComponentU32(EmitterState& state, IR::StageInputKind kind, uin
 	return value;
 }
 
+uint32_t MeshComputeWaveLanes(const EmitterState& state) {
+	const auto lanes = GetHostShaderFeatures().mesh_compute_wave_lanes;
+	// (Only where a thread runs two lanes of a guest wave of 64, the scheme of hosts with 32-lane waves: a guest wave is then 32 threads.
+	// A program that runs with the host's own 64 lanes has its waves to itself already.)
+	if (!state.mesh_compute || lanes <= 32u || state.lane_count != 2) {
+		return 0;
+	}
+	// The workgroup's threads as the module declares them without this: a guest wave of 64 lanes is 32 threads of two lanes each.
+	// D3D12 allows 1024 threads in a workgroup's first dimension.
+	const uint32_t threads = ((ShaderWorkgroupInput(state.program.stage, state.input_info)->threads_num[0] + 63u) / 64u) * 32u;
+	return threads / 32u * lanes <= 1024u ? lanes : 0;
+}
+
 uint32_t EmitLocalInvocationIndex(EmitterState& state) {
 	const auto variable = InputVariableForKind(state, IR::StageInputKind::LocalInvocationIndex);
 	if (variable == 0) {
 		return ConstantU32(state, 0);
 	}
-	const auto value = state.builder.AllocateId();
+	auto value = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, variable);
+	if (const auto lanes = MeshComputeWaveLanes(state); lanes != 0) {
+		// The thread's number among the threads that run: the first 32 of every `lanes` (EmitMeshEntryPoint).
+		const auto wave = EmitBinaryU32(state, spv::OpUDiv, value, ConstantU32(state, lanes));
+		value = EmitAddU32(state, EmitBinaryU32(state, spv::OpIMul, wave, ConstantU32(state, 32)),
+		                   EmitBinaryU32(state, spv::OpBitwiseAnd, value, ConstantU32(state, 31)));
+	}
 	if (state.lane_count == 2) {
 		const auto wave_base =
 		    EmitBinaryU32(state, spv::OpBitwiseAnd, value, ConstantU32(state, ~31u));

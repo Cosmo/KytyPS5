@@ -561,6 +561,9 @@ void DefineInputs(EmitterState& state) {
 		add_builtin(IR::StageInputKind::WorkgroupId, 3, "gl_WorkGroupID");
 		add_builtin(IR::StageInputKind::NumWorkgroups, 3, "gl_NumWorkGroups");
 	}
+	if (MeshComputeWaveLanes(state) != 0) {
+		add_builtin(IR::StageInputKind::LocalInvocationIndex, 1, "gl_LocalInvocationIndex"); // (which threads run: EmitMeshEntryPoint)
+	}
 	if (state.lane_count == 2) {
 		add_builtin(IR::StageInputKind::LocalInvocationIndex, 1, "gl_LocalInvocationIndex");
 		if (std::ranges::any_of(state.inputs, [](const InputBinding& input) {
@@ -969,6 +972,10 @@ void DefineModule(EmitterState& state) {
 				local_y = local_x / 2u;
 				local_x = 2u;
 			}
+		}
+		if (const auto lanes = MeshComputeWaveLanes(state); lanes != 0) {
+			// Each of the guest's waves (32 threads) in a host wave of its own: that many threads per wave, the first 32 of them run.
+			local_x = local_x / 32u * lanes;
 		}
 		state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeLocalSize, local_x,
 		                               local_y, local_z);

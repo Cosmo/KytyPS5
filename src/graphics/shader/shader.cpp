@@ -608,6 +608,7 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	                                      native_ngg ? mesh.InputPrimitiveCount(mesh.max_vertices) :
 	                                          mesh.max_vertices / sh.m_vgtGsMaxVertOut});
 	EXIT_IF(mesh.primitives_per_group == 0u);
+	mesh.geometry_shader = !native_ngg;
 	mesh.vertices_per_group = mesh.InputVertexCount(mesh.primitives_per_group);
 	mesh.max_primitives = mesh.primitives_per_group * (sh.m_geNggSubgrpCntl & 0x1ffu);
 	const auto threads = std::max(native_ngg && !mesh.fast_launch ? mesh.vertices_per_group

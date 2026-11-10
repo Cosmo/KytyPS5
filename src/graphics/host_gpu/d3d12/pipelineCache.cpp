@@ -565,6 +565,10 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 		features.wave32_in_wider_waves =
 		    FAILED(graphics.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options, sizeof(options))) ||
 		    options.WaveLaneCountMax > 32 || Config::XboxGpuLimitsEnabled();
+		// A geometry shader's program run as a compute shader takes two half-waves per guest wave here, each guest wave in a host wave
+		// of its own (HostShaderFeatures.h). (With the Xbox's limits on a GPU of narrow waves the layout is the Xbox's: every other host
+		// wave is then idle.)
+		features.mesh_compute_wave_lanes = options.WaveLaneCountMax > 32 ? options.WaveLaneCountMax : Config::XboxGpuLimitsEnabled() ? 64u : 0u;
 	}
 	features.lane_shuffle_loop   = !m_compiler.SupportsDivergentLaneIndex(); // (below shader model 6.7 a lane shuffle needs the same lane number in every lane)
 	features.indirect_mesh_parameters_in_push_data = true; // (no task shaders: RenderExecutor::ExecutePreparedDraw)

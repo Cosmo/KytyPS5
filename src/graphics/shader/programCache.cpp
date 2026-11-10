@@ -1,4 +1,5 @@
 #include "graphics/shader/programCache.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 
 #include "common/assert.h"
 #include "common/compileActivity.h"
@@ -441,6 +442,18 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 		auto& mesh              = vertex_info[0].mesh;
 		mesh.compute_emulation  = !m_limits.mesh_shader_enabled;
 		mesh.host_subgroup_size = m_limits.subgroup_size;
+		// A geometry shader's program run as a compute shader on a host with wide waves (the Series X) takes the scheme of a host with
+		// 32-lane waves: two lanes of the guest's wave of 64 per thread, and each of the guest's waves in a host wave of its own
+		// (HostShaderFeatures::mesh_compute_wave_lanes). Run with the host's own 64 lanes, one game's sprites came out with one
+		// corner twice and so one triangle of two; the cause in that path is not found.
+		if (mesh.compute_emulation && mesh.geometry_shader && mesh.wave_size == 64u &&
+		    ShaderRecompiler::GetHostShaderFeatures().mesh_compute_wave_lanes > 32u) {
+			mesh.host_subgroup_size = 32u;
+			static std::atomic_bool noted = false;
+			if (!noted.exchange(true, std::memory_order_relaxed)) {
+				std::printf("Shaders: a geometry shader's program runs as a compute shader in two half-waves (the host's waves are wider than 32 lanes)\n");
+			}
+		}
 		static std::atomic_bool reported = false;
 		const auto              report_once = [&](const char* message) {
 			if (!reported.exchange(true, std::memory_order_relaxed)) {

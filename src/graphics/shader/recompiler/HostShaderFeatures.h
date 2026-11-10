@@ -1,6 +1,8 @@
 #ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_HOSTSHADERFEATURES_H_
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_HOSTSHADERFEATURES_H_
 
+#include <cstdint>
+
 namespace Libs::Graphics::ShaderRecompiler {
 
 // What the host GPU's shaders can do, where it changes the SPIR-V the recompiler emits. The
@@ -58,6 +60,12 @@ struct HostShaderFeatures {
 	// The host's waves have more than 32 lanes also for programs of 32 (D3D12 on the Series X runs them in 64-lane waves): the
 	// active lanes of such a program can all be in the ballot's second word, so the first active lane is searched in both.
 	bool wave32_in_wider_waves = false;
+	// The width of the host's waves where it is more than 32 lanes (64 on the Series X), else 0. A geometry shader's program run as a
+	// compute shader takes the scheme of a host with 32-lane waves there too (ShaderProgramCache: host_subgroup_size 32): each thread
+	// runs two lanes of the guest's wave of 64, so a guest wave is 32 threads, and that scheme takes a host wave to be one guest wave.
+	// A host wave of 64 lanes would hold two, so the workgroup gets that many threads per guest wave, of which only the first 32 run:
+	// the others do nothing and count in no wave operation (SpirvEmitter: MeshComputeWaveLanes).
+	uint32_t mesh_compute_wave_lanes = 0;
 	// Loads from guest buffers at a slot the shader fixes (buffer views, which read 0 past their end on D3D12) run for every lane,
 	// and their value is chosen afterwards, instead of branching around them on the lane's EXEC bit and the bounds check. Loads
 	// have no side effect, so the result is the same; the shaders get far fewer blocks, which the Xbox's driver compiles much faster.

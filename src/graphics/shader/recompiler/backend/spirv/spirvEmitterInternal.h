@@ -433,6 +433,9 @@ uint32_t EmitVertexParameterComponentU32(EmitterState& state, const InputBinding
 uint32_t EmitInputComponentU32(EmitterState& state, IR::StageInputKind kind, uint32_t component);
 
 uint32_t EmitLocalInvocationIndex(EmitterState& state);
+// HostShaderFeatures::mesh_compute_wave_lanes for this program: the host threads per guest wave (the first 32 of them run), or 0 where a
+// guest wave and a host wave are the same 32 threads.
+uint32_t MeshComputeWaveLanes(const EmitterState& state);
 
 uint32_t EmitBallotLaneActiveBool(EmitterState& state, uint32_t ballot, uint32_t lane);
 

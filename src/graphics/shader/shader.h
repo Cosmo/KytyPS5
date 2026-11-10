@@ -89,6 +89,8 @@ struct ShaderMeshInputInfo: ShaderWorkgroupInputInfo {
 	bool     fast_launch          = false;
 	// The host has no mesh shaders: the program runs as a compute shader (IR::MeshEmulation).
 	bool     compute_emulation    = false;
+	// The program has a geometry shader (not only the vertex stage's primitives).
+	bool     geometry_shader      = false;
 
 	// The slots a group reserves in the emulation: one per possible vertex, and one per triangle a
 	// thread can make.
