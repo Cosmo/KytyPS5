@@ -32,6 +32,7 @@ struct Rng {
 int g_failures = 0;
 long g_privatized = 0;
 long g_sweeps = 0, g_evicted = 0, g_aborted = 0, g_page_ins = 0, g_cut_page_ins = 0; // how much the runs did of what they test
+long g_coldest = 0, g_zero_left = 0, g_shield_refused = 0;
 #define CHECK(cond, ...)                                                                                                                            \
 	do {                                                                                                                                             \
 		if (!(cond)) {                                                                                                                               \
@@ -264,6 +265,11 @@ void Verify(const Mock& host, const Model& model, const Regions& regions, const 
 			}
 		}
 	}
+	uint64_t swept = 0;
+	for (uint64_t w = 0; w < kPages / kWindowP; ++w) {
+		swept += (regions.FlagsOf(Addr(w * kWindowP)) & Xbox::Lazy::kSwept) != 0;
+	}
+	CHECK(regions.WaitingCount() == swept, "%s: %llu windows wait, %llu are swept", what, (unsigned long long)regions.WaitingCount(), (unsigned long long)swept);
 	size_t live = 0;
 	for (const auto l: host.live) {
 		live += l;
@@ -299,7 +305,11 @@ void RandomRun(uint64_t seed, int steps) {
 	Regions regions;
 	Mock    host;
 	Model   model;
+	uint64_t                     clock = 0;      // the pager's clock, in milliseconds
+	std::map<uint64_t, uint64_t> swept_at;       // window -> when the test swept it (checked against the flags before it is used)
 	for (int step = 0; step < steps; ++step) {
+		clock += rng.Below(400);
+		regions.SetNow(clock);
 		const uint64_t op = rng.Below(100);
 		if (op < 12) {
 			// map: mostly whole windows, sometimes ragged
@@ -392,11 +402,26 @@ void RandomRun(uint64_t seed, int steps) {
 			Access(host, model, regions, rng.Below(kPages), rng.Below(2) == 0);
 		} else if (op < 68) {
 			// the pager sweeps a window
-			const uint64_t w     = rng.Below(kPages / kWindowP);
-			const bool     can   = regions.CanSweep(Abs(w));
-			const bool     swept = regions.Sweep(Abs(w), host);
-			CHECK(can == swept, "sweep result %d, CanSweep said %d", swept, can);
-			g_sweeps += swept ? 1 : 0;
+			const uint64_t w = rng.Below(kPages / kWindowP);
+			if (rng.Below(3) == 0) {
+				// as the pager's thread does: not a window touched since the last look, not a shielded one
+				const bool shielded = regions.Shielded(Abs(w));
+				const bool swept    = regions.SweepIfCold(Abs(w), host);
+				CHECK(!(swept && shielded), "a shielded window was swept");
+				g_shield_refused += shielded ? 1 : 0;
+				if (swept) {
+					swept_at[w] = clock;
+					++g_sweeps;
+				}
+			} else {
+				const bool can   = regions.CanSweep(Abs(w));
+				const bool swept = regions.Sweep(Abs(w), host);
+				CHECK(can == swept, "sweep result %d, CanSweep said %d", swept, can);
+				if (swept) {
+					swept_at[w] = clock;
+					++g_sweeps;
+				}
+			}
 		} else if (op < 71) {
 			// a thread or a fiber starts on some windows: they are pinned, and what the pager took from them comes back
 			const uint64_t w     = rng.Below(kPages / kWindowP - 3);
@@ -415,7 +440,9 @@ void RandomRun(uint64_t seed, int steps) {
 			if (host.view[w] == 0 || !regions.IsView(Abs(w))) {
 				continue;
 			}
-			regions.Sweep(Abs(w), host); // (it may be swept already)
+			if (regions.Sweep(Abs(w), host)) { // (it may be swept already)
+				swept_at[w] = clock;
+			}
 			if (!regions.BeginEvict(Abs(w), host)) {
 				continue;
 			}
@@ -434,8 +461,53 @@ void RandomRun(uint64_t seed, int steps) {
 			}
 		} else if (op < 92) {
 			// the pager takes a swept window out of memory; a write may arrive while it is copied
-			const uint64_t w = rng.Below(kPages / kWindowP);
+			uint64_t w = rng.Below(kPages / kWindowP);
+			if (rng.Below(2) == 0) {
+				// the window that waits longest, if it waited long enough: no swept window waits longer
+				const uint64_t min_idle = rng.Below(1500);
+				uint64_t       coldest  = 0;
+				uint64_t       oldest   = ~uint64_t {0}; // among the windows that are swept now
+				for (const auto& [window, at]: swept_at) {
+					if ((regions.FlagsOf(Addr(window * kWindowP)) & Xbox::Lazy::kSwept) != 0) {
+						oldest = std::min(oldest, at);
+					}
+				}
+				const bool found = regions.Coldest(min_idle, coldest);
+				CHECK(found == (oldest != ~uint64_t {0} && clock - oldest >= min_idle), "coldest found %d; the oldest sweep was at %llu, now %llu, idle %llu", found,
+				      (unsigned long long)oldest, (unsigned long long)clock, (unsigned long long)min_idle);
+				if (!found) {
+					continue;
+				}
+				w = coldest - Abs(0);
+				CHECK((regions.FlagsOf(Addr(w * kWindowP)) & Xbox::Lazy::kSwept) != 0 && swept_at.count(w) != 0 && swept_at[w] == oldest,
+				      "the coldest window %llu is not the swept window that waits longest", (unsigned long long)w);
+				++g_coldest;
+				if (rng.Below(8) == 0) {
+					regions.GiveBack(coldest, host); // enough is out: it stays after all
+					continue;
+				}
+			}
 			if (!regions.BeginEvict(Abs(w), host)) {
+				continue;
+			}
+			bool zero = true;
+			for (uint64_t i = 0; i < kWindowP; ++i) {
+				zero = zero && host.content[w * kWindowP + i] == 0;
+			}
+			if (zero && rng.Below(2) == 0) {
+				// nothing but zeros: it leaves without a slot, and reads as zero when it is touched again
+				const bool interfere = rng.Below(3) == 0;
+				if (interfere) {
+					Access(host, model, regions, w * kWindowP + rng.Below(kWindowP), true);
+				}
+				const bool left = (regions.FlagsOf(Addr(w * kWindowP)) & Xbox::Lazy::kEvicting) != 0 && regions.CommitEvictZero(Abs(w), host);
+				CHECK(left == !interfere, "a window of zeros left %d, a write arrived %d", left, interfere);
+				if (left) {
+					++g_zero_left;
+					for (uint64_t i = 0; i < kWindowP; ++i) {
+						model.committed[w * kWindowP + i] = 0;
+					}
+				}
 				continue;
 			}
 			const uint32_t slot = host.AllocSlot();
@@ -577,8 +649,92 @@ void RejectedProtection() {
 
 } // namespace
 
+// The shield: a window that comes back soon after it left is not swept to leave for a while, longer each time; a window that was away for long is.
+void ShieldRun() {
+	Regions regions;
+	Mock    host;
+	CHECK(regions.Map(Addr(0), 4 * kWindowP * kPage), "map refused");
+	uint64_t   clock     = 100000;
+	const auto leave     = [&](uint64_t w) {
+		regions.SetNow(clock);
+		CHECK(regions.Sweep(Abs(w), host), "sweep refused");
+		CHECK(regions.BeginEvict(Abs(w), host), "begin evict refused");
+		const uint32_t slot = host.AllocSlot();
+		CHECK(regions.CommitEvict(Abs(w), slot, host), "commit evict refused");
+	};
+	const auto come_back = [&](uint64_t w, uint64_t after_ms) {
+		clock += after_ms;
+		regions.SetNow(clock);
+		CHECK(regions.CommitAt(Addr(w * kWindowP), host) == Regions::CommitResult::Committed, "page in refused");
+	};
+	const auto sweepable_after = [&](uint64_t w, uint64_t after_ms) {
+		regions.SetNow(clock + after_ms);
+		// (the first look only forgets a touch)
+		const bool swept = regions.SweepIfCold(Abs(w), host) || regions.SweepIfCold(Abs(w), host);
+		if (swept) {
+			regions.GiveBack(Abs(w), host);
+		}
+		return swept;
+	};
+	for (uint64_t w = 0; w < 4; ++w) {
+		regions.SetNow(clock);
+		CHECK(regions.CommitAt(Addr(w * kWindowP), host) == Regions::CommitResult::Committed, "commit refused");
+	}
+	// away for 5 s: shielded for 15 s
+	leave(0);
+	come_back(0, 5000);
+	CHECK(regions.QuickReturns() == 1, "a return after 5 s is not counted as quick");
+	CHECK(!sweepable_after(0, 14000), "swept 14 s after a quick return");
+	CHECK(sweepable_after(0, 16000), "not swept 16 s after a quick return");
+	// a second quick return: 30 s
+	clock += 16000;
+	leave(0);
+	come_back(0, 1000);
+	CHECK(!sweepable_after(0, 29000), "swept 29 s after the second quick return");
+	CHECK(sweepable_after(0, 31000), "not swept 31 s after the second quick return");
+	// a window that was away for a minute is no quick return, and is swept at once
+	leave(1);
+	come_back(1, 60000);
+	CHECK(regions.QuickReturns() == 2, "a return after a minute is counted as quick");
+	CHECK(sweepable_after(1, 0), "a window that was away for a minute is shielded");
+	// with the shield off (the rules of before) nothing is held back
+	clock += 1000;
+	leave(2);
+	come_back(2, 1000);
+	regions.SetShield(false);
+	CHECK(sweepable_after(2, 0), "shield off, and a quick return is not swept");
+	regions.SetShield(true);
+	CHECK(!sweepable_after(2, 0), "shield on again, and a quick return is swept");
+	// a sweep that does not wait (a view to become private memory) is not in the queue, and the shield does not hold it back
+	regions.SetNow(clock);
+	CHECK(regions.SweepIfCold(Abs(2), host, false) || regions.SweepIfCold(Abs(2), host, false), "a sweep that does not wait was held back by the shield");
+	uint64_t window = 0;
+	CHECK(regions.WaitingCount() == 0 && !regions.Coldest(0, window), "a sweep that does not wait is in the queue");
+	CHECK(regions.Touch(Abs(2), host), "touch refused");
+	// above the budget the shield is only a preference: a sweep that asks for shielded windows too gets the window, and it waits to leave
+	CHECK(regions.Shielded(Abs(2)), "the window lost its shield");
+	CHECK(regions.SweepIfCold(Abs(2), host, true, true) || regions.SweepIfCold(Abs(2), host, true, true), "the shield held a window that was asked for");
+	CHECK(regions.WaitingCount() == 1 && regions.Coldest(0, window) && window == Abs(2), "a shielded window that was swept does not wait");
+	CHECK(regions.Touch(Abs(2), host), "touch refused");
+	// the order: the window that waits longest first; a window touched and swept again is at the end
+	regions.SetNow(clock + 300000);
+	CHECK(regions.Sweep(Abs(1), host), "sweep refused");
+	regions.SetNow(clock + 301000);
+	CHECK(regions.Sweep(Abs(3), host), "sweep refused");
+	CHECK(regions.Touch(Abs(1), host), "touch refused");
+	regions.SetNow(clock + 302000);
+	CHECK(regions.Sweep(Abs(1), host), "sweep refused");
+	CHECK(!regions.Coldest(2000, window), "a window swept a second ago waited two seconds");
+	CHECK(regions.Coldest(1000, window) && window == Abs(3), "the window that waits longest is not first");
+	regions.GiveBack(window, host);
+	CHECK(!regions.Coldest(1000, window) && regions.Coldest(0, window) && window == Abs(1), "the window swept again is not last");
+	regions.GiveBack(window, host);
+	CHECK(regions.WaitingCount() == 0, "windows wait after all were given back");
+}
+
 int main() {
 	RejectedProtection();
+	ShieldRun();
 	for (uint64_t seed = 1; seed <= 80; ++seed) {
 		RandomRun(seed, 1500);
 	}
@@ -590,6 +746,9 @@ int main() {
 	CHECK(g_privatized > 0, "no view was ever turned into private memory");
 	std::printf("exercised: %ld sweeps, %ld windows evicted, %ld evictions aborted by a write, %ld page ins (%ld of the windows were cut by an unmap)\n", g_sweeps, g_evicted,
 	            g_aborted, g_page_ins, g_cut_page_ins);
+	std::printf("the pager's choice: %ld times the window that waits longest, %ld windows of zeros left without a slot, %ld sweeps held back by the shield\n", g_coldest,
+	            g_zero_left, g_shield_refused);
+	CHECK(g_coldest > 0 && g_zero_left > 0 && g_shield_refused > 0, "the pager's choice was not exercised");
 	std::printf(g_failures == 0 ? "lazy pager test: all passed\n" : "lazy pager test: %d failures\n", g_failures);
 	return g_failures == 0 ? 0 : 1;
 }

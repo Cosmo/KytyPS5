@@ -9,3 +9,5 @@ clang-cl /nologo /std:c++20 /EHsc /O2 /W3 /I "%HERE%..\.." "%HERE%lazyRegionsTes
 "%OUT%\lazyRegionsTest.exe"
 clang-cl /nologo /std:c++20 /EHsc /O2 /W3 /I "%HERE%..\.." "%HERE%lazyPagerTest.cpp" /Fo"%OUT%\\" /Fe"%OUT%\lazyPagerTest.exe" || exit /b 1
 "%OUT%\lazyPagerTest.exe"
+clang-cl /nologo /std:c++20 /EHsc /O2 /W3 /I "%HERE%..\.." "%HERE%pagerRulesTest.cpp" /Fo"%OUT%\\" /Fe"%OUT%\pagerRulesTest.exe" || exit /b 1
+"%OUT%\pagerRulesTest.exe"
