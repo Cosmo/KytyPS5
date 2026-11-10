@@ -4,13 +4,15 @@
 // Local fork, T3: bookkeeping for guest memory that is reserved when it is mapped and committed in windows on the first touch.
 // A region is a mapped range of guest memory. Its address range is cut into windows of 64 KiB (aligned in the address space, clipped to the
 // region). A window is committed as a whole, read-write, the first time it is touched; the protection the guest (or a page watcher) asked for
-// is remembered per 4 KiB page for windows that are not committed yet and applied when the window is committed. Unmapping decommits.
+// is remembered per 4 KiB page: it is applied when the window is committed, and again when the pager gives a window back that it had made
+// no-access or read-only as a whole. Unmapping decommits.
 // This class decides what to do; HostOps does it (VirtualAlloc and friends in the emulator, a mock in the test). No locking here.
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <new>
@@ -220,7 +222,11 @@ public:
 			// the windows lose their flags before anything is decommitted (a window the range cuts through is no longer committed as a whole);
 			// the windows in the store are gone, their slots are free
 			for (uint64_t w = a >> kWindowBits; w <= (b - 1) >> kWindowBits; ++w) {
+				if ((m_flags.Get(w) & kSwept) != 0) {
+					m_swept_at.erase(w);
+				}
 				m_flags.Store(w, 0);
+				m_away.erase(w);
 				if (const auto ev = m_evicted.find(w); ev != m_evicted.end()) {
 					host.FreeSlot(ev->second);
 					m_evicted.erase(ev);
@@ -289,12 +295,13 @@ public:
 			for (uint64_t w = a >> kWindowBits; w <= (b - 1) >> kWindowBits; ++w) {
 				const uint64_t lo = std::max(a, w << kWindowBits), hi = std::min(b, (w + 1) << kWindowBits);
 				if (r.committed[w - (r.start >> kWindowBits)] != 0) {
-					// a window the pager swept (no-access) or is copying out (read-only) is made read-write first: the protection asked for applies to
-					// pages of a window that is read-write as a whole
+					// a window the pager swept (no-access) or is copying out (read-only) gets its pages' protections back first: the one asked for
+					// applies to pages that are as the guest and the page watchers left them
 					if (!Touch(w, host)) {
 						return false;
 					}
 					NoteProtect(w, lo, hi, mode, clears);
+					SetModes(r, w, lo, hi, mode);
 					if (r.committed[w - (r.start >> kWindowBits)] >= 2) {
 						// Views and converted private windows are separate allocations.
 						if (!flush() || !host.Protect(lo, hi - lo, mode)) {
@@ -313,20 +320,7 @@ public:
 					if (!flush()) {
 						return false;
 					}
-					auto found = r.modes.find(w);
-					if (found == r.modes.end()) {
-						std::array<uint8_t, kPagesPerWindow> fresh;
-						fresh.fill(static_cast<uint8_t>(Mode::ReadWrite));
-						found = r.modes.emplace(w, fresh).first;
-					}
-					auto& modes = found->second;
-					for (uint64_t p = lo; p < hi; p += kPage) {
-						modes[(p - (w << kWindowBits)) / kPage] = static_cast<uint8_t>(mode);
-					}
-					// all pages read-write again: nothing to remember
-					if (std::all_of(modes.begin(), modes.end(), [](uint8_t m) { return m == static_cast<uint8_t>(Mode::ReadWrite); })) {
-						r.modes.erase(w);
-					}
+					SetModes(r, w, lo, hi, mode);
 				}
 			}
 			if (!flush()) {
@@ -375,6 +369,7 @@ public:
 					m_evicted.erase(ev);
 					flag      = 2;
 					committed = true;
+					NoteReturn(w);
 				}
 			} else if (host.Commit(lo, hi - lo)) {
 				flag      = 1;
@@ -402,24 +397,7 @@ public:
 			}
 			m_flags.Store(w, bits);
 		}
-		auto it = r->modes.find(w);
-		if (it != r->modes.end()) {
-			// apply the remembered protections page by page, merging runs
-			const auto modes = it->second;
-			r->modes.erase(it);
-			uint64_t run_start = lo;
-			Mode     run_mode  = ModeOf(modes, w, lo);
-			for (uint64_t p = lo + kPage; p <= hi; p += kPage) {
-				const Mode m = p < hi ? ModeOf(modes, w, p) : Mode::ReadWrite;
-				if (p == hi || m != run_mode) {
-					if (run_mode != Mode::ReadWrite) {
-						host.Protect(run_start, p - run_start, run_mode);
-					}
-					run_start = p;
-					run_mode  = m;
-				}
-			}
-		}
+		ApplyModes(*r, w, lo, hi, Mode::ReadWrite, host);
 		return CommitResult::Committed;
 	}
 
@@ -526,14 +504,22 @@ public:
 		}
 		return restored;
 	}
-	// A window the pager may sweep: committed as a whole, read-write, nothing protected, not swept or on its way out, and not a stack.
+	// A window the pager may sweep: committed as a whole, no page no-access, not swept or on its way out, and not a stack. Read-only pages do
+	// not keep it: a page watcher made them so to see writes (the GPU caches hold a copy of the game's textures and buffers), and that
+	// memory is what the game touches least. While the pager holds such a window, a write faults as before; the window gets its pages'
+	// protections back (Touch), and the write faults again, for the watcher. A no-access page keeps the window in memory: the pager copies
+	// a window out through a read-only state, and that page must not be readable.
 	[[nodiscard]] bool CanSweep(uint64_t window) const {
 		const uint8_t f = m_flags.Get(window);
-		return (f & kFull) != 0 && (f & (kProt | kNoAccess | kSwept | kEvicting)) == 0 && !IsPinned(window);
+		return (f & kFull) != 0 && (f & Held()) == 0 && (f & kSwept) == 0 && !IsPinned(window);
 	}
+	// (Off: a window with any protected page stays, as before.)
+	void SetTakeWatched(bool on) { m_take_watched = on; }
 	// Sweeps the window unless it was touched since the last time the pager looked (then it only forgets the touch: the window gets its chance
 	// in the next cycle).
-	bool SweepIfCold(uint64_t window, HostOps& host) {
+	// A shielded window (it came back soon after it left, see NoteReturn) is not swept to leave either, unless `shielded_too`: the shield is
+	// a preference, and gives way when the other windows are not enough. `waits`: see Sweep.
+	bool SweepIfCold(uint64_t window, HostOps& host, bool waits = true, bool shielded_too = false) {
 		if (!CanSweep(window)) {
 			return false;
 		}
@@ -541,29 +527,75 @@ public:
 			m_flags.And(window, static_cast<uint8_t>(~kTouched));
 			return false;
 		}
-		return Sweep(window, host);
+		if (waits && !shielded_too && Shielded(window)) {
+			return false;
+		}
+		return Sweep(window, host, waits);
 	}
-	// Makes the window no-access and waits to see whether it is touched (a fault, or a host access, calls Touch).
-	bool Sweep(uint64_t window, HostOps& host) {
+	// Makes the window no-access and waits to see whether it is touched (a fault, or a host access, calls Touch). With `waits` the window joins
+	// the swept windows that wait to leave (Coldest); without, the caller keeps track of it.
+	bool Sweep(uint64_t window, HostOps& host, bool waits = true) {
 		if (!CanSweep(window)) {
 			return false;
+		}
+		if (waits) {
+			const uint64_t now = m_now_ms.load(std::memory_order_relaxed);
+			if (m_waiting.size() > 4 * m_swept_at.size() + 4096) {
+				DropStaleWaiting();
+			}
+			m_swept_at[window] = now;
+			m_waiting.push_back({now, window});
 		}
 		m_flags.And(window, static_cast<uint8_t>(~kTouched));
 		m_flags.Or(window, kSwept); // before the protection: a fault it causes must find the flag
 		if (!host.Protect(window << kWindowBits, kWindow, Mode::NoAccess)) {
 			m_flags.And(window, static_cast<uint8_t>(~kSwept));
+			m_swept_at.erase(window);
 			return false;
 		}
 		return true;
 	}
-	// Restores the permissions of a window held by the pager. Other windows need no change.
+	// The swept windows wait in the order they were swept: one that is still swept was not touched since. Gives the one that waits longest,
+	// if it waited for `min_idle_ms`; it stays swept, and the caller takes it out (BeginEvict) or gives it back (Touch).
+	bool Coldest(uint64_t min_idle_ms, uint64_t& window) {
+		const uint64_t now = m_now_ms.load(std::memory_order_relaxed);
+		while (!m_waiting.empty()) {
+			const Waiting first = m_waiting.front();
+			const auto    found = m_swept_at.find(first.window);
+			if (found == m_swept_at.end() || found->second != first.at_ms) {
+				m_waiting.pop_front(); // touched meanwhile (and maybe swept again later: that is another entry)
+				continue;
+			}
+			if (now - first.at_ms < min_idle_ms) {
+				return false;
+			}
+			window = first.window;
+			return true;
+		}
+		return false;
+	}
+	// How many swept windows wait.
+	[[nodiscard]] uint64_t WaitingCount() const { return m_swept_at.size(); }
+	// The swept window is read-write again and waits no longer, also when the host could not change its protection (then it stays swept
+	// until a touch tries again).
+	void GiveBack(uint64_t window, HostOps& host) {
+		if (!Touch(window, host)) {
+			m_swept_at.erase(window);
+		}
+	}
+	// Gives a window held by the pager its pages' protections back. Other windows need no change.
 	bool Touch(uint64_t window, HostOps& host) {
 		const uint8_t flags = m_flags.Get(window);
 		if ((flags & (kSwept | kEvicting)) == 0) {
 			return true;
 		}
-		if (!host.Protect(window << kWindowBits, kWindow, Mode::ReadWrite)) {
+		const Region* r = Find(window << kWindowBits);
+		if (r == nullptr ||
+		    !ApplyModes(*r, window, window << kWindowBits, (window + 1) << kWindowBits, (flags & kSwept) != 0 ? Mode::NoAccess : Mode::Read, host)) {
 			return false;
+		}
+		if ((flags & kSwept) != 0) {
+			m_swept_at.erase(window);
 		}
 		m_flags.Store(window, static_cast<uint8_t>((flags | kTouched) & ~(kSwept | kEvicting)));
 		return true;
@@ -577,6 +609,7 @@ public:
 		if (!host.Protect(window << kWindowBits, kWindow, Mode::Read)) {
 			return false;
 		}
+		m_swept_at.erase(window);
 		m_flags.Store(window, static_cast<uint8_t>((f & ~kSwept) | kEvicting));
 		return true;
 	}
@@ -592,13 +625,67 @@ public:
 			return false;
 		}
 		// The window is marked as in the store before it is decommitted: whoever finds it decommitted (a host copy that sees reserved pages) must
-		// also see that it is not a window that was never used, which reads as zero. (The map entry first: under a full heap its insert is
+		// also see that it is not a window that was never used, which reads as zero. (The map entries first: under a full heap their insert is
 		// what fails, and then nothing has changed yet.)
+		Away& away  = m_away[window];
+		away.left_ms = m_now_ms.load(std::memory_order_relaxed);
+		away.store_reads.store(0, std::memory_order_relaxed);
 		m_evicted[window] = slot;
 		m_flags.Store(window, kEvicted);
 		host.Decommit(window << kWindowBits, kWindow, r->committed[window - (r->start >> kWindowBits)] == 2);
 		r->committed[window - (r->start >> kWindowBits)] = 0;
 		return true;
+	}
+	// The window on its way out holds nothing but zeros: it leaves without a slot, as a window that was never used (it reads as zero, and a
+	// touch commits it again, zero-filled). Nothing is written now and nothing is read later. Returns whether the window left.
+	bool CommitEvictZero(uint64_t window, HostOps& host) {
+		if ((m_flags.Get(window) & kEvicting) == 0) {
+			return false;
+		}
+		Region* r = FindMut(window << kWindowBits);
+		if (r == nullptr) {
+			return false;
+		}
+		m_flags.Store(window, 0);
+		host.Decommit(window << kWindowBits, kWindow, r->committed[window - (r->start >> kWindowBits)] == 2);
+		r->committed[window - (r->start >> kWindowBits)] = 0;
+		return true;
+	}
+
+	// ---- Choosing what leaves. (The rules follow the swap of the Jadyx emulator; the code is ours.)
+	// The pager's clock in milliseconds, set by its thread once per round: what "how long ago" means here.
+	void SetNow(uint64_t ms) { m_now_ms.store(ms, std::memory_order_relaxed); }
+	// A window that comes back within kQuickReturnMs of leaving was in use: the pager took it too early. It is shielded, that is not swept,
+	// for kShieldMs, and for twice as long with every further quick return (up to kShieldMaxMs); a return after a long time halves that again.
+	// MakeRoom (a failed commit) does not ask.
+	static constexpr uint64_t kQuickReturnMs = 30000;
+	static constexpr uint64_t kShieldMs      = 15000;
+	static constexpr uint64_t kShieldMaxMs   = 240000;
+	void                      SetShield(bool on) { m_shield = on; }
+	[[nodiscard]] bool        Shielded(uint64_t window) const {
+		if (!m_shield) {
+			return false;
+		}
+		const auto found = m_away.find(window);
+		return found != m_away.end() && found->second.shield_until_ms > m_now_ms.load(std::memory_order_relaxed);
+	}
+	// Windows that came back quickly, since the start.
+	[[nodiscard]] uint64_t QuickReturns() const { return m_quick_returns.load(std::memory_order_relaxed); }
+	// The emulator read a window in the store without bringing it back (a host copy: the GPU's reads of the game's buffers and textures).
+	// Reads cause no fault, so a window that only the emulator reads looks cold and leaves, and then every read of it goes to the store.
+	// True from the kStoreReads-th read since the window left: it is in use, and the caller brings it back. Under the caller's shared lock
+	// (the count is atomic; windows enter and leave the map under the exclusive lock only).
+	static constexpr uint8_t kStoreReads = 4;
+	[[nodiscard]] bool       NoteStoreRead(uint64_t window) const {
+		const auto found = m_away.find(window);
+		if (found == m_away.end()) {
+			return false;
+		}
+		const uint8_t reads = found->second.store_reads.load(std::memory_order_relaxed);
+		if (reads < UINT8_MAX) {
+			found->second.store_reads.store(static_cast<uint8_t>(reads + 1), std::memory_order_relaxed);
+		}
+		return reads + 1 >= kStoreReads;
 	}
 	// A commit failed: the process is at its limit of memory (the guest shares it with the GPU and the heap, and those grow without a budget).
 	// Evicts up to `count` windows on the spot, the coldest it finds (swept ones first in effect: they were not touched for a while; then the ones
@@ -608,6 +695,16 @@ public:
 		uint64_t done     = 0;
 		int      failures = 0; // in a row: when the host cannot spill (no store), trying 128 windows each time would only cost
 		bool     give_up  = false;
+		// The swept windows first, the one that waits longest before the others: nobody touched them since.
+		for (uint64_t w = 0; !views_only && done < count && !give_up && Coldest(0, w);) {
+			if (EvictNow(w, host)) {
+				++done;
+				failures = 0;
+			} else {
+				GiveBack(w, host);
+				give_up = ++failures >= 16;
+			}
+		}
 		for (int pass = 0; pass < 2 && done < count && !give_up; ++pass) {
 			const uint64_t start   = m_room_hand;
 			uint64_t       from    = start;
@@ -621,7 +718,7 @@ public:
 					}
 					m_room_hand = w + 1;
 					const uint8_t f = m_flags.Get(w);
-					if ((f & kFull) == 0 || (f & (kProt | kNoAccess | kEvicting)) != 0 || IsPinned(w) || (views_only && !IsView(w))) {
+					if ((f & kFull) == 0 || (f & Held()) != 0 || IsPinned(w) || (views_only && !IsView(w))) {
 						return false;
 					}
 					if (pass == 0 && (f & (kSwept | kTouched)) == kTouched) {
@@ -671,7 +768,9 @@ public:
 			return false;
 		}
 		flag = 3; // private memory that is an allocation of its own (neighbours are not one call with it)
-		m_flags.Store(window, kFull | kTouched); // Read-write and in use for a cycle.
+		// Read-write now, and in use for a cycle; its pages' protections come back.
+		m_flags.Store(window, static_cast<uint8_t>(kFull | kTouched | (m_flags.Get(window) & (kProt | kNoAccess))));
+		ApplyModes(*r, window, window << kWindowBits, (window + 1) << kWindowBits, Mode::ReadWrite, host);
 		return true;
 	}
 
@@ -687,6 +786,34 @@ public:
 		return true;
 	}
 	[[nodiscard]] size_t EvictedCount() const { return m_evicted.size(); }
+	// The committed windows by what the pager may do with them, for its report (under the caller's lock). A page watcher's protection keeps a
+	// window in memory: `write_watched` has read-only pages, `read_watched` has no-access pages too.
+	struct Census {
+		uint64_t free = 0, write_watched = 0, read_watched = 0, pinned = 0, partial = 0;
+	};
+	[[nodiscard]] Census Count() const {
+		Census census;
+		for (const auto& [start, r]: m_regions) {
+			for (uint64_t w = r.start >> kWindowBits; w <= (r.end - 1) >> kWindowBits; ++w) {
+				if (r.committed[w - (r.start >> kWindowBits)] == 0) {
+					continue;
+				}
+				const uint8_t f = m_flags.Get(w);
+				if ((f & kFull) == 0) {
+					++census.partial;
+				} else if (IsPinned(w)) {
+					++census.pinned;
+				} else if ((f & kNoAccess) != 0) {
+					++census.read_watched;
+				} else if ((f & kProt) != 0) {
+					++census.write_watched;
+				} else {
+					++census.free;
+				}
+			}
+		}
+		return census;
+	}
 	// Calls visit(window) for the windows committed as a whole, in address order, from the window `from` on, until visit returns true.
 	template <class Visit>
 	void ForEachFullWindow(uint64_t from, Visit&& visit) const {
@@ -806,6 +933,51 @@ private:
 	static Mode ModeOf(const std::array<uint8_t, kPagesPerWindow>& modes, uint64_t window, uint64_t page_address) {
 		return static_cast<Mode>(modes[(page_address - (window << kWindowBits)) / kPage]);
 	}
+	// Remembers the mode of the pages [lo, hi) of the window. Only windows with a page that is not read-write have an entry.
+	static void SetModes(Region& r, uint64_t w, uint64_t lo, uint64_t hi, Mode mode) {
+		auto found = r.modes.find(w);
+		if (found == r.modes.end()) {
+			if (mode == Mode::ReadWrite) {
+				return;
+			}
+			std::array<uint8_t, kPagesPerWindow> fresh;
+			fresh.fill(static_cast<uint8_t>(Mode::ReadWrite));
+			found = r.modes.emplace(w, fresh).first;
+		}
+		auto& modes = found->second;
+		for (uint64_t p = lo; p < hi; p += kPage) {
+			modes[(p - (w << kWindowBits)) / kPage] = static_cast<uint8_t>(mode);
+		}
+		if (std::all_of(modes.begin(), modes.end(), [](uint8_t m) { return m == static_cast<uint8_t>(Mode::ReadWrite); })) {
+			r.modes.erase(found);
+		}
+	}
+	// Gives the pages [lo, hi) of a committed window the modes remembered for them, one host call per run of pages with the same mode. All
+	// of them are `from` now, and the runs that want just that are left alone. No page is more open than it should be at any time.
+	static bool ApplyModes(const Region& r, uint64_t w, uint64_t lo, uint64_t hi, Mode from, HostOps& host) {
+		const auto found = r.modes.find(w);
+		if (found == r.modes.end()) {
+			return from == Mode::ReadWrite || host.Protect(lo, hi - lo, Mode::ReadWrite);
+		}
+		const auto& modes     = found->second;
+		bool        ok        = true;
+		uint64_t    run_start = lo;
+		Mode        run_mode  = ModeOf(modes, w, lo);
+		for (uint64_t p = lo + kPage; p <= hi; p += kPage) {
+			if (p == hi || ModeOf(modes, w, p) != run_mode) {
+				if (run_mode != from) {
+					ok = host.Protect(run_start, p - run_start, run_mode) && ok;
+				}
+				if (p < hi) {
+					run_start = p;
+					run_mode  = ModeOf(modes, w, p);
+				}
+			}
+		}
+		return ok;
+	}
+	// The flags of a window the pager leaves in memory.
+	[[nodiscard]] uint8_t Held() const { return static_cast<uint8_t>(kNoAccess | kEvicting | (m_take_watched ? 0 : kProt)); }
 
 	void AddPiece(const Region& old, uint64_t start, uint64_t end) {
 		Region r;
@@ -853,9 +1025,54 @@ private:
 		return it == m_regions.end() ? nullptr : &it->second;
 	}
 
+	// A window came back from the store: was it away for a short time only?
+	void NoteReturn(uint64_t window) {
+		const auto found = m_away.find(window);
+		if (found == m_away.end() || found->second.left_ms == 0) {
+			return;
+		}
+		Away&          away = found->second;
+		const uint64_t now  = m_now_ms.load(std::memory_order_relaxed);
+		const uint64_t gone = now - away.left_ms;
+		away.left_ms        = 0;
+		if (gone < kQuickReturnMs) {
+			away.quick           = static_cast<uint8_t>(std::min<int>(away.quick + 1, 8));
+			away.shield_until_ms = now + std::min(kShieldMs << (away.quick - 1), kShieldMaxMs);
+			m_quick_returns.fetch_add(1, std::memory_order_relaxed);
+		} else if (gone > 4 * kQuickReturnMs) {
+			away.quick >>= 1;
+		}
+	}
+	// Entries of windows that no longer wait pile up in front of one that does: they are taken out when they are most of the queue.
+	void DropStaleWaiting() {
+		std::deque<Waiting> kept;
+		for (const Waiting& entry: m_waiting) {
+			const auto found = m_swept_at.find(entry.window);
+			if (found != m_swept_at.end() && found->second == entry.at_ms) {
+				kept.push_back(entry);
+			}
+		}
+		m_waiting.swap(kept);
+	}
+
 	std::map<uint64_t, Region>              m_regions;
 	WindowFlags                             m_flags;
 	std::unordered_map<uint64_t, uint32_t>  m_evicted; // window -> slot of the store
+	struct Waiting {
+		uint64_t at_ms, window;
+	};
+	std::deque<Waiting>                    m_waiting;  // the swept windows in the order they were swept (entries of windows touched since stay until they are in front)
+	std::unordered_map<uint64_t, uint64_t> m_swept_at; // a swept window that waits -> when it was swept
+	struct Away {
+		uint64_t left_ms = 0, shield_until_ms = 0; // when it left (0: it is back); until when the pager leaves it alone
+		uint8_t  quick = 0;                        // quick returns in a row
+		mutable std::atomic<uint8_t> store_reads {0}; // reads of it by the emulator while it is in the store (NoteStoreRead)
+	};
+	std::unordered_map<uint64_t, Away> m_away; // windows that left memory at some time
+	std::atomic<uint64_t>              m_now_ms {0};
+	std::atomic<uint64_t>              m_quick_returns {0};
+	bool                               m_shield       = true;
+	bool                               m_take_watched = true;
 	std::map<uint64_t, uint64_t>            m_pins;    // first window -> one past the last window of a range the pager leaves alone (stacks)
 	struct TempRange {
 		uint64_t id, first, end;

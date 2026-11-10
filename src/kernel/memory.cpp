@@ -5,6 +5,7 @@
 #include "common/logging/log.h"
 #include "xbox/lazyCounters.h"
 #include "xbox/lazyRegions.h"
+#include "xbox/pagerRules.h"
 #include "xbox/pagerStore.h"
 #include "xbox/tunables.h"
 #include "common/stringUtils.h"
