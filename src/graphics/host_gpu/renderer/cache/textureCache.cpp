@@ -2071,9 +2071,22 @@ void TextureCache::RunGarbageCollector() {
 	if (m_total_used_memory < m_trigger_gc_memory) {
 		return;
 	}
+	// Under pressure a GPU-written image is read back to the guest's memory and freed. Upstream frees it at once, while the copy reaches
+	// the guest's memory only when the GPU has completed the tick, up to a frame later: the freed image's pages are no longer watched, so
+	// what the game puts into that memory meanwhile is overwritten with the image's old bytes (a command buffer of zeros: "unknown op").
+	// With a console's small budget the collector is under pressure in every heavy game. The D3D12 renderer frees such an image below, once
+	// its copy landed, as the buffer cache's collector does with its buffers.
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	constexpr bool free_after_copy = true;
+#else
+	constexpr bool free_after_copy = false;
+#endif
+	std::vector<ImageId> read_back;
+	uint64_t             pending = 0; // their memory, counted as freed
+	const auto           used    = [&] { return m_total_used_memory - std::min(pending, m_total_used_memory); };
 	const auto collect = [&](bool allow_aggressive) {
-		bool     pressured  = m_total_used_memory >= m_pressure_gc_memory;
-		bool     aggressive = allow_aggressive && m_total_used_memory >= m_critical_gc_memory;
+		bool     pressured  = used() >= m_pressure_gc_memory;
+		bool     aggressive = allow_aggressive && used() >= m_critical_gc_memory;
 		uint64_t age        = 16;
 		size_t   deletions  = 10;
 		if (aggressive) {
@@ -2101,26 +2114,52 @@ void TextureCache::RunGarbageCollector() {
 				TouchImage(*owner);
 				continue;
 			}
-			if (owner->SafeToDownload() &&
-			    (!pressured || owner->info.HasStencil() || !DownloadImageMemory(id))) {
+			if (std::find(read_back.begin(), read_back.end(), id) != read_back.end()) {
 				continue;
 			}
+			bool copied = false;
+			if (owner->SafeToDownload()) {
+				if (!pressured || owner->info.HasStencil() || !DownloadImageMemory(id)) {
+					continue;
+				}
+				copied = true;
+			}
 			--deletions;
-			FreeImage(id);
-			Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureEvictions);
-			if (m_total_used_memory < m_critical_gc_memory && aggressive) {
+			if (copied && free_after_copy) {
+				read_back.push_back(id);
+				pending += owner->AccountedSize();
+			} else {
+				FreeImage(id);
+				Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureEvictions);
+			}
+			if (used() < m_critical_gc_memory && aggressive) {
 				deletions >>= 2;
 				aggressive = false;
 			}
-			if (m_total_used_memory < m_pressure_gc_memory && pressured) {
+			if (used() < m_pressure_gc_memory && pressured) {
 				deletions >>= 1;
 				pressured = false;
 			}
 		}
 	};
 	collect(false);
-	if (m_total_used_memory >= m_critical_gc_memory) {
+	if (used() >= m_critical_gc_memory) {
 		collect(true);
+	}
+	if (read_back.empty()) {
+		return;
+	}
+	// The current recording holds the copies, so it is the tick to complete. The cache's lock stays held: a guest write that faults on
+	// these pages meanwhile waits, and lands after the copy.
+	const auto completion_tick = m_scheduler.CurrentTick();
+	m_scheduler.Wait(completion_tick);
+	m_scheduler.WaitPriorityOperations(completion_tick);
+	for (const auto id: read_back) {
+		const auto* owner = m_slot_images.try_get(id);
+		if (owner != nullptr && owner->registered) {
+			FreeImage(id);
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureEvictions);
+		}
 	}
 }
 
