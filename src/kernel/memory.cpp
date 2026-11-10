@@ -1055,12 +1055,39 @@ void PinGuestStack(uint64_t vaddr, uint64_t size) {
 }
 
 void RestoreHostProtection(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode old_mode) noexcept {
-	if (g_gpu_resources != nullptr) {
-		g_gpu_resources->RestoreHostProtection(vaddr, size, old_mode);
-		return;
+	const auto restore = [](uint64_t address, uint64_t bytes, Common::VirtualMemory::Mode mode) {
+		if (g_gpu_resources != nullptr) {
+			g_gpu_resources->RestoreHostProtection(address, bytes, mode);
+		} else if (g_guest_address_space != nullptr) {
+			(void)g_guest_address_space->ProtectTransient(address, bytes, mode);
+		}
+	};
+	// A page nobody watches gets the protection the guest asked for, not the one it had before the copy. That one may have been a page
+	// watcher's, and a watcher that went away while the copy ran (a write fault on another thread drops it) left its page read-only for
+	// nobody: the GPU's fault handler takes every fault in GPU memory for a watcher's and has the access retried, so the next write to
+	// that page faulted for ever (a game stopped at its start, its GPU thread writing one label again and again).
+	constexpr uint64_t                kPage = 0x1000;
+	const uint64_t                    begin = vaddr & ~(kPage - 1u);
+	const uint64_t                    end   = (vaddr + size + kPage - 1u) & ~(kPage - 1u);
+	std::vector<VirtualRanges::Range> ranges;
+	if (g_virtual_ranges != nullptr) {
+		g_virtual_ranges->QueryFragments(begin, end - begin, &ranges);
 	}
-	if (g_guest_address_space != nullptr) {
-		(void)g_guest_address_space->ProtectTransient(vaddr, size, old_mode);
+	uint64_t cursor = begin;
+	for (const auto& range: ranges) {
+		if (range.start > cursor) {
+			restore(cursor, range.start - cursor, old_mode); // (nothing the guest mapped: as it was)
+		}
+		auto mode = old_mode;
+		if (VirtualMemory::Mode guest = VirtualMemory::Mode::NoAccess;
+		    IsCommittedRangeType(range.type) && DecodeMemoryProtection(range.protection, &guest)) {
+			mode = guest;
+		}
+		restore(range.start, range.size, mode);
+		cursor = range.start + range.size;
+	}
+	if (cursor < end) {
+		restore(cursor, end - cursor, old_mode);
 	}
 }
 
