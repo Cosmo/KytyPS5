@@ -94,7 +94,8 @@ struct AppSettings {
 	// Only in the file: guest memory above this many MB is kept in a file, the coldest first (Config::GuestRamBudgetMb). 0: off. Not set (0xFFFFFFFF):
 	// on where the app's memory limit is small (the Series X), with the limit as the cap; off on a PC.
 	uint32_t guest_ram_budget_mb = 0xFFFFFFFFu;
-	// Debugging the pager, only in the file: 0 normal, 1 sweep only (nothing leaves memory), 2 take a window out and page it straight back in (Config::GuestRamPagerMode).
+	// Debugging the pager, only in the file: 0 normal, 1 sweep only (nothing leaves memory), 2 take a window out and page it straight back in, 3 a cap
+	// of 300 views, 4 the rules of before 2026-11-10 for what leaves, to compare (Config::GuestRamPagerMode).
 	uint32_t guest_ram_pager_mode = 0;
 	// Debugging the pager, only in the file: a commit of guest memory fails above this many MB of guest memory (Config::GuestCommitLimitMb). 0: none.
 	uint32_t guest_commit_limit_mb = 0;
