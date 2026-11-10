@@ -562,9 +562,10 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 		// past the first 32: the first active lane then has to be looked for in all of them (a waterfall loop that reads an inactive
 		// lane never ends and hangs the GPU).
 		D3D12_FEATURE_DATA_D3D12_OPTIONS1 options {};
+		// (With the Xbox's limits on another GPU the shaders are the Xbox's too, although the waves here stay narrow.)
 		features.wave32_in_wider_waves =
 		    FAILED(graphics.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options, sizeof(options))) ||
-		    options.WaveLaneCountMax > 32;
+		    options.WaveLaneCountMax > 32 || Config::XboxGpuLimitsEnabled();
 	}
 	features.lane_shuffle_loop   = !m_compiler.SupportsDivergentLaneIndex(); // (below shader model 6.7 a lane shuffle needs the same lane number in every lane)
 	features.indirect_mesh_parameters_in_push_data = true; // (no task shaders: RenderExecutor::ExecutePreparedDraw)
