@@ -317,7 +317,7 @@ index a40ddce..b1cf335 100644
     };
  
 diff --git a/src/microsoft/compiler/nir_to_dxil.c b/src/microsoft/compiler/nir_to_dxil.c
-index 09a3203..69e0a2f 100644
+index 09a3203..9568020 100644
 --- a/src/microsoft/compiler/nir_to_dxil.c
 +++ b/src/microsoft/compiler/nir_to_dxil.c
 @@ -229,6 +229,8 @@ get_shader_kind_str(enum dxil_shader_kind kind)
@@ -649,27 +649,29 @@ index 09a3203..69e0a2f 100644
  
        nir_opt_peephole_select_options peephole_select_options = {
 -         .limit = 8,
-+         .limit = 64,
++         .limit = opts->mesh_as_compute ? 8 : 64,
           .indirect_load_ok = true,
           .expensive_alu_ok = true,
        };
-@@ -6350,6 +6513,15 @@ optimize_nir(struct nir_shader *s, const struct nir_to_dxil_options *opts)
+@@ -6350,6 +6513,17 @@ optimize_nir(struct nir_shader *s, const struct nir_to_dxil_options *opts)
        NIR_PASS(progress, s, nir_opt_algebraic_late);
     } while (progress);
  
-+   /* Move code next to its uses. Shorter live ranges make the driver's own
-+    * compile of large shaders much faster. */
-+   const nir_move_options move_options =
-+      nir_move_const_undef | nir_move_load_ubo | nir_move_load_input |
-+      nir_move_comparisons | nir_move_copies | nir_move_load_ssbo | nir_move_alu;
-+   NIR_PASS(_, s, nir_opt_sink, move_options);
-+   NIR_PASS(_, s, nir_opt_move, move_options);
-+   NIR_PASS(_, s, nir_opt_gcm, true);
++   /* Short live ranges speed up driver compilation, but this optimization
++    * bundle can corrupt geometry exported by mesh programs lowered to compute. */
++   if (!opts->mesh_as_compute) {
++      const nir_move_options move_options =
++         nir_move_const_undef | nir_move_load_ubo | nir_move_load_input |
++         nir_move_comparisons | nir_move_copies | nir_move_load_ssbo | nir_move_alu;
++      NIR_PASS(_, s, nir_opt_sink, move_options);
++      NIR_PASS(_, s, nir_opt_move, move_options);
++      NIR_PASS(_, s, nir_opt_gcm, true);
++   }
 +
     NIR_PASS(_, s, nir_lower_undef_to_zero);
  }
  
-@@ -6412,6 +6584,20 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
+@@ -6412,6 +6586,20 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
        psv0->ds.output_position_present = ctx->mod.info.has_out_position;
        psv1->sig_patch_const_or_prim_vectors = ctx->mod.num_psv_patch_consts;
        break;
@@ -690,7 +692,7 @@ index 09a3203..69e0a2f 100644
     default:
        assert(0 && "Shader type not (yet) supported");
     }
-@@ -6427,6 +6613,69 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
+@@ -6427,6 +6615,69 @@ void dxil_fill_validation_state(struct ntd_context *ctx,
     }
  }
  
@@ -760,7 +762,7 @@ index 09a3203..69e0a2f 100644
  static nir_variable *
  add_sysvalue(struct ntd_context *ctx,
                uint8_t value, char *name,
-@@ -6540,6 +6789,14 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
+@@ -6540,6 +6791,14 @@ type_size_vec4(const struct glsl_type *type, bool bindless)
     return glsl_count_attribute_slots(type, false);
  }
  
@@ -775,7 +777,7 @@ index 09a3203..69e0a2f 100644
  static const unsigned dxil_validator_min_capable_version = DXIL_VALIDATOR_1_4;
  static const unsigned dxil_validator_max_capable_version = DXIL_VALIDATOR_1_8;
  static const unsigned dxil_min_shader_model = SHADER_MODEL_6_0;
-@@ -6612,7 +6869,7 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6612,7 +6871,7 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     ctx->mod.major_validator = validator_version >> 16;
     ctx->mod.minor_validator = validator_version & 0xffff;
  
@@ -784,7 +786,7 @@ index 09a3203..69e0a2f 100644
        uint64_t in_mask =
           s->info.stage == MESA_SHADER_VERTEX ?
           0 : (VARYING_BIT_PRIMITIVE_ID | VARYING_BIT_VIEWPORT | VARYING_BIT_LAYER);
-@@ -6632,7 +6889,16 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6632,7 +6891,16 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     s->info.disable_output_offset_src_constant_folding = true;
     NIR_PASS(_, s, dxil_nir_ensure_position_writes);
     NIR_PASS(_, s, dxil_nir_lower_system_values);
@@ -802,7 +804,7 @@ index 09a3203..69e0a2f 100644
  
     /* Do a round of optimization to try to vectorize loads/stores. Otherwise the addresses used for loads
      * might be too opaque for the pass to see that they're next to each other. */
-@@ -6746,7 +7012,8 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
+@@ -6746,7 +7014,8 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
     }
  
     if ((ctx->mod.shader_kind == DXIL_HULL_SHADER ||
@@ -812,6 +814,18 @@ index 09a3203..69e0a2f 100644
         !dxil_container_add_io_signature(&container,
                                          DXIL_PSG1,
                                          ctx->mod.num_sig_patch_consts,
+diff --git a/src/microsoft/compiler/nir_to_dxil.h b/src/microsoft/compiler/nir_to_dxil.h
+index 9890115..51d95c0 100644
+--- a/src/microsoft/compiler/nir_to_dxil.h
++++ b/src/microsoft/compiler/nir_to_dxil.h
+@@ -78,6 +78,7 @@ enum dxil_environment {
+ struct nir_to_dxil_options {
+    bool interpolate_at_vertex;
+    bool lower_int16;
++   bool mesh_as_compute;
+    bool disable_math_refactoring;
+    bool last_ubo_is_not_arrayed;
+    bool advanced_texture_ops;
 diff --git a/src/microsoft/spirv_to_dxil/dxil_spirv_nir.c b/src/microsoft/spirv_to_dxil/dxil_spirv_nir.c
 index 4763c34..49288c8 100644
 --- a/src/microsoft/spirv_to_dxil/dxil_spirv_nir.c
@@ -1001,10 +1015,10 @@ index cf3edcc..d17478a 100644
           continue;
        struct blob dxil_blob;
 diff --git a/src/microsoft/spirv_to_dxil/spirv_to_dxil.c b/src/microsoft/spirv_to_dxil/spirv_to_dxil.c
-index b9205aa..aa1ac9c 100644
+index b9205aa..8f2ef78 100644
 --- a/src/microsoft/spirv_to_dxil/spirv_to_dxil.c
 +++ b/src/microsoft/spirv_to_dxil/spirv_to_dxil.c
-@@ -41,65 +41,63 @@ static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_FRAGMENT == MESA_SHADER_FRAGM
+@@ -41,65 +41,65 @@ static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_FRAGMENT == MESA_SHADER_FRAGM
  static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_COMPUTE == MESA_SHADER_COMPUTE, "must match");
  static_assert((mesa_shader_stage)DXIL_SPIRV_SHADER_KERNEL == MESA_SHADER_KERNEL, "must match");
  
@@ -1093,6 +1107,7 @@ index b9205aa..aa1ac9c 100644
 +
 +static bool
 +nir_stage_to_dxil(nir_shader *nir, const struct dxil_spirv_runtime_conf *conf,
++                  bool mesh_as_compute,
 +                  enum dxil_validator_version validator_version_max,
 +                  const struct dxil_spirv_logger *logger,
 +                  struct dxil_spirv_object *out_dxil)
@@ -1100,6 +1115,7 @@ index b9205aa..aa1ac9c 100644
 +   struct nir_to_dxil_options opts = {
 +      .environment = DXIL_ENVIRONMENT_VULKAN,
 +      .lower_int16 = conf->lower_16bit_ops,
++      .mesh_as_compute = mesh_as_compute,
 +      .shader_model_max = conf->shader_model_max,
 +      .validator_version_max = validator_version_max,
 +   };
@@ -1107,7 +1123,7 @@ index b9205aa..aa1ac9c 100644
     struct dxil_logger logger_inner = {.priv = logger->priv,
                                        .log = logger->log};
  
-@@ -107,17 +105,108 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
+@@ -107,17 +107,109 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
     if (!nir_to_dxil(nir, &opts, &logger_inner, &dxil_blob)) {
        if (dxil_blob.allocated)
           blob_finish(&dxil_blob);
@@ -1136,6 +1152,7 @@ index b9205aa..aa1ac9c 100644
 +   if (stage == DXIL_SPIRV_SHADER_NONE || stage == DXIL_SPIRV_SHADER_KERNEL)
 +      return false;
 +
++   const bool mesh_as_compute = stage == DXIL_SPIRV_SHADER_MESH_AS_COMPUTE;
 +   glsl_type_singleton_init_or_ref();
 +
 +   const struct dxil_spirv_stage in = {
@@ -1143,14 +1160,14 @@ index b9205aa..aa1ac9c 100644
 +      .word_count = word_count,
 +      .specializations = specializations,
 +      .num_specializations = num_specializations,
-+      .stage = stage,
++      .stage = mesh_as_compute ? DXIL_SPIRV_SHADER_COMPUTE : stage,
 +      .entry_point_name = entry_point_name,
 +      .conf = conf,
 +   };
 +   nir_shader_compiler_options nir_options;
 +   nir_shader *nir = spirv_stage_to_nir(&in, &nir_options, dgb_opts, &out_dxil->metadata);
 +   const bool success =
-+      nir && nir_stage_to_dxil(nir, conf, validator_version_max, logger, out_dxil);
++      nir && nir_stage_to_dxil(nir, conf, mesh_as_compute, validator_version_max, logger, out_dxil);
 +
 +   ralloc_free(nir);
     glsl_type_singleton_decref();
@@ -1207,7 +1224,7 @@ index b9205aa..aa1ac9c 100644
 +   }
 +
 +   for (unsigned i = 0; success && i < stage_count; i++)
-+      success = nir_stage_to_dxil(nir[i], stages[i].conf, validator_version_max, logger, &out_dxil[i]);
++      success = nir_stage_to_dxil(nir[i], stages[i].conf, false, validator_version_max, logger, &out_dxil[i]);
 +
 +   for (unsigned i = 0; i < stage_count; i++) {
 +      ralloc_free(nir[i]);
@@ -1231,7 +1248,7 @@ index 62851f2..23f6dda 100644
      spirv_to_dxil_free
      spirv_to_dxil_get_version
 diff --git a/src/microsoft/spirv_to_dxil/spirv_to_dxil.h b/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
-index 8f4684c..9c69892 100644
+index 8f4684c..c00315b 100644
 --- a/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
 +++ b/src/microsoft/spirv_to_dxil/spirv_to_dxil.h
 @@ -24,6 +24,9 @@
@@ -1244,16 +1261,19 @@ index 8f4684c..9c69892 100644
  #include "dxil_versions.h"
  
  #include <stdbool.h>
-@@ -46,6 +49,8 @@ typedef enum {
+@@ -46,7 +49,11 @@ typedef enum {
     DXIL_SPIRV_SHADER_GEOMETRY = 3,
     DXIL_SPIRV_SHADER_FRAGMENT = 4,
     DXIL_SPIRV_SHADER_COMPUTE = 5,
 +   DXIL_SPIRV_SHADER_TASK = 6,
 +   DXIL_SPIRV_SHADER_MESH = 7,
     DXIL_SPIRV_SHADER_KERNEL = 14,
++   // A compute module generated from a guest mesh program.
++   DXIL_SPIRV_SHADER_MESH_AS_COMPUTE = 100,
  } dxil_spirv_shader_stage;
  
-@@ -199,6 +204,17 @@ struct dxil_spirv_runtime_conf {
+ // Copy of nir_spirv_const_value
+@@ -199,6 +206,17 @@ struct dxil_spirv_runtime_conf {
  
     // Affects which features can be used by the shader
     enum dxil_shader_model shader_model_max;
@@ -1271,7 +1291,7 @@ index 8f4684c..9c69892 100644
  };
  
  struct dxil_spirv_debug_options {
-@@ -235,6 +251,30 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
+@@ -235,6 +253,30 @@ spirv_to_dxil(const uint32_t *words, size_t word_count,
                const struct dxil_spirv_logger *logger,
                struct dxil_spirv_object *out_dxil);
  
