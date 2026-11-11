@@ -197,6 +197,12 @@ DXGI_FORMAT VertexFormat(vk::Format format) {
 		case vk::Format::eR32G32B32Sfloat: return DXGI_FORMAT_R32G32B32_FLOAT;
 		// D3D12 has no scaled formats and no 10:10:10:2 SNORM vertex format: they come in as integers, which the vertex shader
 		// converts (HostShaderFeatures::vertex_formats_as_integers).
+		case vk::Format::eR8Uscaled: return DXGI_FORMAT_R8_UINT;
+		case vk::Format::eR8Sscaled: return DXGI_FORMAT_R8_SINT;
+		case vk::Format::eR8G8Uscaled: return DXGI_FORMAT_R8G8_UINT;
+		case vk::Format::eR8G8Sscaled: return DXGI_FORMAT_R8G8_SINT;
+		case vk::Format::eR16Uscaled: return DXGI_FORMAT_R16_UINT;
+		case vk::Format::eR16Sscaled: return DXGI_FORMAT_R16_SINT;
 		case vk::Format::eR16G16Uscaled: return DXGI_FORMAT_R16G16_UINT;
 		case vk::Format::eR16G16Sscaled: return DXGI_FORMAT_R16G16_SINT;
 		case vk::Format::eR8G8B8A8Uscaled: return DXGI_FORMAT_R8G8B8A8_UINT;
