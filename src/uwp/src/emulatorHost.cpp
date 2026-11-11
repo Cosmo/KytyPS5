@@ -146,6 +146,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.vr_enabled                = settings.virtual_vr_headset;
 		config.occlusion_queries_enabled = settings.occlusion_queries;
 		config.relaxed_shader_float      = settings.relaxed_shader_float;
+		config.flush_draws               = settings.flush_draws;
 		config.vulkan_validation_enabled = settings.debug_layer; // the D3D12 debug layer
 		config.printf_direction          = settings.game_output ? Config::LogDirection::Console : Config::LogDirection::Silent;
 		// The fonts that stand in for the console's system fonts come with the package (uwp.cmake).

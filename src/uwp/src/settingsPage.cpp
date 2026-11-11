@@ -952,6 +952,39 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    },
 	    {L"Shaders use the GPU's own float operations.", L"Can be faster when the GPU is the limit, but some effects can look wrong.",
 	     L"Games compile their shaders again after a change."});
+	AddAction(
+	    testing, explanation, L"Draws per GPU submission", L"",
+	    [state, save]() -> winrt::fire_and_forget {
+		    const auto settings_state = state;
+		    const auto save_settings = save;
+		    xaml::Controls::TextBox draws;
+		    draws.Header(winrt::box_value(L"Number of draws (0 = off)"));
+		    draws.MaxLength(5);
+		    draws.Text(std::to_wstring(settings_state->settings.flush_draws));
+		    xaml::Input::InputScope scope;
+		    xaml::Input::InputScopeName number;
+		    number.NameValue(xaml::Input::InputScopeNameValue::Number);
+		    scope.Names().Append(number);
+		    draws.InputScope(scope);
+		    draws.BeforeTextChanging([](auto const&, xaml::Controls::TextBoxBeforeTextChangingEventArgs const& args) {
+			    args.Cancel(!std::ranges::all_of(args.NewText(), [](wchar_t ch) { return ch >= L'0' && ch <= L'9'; }));
+		    });
+		    xaml::Controls::ContentDialog dialog;
+		    dialog.Title(winrt::box_value(L"Draws per GPU submission"));
+		    dialog.Content(draws);
+		    dialog.PrimaryButtonText(L"Apply");
+		    dialog.CloseButtonText(L"Cancel");
+		    if (co_await dialog.ShowAsync() == xaml::Controls::ContentDialogResult::Primary) {
+			    uint32_t count = 0;
+			    for (const wchar_t digit: draws.Text()) {
+				    count = count * 10 + static_cast<uint32_t>(digit - L'0');
+			    }
+			    settings_state->settings.flush_draws = count;
+			    save_settings();
+		    }
+	    },
+	    {L"Submits recorded work after this many draws so the GPU can start before a long command buffer ends.",
+	     L"Extra submissions cost CPU time. Use 0 for normal batching. Applies when a game starts."});
 	AddSwitch(
 	    testing, explanation, L"Keep compiled shaders across app builds", settings.shader_cache_any_build,
 	    [state, save](bool on) {
