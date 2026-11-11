@@ -1552,7 +1552,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 PipelineCache::Pipeline& PipelineCache::GetMeshComputePipeline(const ShaderVertexInputInfo& vertex_info,
                                                                const CompiledProgram&       program) {
 	// (Translate locks the cache itself.)
-	const auto* shader_ptr = Translate(program, ShaderType::Compute);
+	const auto* shader_ptr = Translate(program, ShaderType::Mesh);
 	static const Shader skipped;
 	const auto&         shader = shader_ptr != nullptr ? *shader_ptr : skipped;
 	Common::LockGuard   lock(m_mutex);
