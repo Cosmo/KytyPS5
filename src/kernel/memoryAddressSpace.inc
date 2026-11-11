@@ -159,6 +159,9 @@ public:
 	}
 
 	~GuestBackingStore() {
+		for (const auto& bucket: m_pages) {
+			delete[] bucket.load(std::memory_order_relaxed);
+		}
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		for (const auto& [_, entry]: m_maps) {
 			UnmapViewPreservePlaceholder(reinterpret_cast<void*>(entry.vaddr), entry.size);
@@ -215,41 +218,39 @@ public:
 		    [](uint64_t, uint64_t) {});
 	}
 
-	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
-		if (data == nullptr || size == 0 || UINT64_MAX - vaddr < size) {
+	// Needs no lock: page entries are atomic and buckets live as long as the store.
+	[[nodiscard]] bool IsBacked(uint64_t vaddr, uint64_t size) const {
+		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
+		for (auto page = vaddr >> PageBits; page <= (vaddr + size - 1u) >> PageBits; ++page) {
+			if (LoadPage(page) == 0) {
+				return false;
+			}
+		}
+		return true;
+	}
 
-		std::shared_lock lock(m_mutex);
+	// Needs no lock either, as the alias stays mapped. A read racing an unmap copies the backing's
+	// current bytes, or zeros for a page unmapped between the check and the copy.
+	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) const {
+		if (data == nullptr || !IsBacked(vaddr, size)) {
+			return false;
+		}
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 		if (g_test_backing_read != nullptr) {
 			g_test_backing_read(vaddr, size);
 		}
 #endif
-		const auto end   = vaddr + size;
-		auto       first = m_maps.upper_bound(vaddr);
-		if (first == m_maps.begin()) {
-			return false;
-		}
-		--first;
-		auto current = vaddr;
-		for (auto mapping = first; current < end; ++mapping) {
-			if (mapping == m_maps.end() || current < mapping->second.vaddr ||
-			    current >= mapping->second.vaddr + mapping->second.size) {
-				return false;
-			}
-			current = std::min(end, mapping->second.vaddr + mapping->second.size);
-		}
-
 		auto* destination = static_cast<uint8_t*>(data);
-		current = vaddr;
-		for (auto mapping = first; current < end; ++mapping) {
-			const auto& entry  = mapping->second;
-			const auto  bytes  = std::min(end, entry.vaddr + entry.size) - current;
-			const auto  offset = entry.backing_offset + current - entry.vaddr;
-			std::memcpy(destination + (current - vaddr), m_backing_base + offset, bytes);
-			current += bytes;
-		}
+		ForEachRun(
+		    vaddr, size,
+		    [&](uint64_t offset, uint64_t start, uint64_t bytes) {
+			    std::memcpy(destination + (start - vaddr), m_backing_base + offset, bytes);
+		    },
+		    [&](uint64_t start, uint64_t bytes) {
+			    std::memset(destination + (start - vaddr), 0, bytes);
+		    });
 		return true;
 	}
 
@@ -283,6 +284,7 @@ public:
 		RemoveMappingsUnlocked(vaddr, size);
 #endif
 		m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode});
+		StorePages(vaddr, size, backing_offset);
 		return true;
 	}
 
@@ -319,6 +321,7 @@ public:
 
 		std::lock_guard lock(m_mutex);
 		RemoveMappingsUnlocked(vaddr, size);
+		ClearPages(vaddr, size);
 #endif
 		return true;
 	}
@@ -329,6 +332,7 @@ public:
 		{
 			std::lock_guard lock(m_mutex);
 			old = m_maps.extract(std::prev(m_maps.upper_bound(vaddr))).mapped();
+			ClearPages(vaddr, size);
 		}
 		const uint64_t left_size  = vaddr - old.vaddr;
 		const uint64_t right_addr = vaddr + size;
@@ -353,6 +357,69 @@ public:
 #endif
 
 private:
+	static constexpr uint64_t PageBits    = 14;
+	static constexpr uint64_t PageMask    = (uint64_t {1} << PageBits) - 1u;
+	static constexpr uint64_t BucketPages = uint64_t {1} << 16u;
+	static constexpr uint64_t BucketCount =
+	    ((kExtendedMemoryBase + kExtendedMemorySize) >> PageBits) / BucketPages;
+
+	// Zero for an unbacked page, otherwise the backing page index plus one.
+	[[nodiscard]] uint32_t LoadPage(uint64_t page) const {
+		if (page / BucketPages >= BucketCount) {
+			return 0;
+		}
+		const auto* entries = m_pages[page / BucketPages].load(std::memory_order_acquire);
+		return entries != nullptr ? entries[page % BucketPages].load(std::memory_order_relaxed) : 0;
+	}
+
+	// Walks the span in runs of contiguous backing, as (backing offset, start, bytes), and runs of
+	// unbacked pages, as (start, bytes).
+	template <typename Region, typename Gap>
+	void ForEachRun(uint64_t vaddr, uint64_t size, Region&& region, Gap&& gap) const {
+		const auto end = vaddr + size;
+		for (auto start = vaddr; start < end;) {
+			const auto     entry    = LoadPage(start >> PageBits);
+			const uint32_t step     = entry != 0 ? 1 : 0;
+			auto           expected = entry + step;
+			auto           stop     = (start | PageMask) + 1u;
+			while (stop < end && LoadPage(stop >> PageBits) == expected) {
+				stop += PageMask + 1u;
+				expected += step;
+			}
+			stop = std::min(stop, end);
+			if (entry != 0) {
+				region((uint64_t {entry - 1u} << PageBits) + (start & PageMask), start,
+				       stop - start);
+			} else {
+				gap(start, stop - start);
+			}
+			start = stop;
+		}
+	}
+
+	void StorePages(uint64_t vaddr, uint64_t size, uint64_t backing_offset) {
+		const auto end = vaddr + size;
+		EXIT_IF(((vaddr | size | backing_offset) & PageMask) != 0 ||
+		        (end >> PageBits) > BucketCount * BucketPages || backing_offset + size > m_size);
+		auto entry = static_cast<uint32_t>(backing_offset >> PageBits) + 1u;
+		for (auto page = vaddr >> PageBits; page < end >> PageBits; ++page, ++entry) {
+			auto& bucket  = m_pages[page / BucketPages];
+			auto* entries = bucket.load(std::memory_order_relaxed);
+			if (entries == nullptr) {
+				entries = new std::atomic<uint32_t>[BucketPages] {};
+				bucket.store(entries, std::memory_order_release);
+			}
+			entries[page % BucketPages].store(entry, std::memory_order_relaxed);
+		}
+	}
+
+	void ClearPages(uint64_t vaddr, uint64_t size) {
+		for (auto page = vaddr >> PageBits; page < (vaddr + size) >> PageBits; ++page) {
+			m_pages[page / BucketPages].load(std::memory_order_relaxed)[page % BucketPages].store(
+			    0, std::memory_order_relaxed);
+		}
+	}
+
 	struct MapEntry {
 		uint64_t            vaddr          = 0;
 		uint64_t            size           = 0;
@@ -510,6 +577,7 @@ private:
 	uint64_t                     m_size         = 0;
 	std::shared_mutex            m_mutex;
 	std::map<uint64_t, MapEntry> m_maps;
+	std::array<std::atomic<std::atomic<uint32_t>*>, BucketCount> m_pages {};
 };
 
 // The pager's store, for the host ops of the lazy regions (there is one address space per process).
@@ -683,6 +751,10 @@ public:
 		return true;
 	}
 
+	[[nodiscard]] bool IsBacked(uint64_t vaddr, uint64_t size) const {
+		return m_backing != nullptr && m_backing->IsBacked(vaddr, size);
+	}
+
 	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 		if (m_lazy_enabled) {
 			return LazyCopyOut(vaddr, data, size, false);
@@ -692,6 +764,9 @@ public:
 
 	template <bool copy_private>
 	bool CopySparseMemory(uint64_t vaddr, void* data, uint64_t size) {
+		if (m_backing != nullptr && m_backing->TryReadBacking(vaddr, data, size)) {
+			return true;
+		}
 		if (data == nullptr || !Owns(vaddr, size)) {
 			return false;
 		}
