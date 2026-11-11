@@ -3,6 +3,7 @@
 #include "common/pipelinePrewarm.h"
 #include "fileAccess.h"
 #include "gameImages.h"
+#include "gameSource.h"
 #include "input.h"
 #include "settings.h"
 #include "titleMusic.h"
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <vector>
@@ -209,7 +211,7 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
   <!-- A game's options (Menu button, right click), in the system's look: its details, play, cheats, hide. -->
   <Grid x:Name="Options" Visibility="Collapsed">
     <Rectangle Fill="{ThemeResource SystemControlPageBackgroundMediumAltMediumBrush}" />
-    <Grid Width="360" HorizontalAlignment="Right" Padding="24,32,24,32"
+    <Grid x:Name="OptionsPanel" Width="360" HorizontalAlignment="Right" Padding="24,32,24,32"
           Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />
@@ -249,6 +251,25 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
       </ListView>
       <Border x:Name="OptionsHints" Grid.Row="4" Style="{StaticResource HintBarStyle}" />
     </Grid>
+    <Grid x:Name="Details" Visibility="Collapsed" Padding="48,40,48,32"
+          Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="*" />
+        <RowDefinition Height="Auto" />
+      </Grid.RowDefinitions>
+      <StackPanel Spacing="4" Margin="0,0,0,16">
+        <TextBlock Text="Details" Style="{StaticResource PageTitleTextBlockStyle}" />
+        <TextBlock x:Name="DetailsGame" Style="{StaticResource BodyTextBlockStyle}"
+                   Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" TextWrapping="Wrap" />
+      </StackPanel>
+      <ScrollViewer x:Name="DetailsScroll" Grid.Row="1" IsTabStop="True" UseSystemFocusVisuals="False"
+                    VerticalScrollMode="Enabled" VerticalScrollBarVisibility="Auto"
+                    HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel x:Name="DetailsRows" Spacing="8" Padding="12,8,20,16" />
+      </ScrollViewer>
+      <Border x:Name="DetailsHints" Grid.Row="2" Margin="0,16,0,0" Style="{StaticResource HintBarStyle}" />
+    </Grid>
   </Grid>
 </Grid>)xaml";
 
@@ -269,19 +290,211 @@ struct Launcher {
 	bool                                     headset_mic_option = false; // the settings page's, when the page was made
 	bool                                     home_screen_music  = true;  // the settings page's Home screen music, when the page was made
 	// The options of the game at options_index, while open.
-	xaml::FrameworkElement    options {nullptr};
-	xaml::Controls::ListView  options_items {nullptr};
-	size_t                    options_index = 0;
+	xaml::FrameworkElement       options {nullptr};
+	xaml::FrameworkElement       options_panel {nullptr};
+	xaml::Controls::ListView     options_items {nullptr};
+	xaml::FrameworkElement       details {nullptr};
+	xaml::Controls::ScrollViewer details_scroll {nullptr};
+	xaml::Controls::StackPanel   details_rows {nullptr};
+	xaml::Controls::TextBlock    details_game {nullptr};
+	size_t                       options_index = 0;
+	uint32_t                     details_item_index = 0;
+	uint32_t                     details_request = 0;
 };
 
 constexpr wchar_t OPTION_PLAY[]       = L"Play";
 constexpr wchar_t OPTION_PLAY_BUILD[] = L"Play and build known pipelines";
 constexpr wchar_t OPTION_BUILD_PLAY[] = L"Build known pipelines, then play";
+constexpr wchar_t OPTION_DETAILS[]    = L"Details";
 constexpr wchar_t OPTION_CHEATS[]     = L"Cheats";
 constexpr wchar_t OPTION_HIDE[]       = L"Hide game";
 
 bool OptionsOpen(const Launcher& launcher) {
 	return launcher.options.Visibility() == xaml::Visibility::Visible;
+}
+
+struct DetailRow {
+	std::wstring label;
+	std::wstring value;
+};
+
+using GameManifest = nlohmann::ordered_json;
+
+std::wstring FirmwareVersion(std::wstring encoded) {
+	// Same decimal digits as the desktop launcher's firmware column.
+	if (encoded.size() != 18 || (encoded[1] != L'x' && encoded[1] != L'X') || encoded[0] != L'0' ||
+	    encoded.find_first_not_of(L"0123456789", 2) < 8 ||
+	    encoded.find_first_not_of(L"0123456789abcdefABCDEF", 8) != std::wstring::npos) {
+		return encoded;
+	}
+	const auto major = encoded.substr(encoded[2] == L'0' ? 3 : 2, encoded[2] == L'0' ? 1 : 2);
+	auto version = major + L"." + encoded.substr(4, 2);
+	if (encoded.compare(6, 2, L"00") != 0) {
+		version += L"." + encoded.substr(6, 2);
+	}
+	return version;
+}
+
+// Keep each value on its own row, including members of nested objects and arrays.
+void AppendMetadataRows(std::vector<DetailRow>& rows, std::wstring label, const GameManifest& value, size_t depth = 0) {
+	if (value.is_structured()) {
+		if (value.empty() || depth == 32) {
+			rows.push_back({std::move(label), value.empty() ? L"Empty" : L"Additional nested fields"});
+			return;
+		}
+		for (auto item = value.begin(); item != value.end(); ++item) {
+			const auto key = value.is_object() ? std::wstring(winrt::to_hstring(item.key()).c_str())
+			                                   : std::to_wstring(item - value.begin() + 1);
+			AppendMetadataRows(rows, label + L" / " + key, *item, depth + 1);
+		}
+		return;
+	}
+	std::wstring text;
+	if (value.is_string()) {
+		text = winrt::to_hstring(value.get_ref<const std::string&>()).c_str();
+		if (text.empty()) {
+			text = L"Empty";
+		}
+	} else if (value.is_boolean()) {
+		text = value.get<bool>() ? L"Yes" : L"No";
+	} else if (value.is_null()) {
+		text = L"None";
+	} else {
+		text = winrt::to_hstring(value.dump()).c_str();
+	}
+	rows.push_back({std::move(label), std::move(text)});
+}
+
+std::vector<DetailRow> ReadDetails(const GameEntry& game) {
+	std::vector<DetailRow> rows;
+	const auto text = ReadGameText(game.folder / L"sce_sys" / L"param.json");
+	const auto manifest = text ? GameManifest::parse(*text, nullptr, false) : GameManifest {};
+	const auto field = [&](const char* key) -> std::wstring {
+		const auto value = manifest.find(key);
+		return value != manifest.end() && value->is_string() ? winrt::to_hstring(value->get_ref<const std::string&>()).c_str() : L"";
+	};
+
+	if (manifest.is_object()) {
+		const auto flags = [&](const char* key) -> std::optional<uint32_t> {
+			const auto value = manifest.find(key);
+			if (value == manifest.end() || !value->is_number_integer()) {
+				return std::nullopt;
+			}
+			return value->get<uint32_t>();
+		};
+		// The PS5 Pro bit is the desktop launcher's (attribute3 bit 22). Other attribute bits are not shown as features: their meanings
+		// are not confirmed; their values are among the metadata below.
+		const auto attribute3 = flags("attribute3");
+		rows.push_back({L"Graphics", {}});
+		rows.push_back({L"PS5 Pro mode", !attribute3 ? L"Unknown" : (*attribute3 & (1u << 22)) != 0 ? L"Supported" : L"Not supported"});
+		if (const auto psml = manifest.find("psml"); psml != manifest.end() && psml->is_object()) {
+			const auto version = psml->find("mfsrVersion");
+			if (version != psml->end() && version->is_string() && !version->get_ref<const std::string&>().empty()) {
+				rows.push_back({L"PSML version", winrt::to_hstring(version->get_ref<const std::string&>()).c_str()});
+			}
+		}
+	}
+
+	rows.push_back({L"Game information", {}});
+	const auto title_id = field("titleId");
+	auto version = field("appVersion");
+	if (version.empty()) {
+		version = field("contentVersion");
+	}
+	const auto saved = [](const std::string& value) -> std::wstring {
+		return value.empty() ? L"Unknown" : winrt::to_hstring(value).c_str();
+	};
+	rows.push_back({L"Title ID", title_id.empty() ? saved(game.title_id) : title_id});
+	rows.push_back({L"Version", version.empty() ? saved(game.version) : version});
+	if (const auto firmware = field("requiredSystemSoftwareVersion"); !firmware.empty()) {
+		rows.push_back({L"Required PS5 system software", FirmwareVersion(firmware)});
+	}
+	if (auto content = field("contentId"); !content.empty()) {
+		rows.push_back({L"Content ID", std::move(content)});
+	}
+	rows.push_back({L"Folder or archive", std::filesystem::path(game.folder).make_preferred().wstring()});
+	if (!manifest.is_object()) {
+		rows.push_back({L"Game metadata", text ? L"sce_sys/param.json is invalid." : L"Could not read sce_sys/param.json."});
+		return rows;
+	}
+
+	rows.push_back({L"Additional metadata", {}});
+	for (const auto& [key, value]: manifest.items()) {
+		if (key == "titleId" || key == "appVersion" || key == "contentId" ||
+		    (key == "contentVersion" && value.is_string() && version == winrt::to_hstring(value.get_ref<const std::string&>()).c_str())) {
+			continue;
+		}
+		AppendMetadataRows(rows, winrt::to_hstring(key).c_str(), value);
+	}
+	return rows;
+}
+
+void AddDetailRow(const xaml::Controls::StackPanel& rows, const DetailRow& detail) {
+	const auto resources = xaml::Application::Current().Resources();
+	const auto style = [&](const wchar_t* key) { return resources.Lookup(winrt::box_value(key)).as<xaml::Style>(); };
+	xaml::Controls::TextBlock label;
+	label.Text(detail.label);
+	label.TextWrapping(xaml::TextWrapping::Wrap);
+	if (detail.value.empty()) {
+		label.Style(style(L"SubtitleTextBlockStyle"));
+		label.Margin(xaml::ThicknessHelper::FromLengths(0, 10, 0, 2));
+		rows.Children().Append(label);
+		return;
+	}
+
+	label.Style(style(L"BodyTextBlockStyle"));
+	label.Foreground(resources.Lookup(winrt::box_value(L"SystemControlForegroundBaseMediumBrush")).as<xaml::Media::Brush>());
+	xaml::Controls::TextBlock value;
+	value.Text(detail.value);
+	value.TextWrapping(xaml::TextWrapping::Wrap);
+	value.Style(style(L"BodyTextBlockStyle"));
+
+	xaml::Controls::Grid row;
+	row.ColumnSpacing(16);
+	for (double width: {1.0, 2.0}) {
+		xaml::Controls::ColumnDefinition column;
+		column.Width(xaml::GridLengthHelper::FromValueAndType(width, xaml::GridUnitType::Star));
+		row.ColumnDefinitions().Append(column);
+	}
+	xaml::Controls::Grid::SetColumn(value, 1);
+	row.Children().Append(label);
+	row.Children().Append(value);
+	rows.Children().Append(row);
+}
+
+winrt::fire_and_forget LoadDetails(std::shared_ptr<Launcher> launcher, GameEntry game, uint32_t request) {
+	co_await winrt::resume_background();
+	const auto rows = ReadDetails(game);
+	co_await winrt::resume_foreground(launcher->dispatcher);
+	if (request != launcher->details_request) {
+		co_return;
+	}
+	launcher->details_rows.Children().Clear();
+	for (const auto& row: rows) {
+		AddDetailRow(launcher->details_rows, row);
+	}
+}
+
+void OpenDetails(const std::shared_ptr<Launcher>& launcher, const GameEntry& game) {
+	launcher->details_game.Text(winrt::to_hstring(game.name));
+	launcher->details_rows.Children().Clear();
+	AddDetailRow(launcher->details_rows, {L"Reading game metadata…", {}});
+	launcher->details.Visibility(xaml::Visibility::Visible);
+	launcher->options_panel.Visibility(xaml::Visibility::Collapsed);
+	launcher->details.UpdateLayout();
+	launcher->details_scroll.ChangeView(nullptr, 0.0, nullptr, true);
+	launcher->details_scroll.Focus(xaml::FocusState::Keyboard);
+	LoadDetails(launcher, game, ++launcher->details_request);
+}
+
+void CloseDetails(const std::shared_ptr<Launcher>& launcher) {
+	++launcher->details_request;
+	launcher->details.Visibility(xaml::Visibility::Collapsed);
+	launcher->options_panel.Visibility(xaml::Visibility::Visible);
+	launcher->options_panel.UpdateLayout();
+	if (auto item = launcher->options_items.ContainerFromIndex(launcher->details_item_index).try_as<xaml::Controls::Control>()) {
+		item.Focus(xaml::FocusState::Keyboard);
+	}
 }
 
 void CloseOptions(const std::shared_ptr<Launcher>& launcher) {
@@ -564,13 +777,21 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	launcher->backdrops[1] = find(L"BackdropB").as<xaml::Controls::Image>();
 	launcher->title        = find(L"Title").as<xaml::Controls::TextBlock>();
 	launcher->options      = find(L"Options").as<xaml::FrameworkElement>();
+	launcher->options_panel = find(L"OptionsPanel").as<xaml::FrameworkElement>();
 	launcher->options_items = find(L"OptionsItems").as<xaml::Controls::ListView>();
+	launcher->details       = find(L"Details").as<xaml::FrameworkElement>();
+	launcher->details_scroll = find(L"DetailsScroll").as<xaml::Controls::ScrollViewer>();
+	launcher->details_rows   = find(L"DetailsRows").as<xaml::Controls::StackPanel>();
+	launcher->details_game   = find(L"DetailsGame").as<xaml::Controls::TextBlock>();
 	SetHints(find(L"Hints").as<xaml::Controls::Border>(),
 	         {{XboxButton::A, L"Play"}, {XboxButton::Y, L"Scan again"}, {XboxButton::Menu, L"Options"}});
 	SetHints(find(L"OptionsHints").as<xaml::Controls::Border>(), {{XboxButton::A, L"Select"}, {XboxButton::B, L"Back"}});
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_PLAY));
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_PLAY_BUILD));
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_BUILD_PLAY));
+	SetHints(find(L"DetailsHints").as<xaml::Controls::Border>(), {{XboxButton::B, L"Back"}});
+	launcher->details_item_index = launcher->options_items.Items().Size();
+	launcher->options_items.Items().Append(winrt::box_value(OPTION_DETAILS));
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_CHEATS));
 	launcher->options_items.Items().Append(winrt::box_value(OPTION_HIDE));
 	launcher->options_items.ItemClick([launcher](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
@@ -586,6 +807,8 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 			// The game's code starts once the pipeline cache built them (Emulator::Run); the launch screen shows how far it is.
 			Common::PipelinePrewarm::RequestBeforeStart();
 			launcher->actions.play(game);
+		} else if (item == OPTION_DETAILS) {
+			OpenDetails(launcher, game);
 		} else if (item == OPTION_CHEATS) {
 			launcher->actions.open_cheats(game);
 		} else {
@@ -598,7 +821,11 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 		if (args.Key() == winrt::Windows::System::VirtualKey::GamepadB ||
 		    args.Key() == winrt::Windows::System::VirtualKey::Escape) {
 			args.Handled(true);
-			CloseOptions(launcher);
+			if (launcher->details.Visibility() == xaml::Visibility::Visible) {
+				CloseDetails(launcher);
+			} else {
+				CloseOptions(launcher);
+			}
 		}
 	});
 	launcher->covers       = find(L"Covers").as<xaml::Controls::StackPanel>();
