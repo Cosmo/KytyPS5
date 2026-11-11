@@ -20,6 +20,8 @@ class Allocation;
 
 namespace Libs::Graphics {
 
+struct BufferUpload;
+
 class Buffer;
 class CommandBuffer;
 class CommandScheduler;
@@ -67,6 +69,9 @@ public:
 	              uint64_t destination_offset, uint64_t size);
 	void UploadRegions(CommandBuffer& command, const Buffer& source,
 	                   std::span<const vk::BufferCopy> copies);
+	// Uploads staged regions into several buffers (BufferUpload: the copies up to `end` go to `buffer`).
+	static void UploadRegions(CommandBuffer& command, const Buffer& source, std::span<const BufferUpload> uploads,
+	                          std::span<const vk::BufferCopy> copies);
 	void DownloadRegions(CommandBuffer& command, const Buffer& destination,
 	                     std::span<const vk::BufferCopy> copies, uint64_t destination_offset,
 	                     uint64_t destination_size);
