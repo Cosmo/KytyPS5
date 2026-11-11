@@ -1981,12 +1981,9 @@ uint32_t EmitLoadDeviceAddressU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 		const auto address = Binary(
 		    state, spv::OpIAdd, TypeU64(state), PackU64(state, ctx.Arg(inst, 0), ctx.Arg(inst, 1)),
 		    Unary(state, spv::OpUConvert, TypeU64(state), ctx.Arg(inst, 2)));
-		const auto value = state.builder.AllocateId();
-		state.builder.AddFunction(
-		    spv::OpLoad, TypeU32(state), value,
-		    Unary(state, spv::OpConvertUToPtr, TypePhysicalU32Pointer(state), address),
-		    spv::MemoryAccessAlignedMask, 4u);
-		return value;
+		// Draw data carries a device address on Vulkan and a packed descriptor slot and byte
+		// offset on D3D12. The descriptor slot is the same for every lane of the draw.
+		return LoadGuestPointerDword(state, address, false, true);
 	});
 }
 

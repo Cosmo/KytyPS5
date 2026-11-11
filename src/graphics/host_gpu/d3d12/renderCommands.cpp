@@ -281,22 +281,23 @@ void SetDynamicState(const CommandBuffer& buffer, ID3D12GraphicsCommandList* lis
 }
 
 // Debugging (frame_dump_snapshots): the draw log gets the statistics of the first color target after a draw that writes a large floating-point one.
-void LogSnapshot(RenderContext& context, const DrawRenderState& state) {
-	if (!Config::FrameDumpSnapshots() || !FrameDump::LogActive() || m_targets.color_count == 0 || !m_targets.colors[0].image_id) {
+void LogSnapshot(RenderContext& context, const DrawTargets& targets) {
+	if (!Config::FrameDumpSnapshots() || !FrameDump::LogActive() || targets.color_count == 0 || !targets.colors[0].image_id) {
 		return;
 	}
-	const auto& desc = m_targets.colors[0].desc;
+	const auto& desc = targets.colors[0].desc;
 	if (desc.info.extent.width < 1920) {
 		return;
 	}
-	const auto stats = context.GetTextureCache().SnapshotStats(m_targets.colors[0].image_id);
+	const auto stats = context.GetTextureCache().SnapshotStats(targets.colors[0].image_id);
 	if (!stats.empty()) {
 		FrameDump::LogEvent(fmt::format("    after that draw, the average of 0x{:x} (every 4th texel): {}", desc.info.data.address, stats));
 	}
 }
 
 // Debugging (the frame dump's draw log): what a draw is made of, as text. The pipeline's name starts with its number ("pipeline 57: ...").
-std::string DescribeDraw(const GraphicContext& graphics, const CommandBuffer& buffer, const DrawCallInfo& draw, const DrawRenderState& state, vk::PrimitiveTopology topology,
+std::string DescribeDraw(const GraphicContext& graphics, const CommandBuffer& buffer, const DrawCallInfo& draw, const DrawRenderState& state,
+                         const DrawTargets& targets, vk::PrimitiveTopology topology,
                          bool primitive_restart_enable, bool mesh, bool emulated_mesh, const PipelineCache::Pipeline& pipeline, const PreparedBindings& vertex_bindings,
                          const PreparedBindings* pixel_bindings) {
 	std::string pipeline_name(pipeline.trace.name.begin(), pipeline.trace.name.end());
@@ -316,12 +317,12 @@ std::string DescribeDraw(const GraphicContext& graphics, const CommandBuffer& bu
 	for (uint32_t i = 0; i < state.VertexStages().size(); i++) {
 		vertex_ids[i] = state.vertex_info[i].stage.module->id;
 	}
-	const auto key = MakeGraphicsPipelineKey(graphics, std::span {m_targets.colors, m_targets.color_count}, m_targets.depth, std::span {state.vertex_info.data(), 1}, buffer,
+	const auto key = MakeGraphicsPipelineKey(graphics, std::span {targets.colors, targets.color_count}, targets.depth, std::span {state.vertex_info.data(), 1}, buffer,
 	                                         state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable, vertex_ids,
 	                                         state.ps_active ? state.ps_input_info.stage.module->id : 0);
 	const auto& params = key.static_params;
-	for (uint32_t i = 0; i < m_targets.color_count; i++) {
-		const auto& color = m_targets.colors[i];
+	for (uint32_t i = 0; i < targets.color_count; i++) {
+		const auto& color = targets.colors[i];
 		const auto  slot  = color.target_slot;
 		text += fmt::format("    color target {}: {} | write mask 0x{:x} blend {}", slot, DrawLog::Target(color.desc, color.guest_mip_level, color.guest_array_layer), params.color_mask[slot],
 		                    params.blend_enable[slot] ? "on" : "off");
@@ -331,8 +332,8 @@ std::string DescribeDraw(const GraphicContext& graphics, const CommandBuffer& bu
 		}
 		text += "\n";
 	}
-	if (m_targets.depth.image_id) {
-		const auto& depth = m_targets.depth;
+	if (targets.depth.image_id) {
+		const auto& depth = targets.depth;
 		text += fmt::format("    depth target: {} | test {} {} write {} stencil {}{}\n", DrawLog::Target(depth.desc, depth.desc.view_info.base_level, depth.desc.view_info.base_layer),
 		                    depth.depth_test_enable ? "on" : "off", vk::to_string(depth.depth_compare_op), depth.depth_write_enable ? "on" : "off", depth.stencil_test_enable ? "on" : "off",
 		                    depth.load_clear_aspects ? " | cleared by this draw" : "");
@@ -688,12 +689,15 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		}
 	}
 
+	// Register the aligned index span before preparing descriptors, since creating a cached
+	// buffer can merge buffers that the draw binds. The shader fetches whole dwords.
+	uint64_t mesh_index_begin = 0;
+	uint64_t mesh_index_end   = 0;
 	if (mesh && draw.indexed) {
-		// The mesh program reads the guest indices by address; registering them here has
-		// PrepareGraphicsBindings synchronize them.
-		(void)m_context.GetBufferCache().FindBuffer(
-		    index_source.address,
-		    static_cast<uint64_t>(draw.index_count) * index_source.guest_element_size);
+		const auto size = static_cast<uint64_t>(draw.index_count) * index_source.guest_element_size;
+		mesh_index_begin = index_source.address & ~uint64_t {3};
+		mesh_index_end   = (index_source.address + size + 3u) & ~uint64_t {3};
+		(void)m_context.GetBufferCache().FindBuffer(mesh_index_begin, mesh_index_end - mesh_index_begin);
 	}
 	auto&                            bindings = m_graphics_bindings;
 	std::array<PreparedBindings*, 2> descriptor_stages {};
@@ -711,9 +715,18 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	PrepareGraphicsBindings(stages, std::span {m_targets.colors, m_targets.color_count});
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
+	Buffer*               mesh_index_buffer = nullptr;
+	uint64_t              mesh_index_data   = 0;
 	if (!mesh) {
 		vertex_bindings = AcquireVertexBuffers(buffer, vs_input_info);
 		index_binding   = PrepareIndexBuffer(buffer, indices);
+	} else if (draw.indexed) {
+		const auto [indices_buffer, offset] = m_context.GetBufferCache().ObtainBuffer(
+		    mesh_index_begin, mesh_index_end - mesh_index_begin, false);
+		const auto byte_offset = offset + (index_source.address & 3u);
+		EXIT_IF(byte_offset > UINT32_MAX);
+		mesh_index_buffer = indices_buffer;
+		mesh_index_data   = (uint64_t {mesh_index_buffer->BindlessIndex()} << 32u) | byte_offset;
 	}
 	// Indirect records the GPU reads (DrawEmitInfo::indirect), which have the layout of D3D12's draw arguments.
 	std::pair<Buffer*, uint64_t> indirect_records {};
@@ -788,7 +801,8 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	RenderDepthInfo back_faces = m_targets.depth;
 	back_faces.stencil_front   = back_faces.stencil_back;
 	const auto get_pipeline    = [&](const RenderDepthInfo& depth, PipelineCache::FacePass faces) -> PipelineCache::Pipeline& {
-		return m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state, depth, strip_cut, faces);
+		return m_context.GetPipelineCache().GetGraphicsPipeline(
+		    buffer, state, std::span {m_targets.colors, m_targets.color_count}, depth, strip_cut, faces);
 	};
 	auto& pipeline = get_pipeline(only_back ? back_faces : m_targets.depth,
 	                              per_face && !only_back ? PipelineCache::FacePass::Front : PipelineCache::FacePass::Guest);
@@ -800,7 +814,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		back_pass = nullptr;
 	}
 	if (FrameDump::LogActive()) {
-		FrameDump::LogDraw(DescribeDraw(m_context.GetGraphics(), buffer, draw, state, topology, primitive_restart_enable, mesh, emulated_mesh, pipeline, bindings.vertex[0],
+		FrameDump::LogDraw(DescribeDraw(m_context.GetGraphics(), buffer, draw, state, m_targets, topology, primitive_restart_enable, mesh, emulated_mesh, pipeline, bindings.vertex[0],
 		                                state.ps_active && bindings.pixel ? &*bindings.pixel : nullptr) +
 		                   (pipeline.pipeline == nullptr ? "    -> SKIPPED: the pipeline could not be made\n" : ""));
 	}
@@ -854,6 +868,9 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		                                    index16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT};
 		list->IASetIndexBuffer(&view);
 	}
+	if (mesh_index_buffer != nullptr) {
+		mesh_index_buffer->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	}
 
 	// spirv_to_dxil's vertex index is SV_VertexID plus first_vertex.
 	D3D12::VertexRuntimeData runtime {};
@@ -882,8 +899,8 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	const uint32_t draw_data[] {
 	    draw.index_count,
 	    static_cast<uint32_t>(emit.vertex_offset), index_source.guest_element_size,
-	    static_cast<uint32_t>(index_source.address),
-	    static_cast<uint32_t>(index_source.address >> 32u)};
+	    static_cast<uint32_t>(mesh_index_data),
+	    static_cast<uint32_t>(mesh_index_data >> 32u)};
 	static_assert(std::size(draw_data) == IR::PushData::MeshDrawDwordCount);
 	if (mesh && !emulated_mesh) {
 		list->SetGraphicsRoot32BitConstants(0, static_cast<UINT>(std::size(draw_data)), draw_data,
@@ -926,7 +943,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 			buffer.GlobalMemoryBarrier();
 		}
 		m_read_only_depth = {};
-		LogSnapshot(m_context, state);
+		LogSnapshot(m_context, m_targets);
 		return;
 	}
 	// An indirect draw: ExecuteIndirect reads the guest's records. A pipeline with spirv_to_dxil's runtime data also takes each
@@ -962,8 +979,8 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		                            D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION,
 		                            D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION,
 		                            1u << 22u,
-		                            static_cast<uint32_t>(index_source.address),
-		                            static_cast<uint32_t>(index_source.address >> 32u)};
+		                            static_cast<uint32_t>(mesh_index_data),
+		                            static_cast<uint32_t>(mesh_index_data >> 32u)};
 		ComputeKernels::Bindings records;
 		records.input        = indirect_buffer;
 		records.input_offset = base;
@@ -1043,7 +1060,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		buffer.GlobalMemoryBarrier();
 	}
 	m_read_only_depth = {};
-	LogSnapshot(m_context, state);
+	LogSnapshot(m_context, m_targets);
 }
 
 } // namespace Libs::Graphics
