@@ -89,12 +89,17 @@ void BufferCache::ChangeRegister(BufferId id) {
 		m_buffers.emplace(buffer.CpuAddress(), id);
 		m_total_used_memory += buffer.Size();
 		buffer.lru_id = m_lru_cache.Insert(id, m_gc_tick);
+#if defined(KYTY_GPU_BACKEND_D3D12)
+		// D3D12's table (d3d12/bdaPageTable.h) has two levels.
+		m_bda_page_table.Map(table_page, size_pages, CACHING_PAGEBITS, buffer);
+#else
 		std::vector<vk::DeviceAddress> addresses;
 		addresses.reserve(size_pages);
 		for (uint64_t i = 0; i < size_pages; ++i) {
 			addresses.push_back(buffer.BufferDeviceAddress() + (i << CACHING_PAGEBITS));
 		}
 		m_bda_page_table.Write(table_page, addresses);
+#endif
 		QueueBdaSync(buffer.CpuAddress(), buffer.Size());
 	} else {
 		m_buffers.erase(m_buffers.find(buffer.CpuAddress()));
