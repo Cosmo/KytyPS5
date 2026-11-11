@@ -89,6 +89,7 @@ dxil_spirv_shader_stage SpirvStage(ShaderType stage) {
 		case ShaderType::Vertex: return DXIL_SPIRV_SHADER_VERTEX;
 		case ShaderType::Pixel: return DXIL_SPIRV_SHADER_FRAGMENT;
 		case ShaderType::Compute: return DXIL_SPIRV_SHADER_COMPUTE;
+		case ShaderType::Mesh: return DXIL_SPIRV_SHADER_MESH_AS_COMPUTE;
 		default: return DXIL_SPIRV_SHADER_NONE;
 	}
 }
