@@ -484,10 +484,16 @@ VertexInputScalarKind VertexParameterScalarKind(const EmitterState& state, uint3
 	const auto format = state.input_info.vertex->resources[location].Format();
 	if (GetHostShaderFeatures().vertex_formats_as_integers) {
 		switch (format) {
+			case Prospero::BufferFormat::k8UScaled:
+			case Prospero::BufferFormat::k16UScaled:
+			case Prospero::BufferFormat::k8_8UScaled:
 			case Prospero::BufferFormat::k16_16UScaled:
 			case Prospero::BufferFormat::k10_10_10_2UScaled:
 			case Prospero::BufferFormat::k8_8_8_8UScaled:
 			case Prospero::BufferFormat::k16_16_16_16UScaled: return VertexInputScalarKind::UscaledAsUint;
+			case Prospero::BufferFormat::k8SScaled:
+			case Prospero::BufferFormat::k16SScaled:
+			case Prospero::BufferFormat::k8_8SScaled:
 			case Prospero::BufferFormat::k16_16SScaled:
 			case Prospero::BufferFormat::k8_8_8_8SScaled:
 			case Prospero::BufferFormat::k16_16_16_16SScaled: return VertexInputScalarKind::SscaledAsSint;
