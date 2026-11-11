@@ -6,7 +6,6 @@ namespace Libs::Graphics::ShaderRecompiler {
 // What the host GPU's shaders can do, where it changes the SPIR-V the recompiler emits. The
 // backend sets it when it creates its device, before any shader is compiled.
 struct HostShaderFeatures {
-	bool mesh_index_device_address = true;
 	// Fragment shader barycentrics (SPV_KHR_fragment_shader_barycentric, SV_Barycentrics), which
 	// the Xbox's UWP games don't have. Without them, a pixel shader interpolating its inputs itself
 	// from their vertex values (v_interp_mov: P0 + i * P10 + j * P20) gets the interpolated value
