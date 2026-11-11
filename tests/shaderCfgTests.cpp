@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
@@ -7765,6 +7766,18 @@ void TestMeshExportStorage() {
     Check(private_bytes == (4u * 16u + 4u + 4u * 4u) * (64u / subgroup_size),
           "mesh vertex and primitive exports lost their separate logical-lane storage");
   }
+
+  const auto previous_features = ShaderRecompiler::GetHostShaderFeatures();
+  auto table_features = previous_features;
+  table_features.guest_pointer_table = true;
+  ShaderRecompiler::SetHostShaderFeatures(table_features);
+  const auto table_result = RecompileForTest(monolithic, options, PushData::MeshDrawDwordCount);
+  ShaderRecompiler::SetHostShaderFeatures(previous_features);
+  CheckSpirvBinaryValidates(table_result.spirv);
+  const auto table_source = DisassembleSpirvBinary(table_result.spirv);
+  Check(SpirvSourceHasInstructionUsing(table_source, "OpAccessChain", "%guest_buffers") &&
+            !table_result.program.info.uses_dma,
+        "mesh indices must use the buffer descriptor without a guest page table");
 }
 
 void TestMergedShaderUserDataSnapshot() {
