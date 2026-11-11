@@ -89,6 +89,10 @@ void BufferCache::ChangeRegister(BufferId id) {
 		m_buffers.emplace(buffer.CpuAddress(), id);
 		m_total_used_memory += buffer.Size();
 		buffer.lru_id = m_lru_cache.Insert(id, m_gc_tick);
+#if defined(KYTY_GPU_BACKEND_D3D12)
+		// D3D12's table (d3d12/bdaPageTable.h) has two levels and no accessed tags.
+		m_bda_page_table.Map(table_page, size_pages, CACHING_PAGEBITS, buffer);
+#else
 		std::vector<vk::DeviceAddress> addresses;
 		addresses.reserve(size_pages);
 		for (uint64_t i = 0; i < size_pages; ++i) {
@@ -104,6 +108,7 @@ void BufferCache::ChangeRegister(BufferId id) {
 			    });
 		}
 		m_bda_page_table.Write(table_page, addresses);
+#endif
 		QueueBdaSync(buffer.CpuAddress(), buffer.Size());
 	} else {
 		m_buffers.erase(m_buffers.find(buffer.CpuAddress()));
@@ -641,6 +646,11 @@ void BufferCache::QueueBdaSync(uint64_t vaddr, uint64_t size, bool is_write) {
 	const auto begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const auto end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
 	std::lock_guard lock(m_bda_sync_mutex);
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// D3D12's shaders do not report the pages they read (no accessed tags): a write queues its pages.
+	(void)is_write;
+	m_bda_sync.Add(begin, end - begin);
+#else
 	if (!is_write) {
 		m_bda_sync.Add(begin, end - begin);
 		return;
@@ -648,8 +658,10 @@ void BufferCache::QueueBdaSync(uint64_t vaddr, uint64_t size, bool is_write) {
 	m_dma_accessed.ForEachInRange(begin, end - begin, [this](uint64_t first, uint64_t last) {
 		m_bda_sync.Add(first, last - first);
 	});
+#endif
 }
 
+#if !defined(KYTY_GPU_BACKEND_D3D12)
 void BufferCache::MarkDmaAccess(const RangeSet& pages) {
 	{
 		std::lock_guard lock(m_bda_sync_mutex);
@@ -680,6 +692,7 @@ void BufferCache::MarkDmaAccess(const RangeSet& pages) {
 	unbacked.ForEach(
 	    [this](uint64_t start, uint64_t end) { (void)FindBuffer(start, end - start); });
 }
+#endif
 
 void BufferCache::SynchronizeBda(const RangeSet& mapped) {
 	const auto queued = [this] {

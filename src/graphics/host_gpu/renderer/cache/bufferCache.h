@@ -111,7 +111,7 @@ public:
 	void               MarkColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys);
 	[[nodiscard]] bool IsColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) const;
 	void               ProcessFaultBuffer();
-	// Tags fault-scan pages as DMA-accessed and queues them; creates buffers for unbacked ones.
+	// Tags fault-scan pages as DMA-accessed and queues them; creates buffers for unbacked ones (Vulkan).
 	void MarkDmaAccess(const RangeSet& pages);
 	// Uploads the CPU-dirty bytes of the queued ranges `mapped` covers behind one barrier pair.
 	void SynchronizeBda(const RangeSet& mapped);
