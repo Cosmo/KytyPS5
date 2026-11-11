@@ -12,7 +12,7 @@ The D3D12 backend turns the SPIR-V that Kyty's shader recompiler makes into DXIL
 - Y and Z flips per viewport: a shader that writes the viewport index takes that viewport's bit of the flip masks
 - half to 32-bit integer conversions without 16-bit ops: NIR folds the shader's unpack to a float away, which left a 16-bit float conversion a device without 16-bit ops (the Xbox) rejects
 - descriptor indices the SPIR-V marks `NonUniform` reach the DXIL handle (`CreateHandle`'s `nonUniformIndex`): every dynamic handle was uniform, so lanes with different indices read through the first lane's descriptor
-- code moved next to its uses (sink, move and global code motion) and a peephole select limit of 64: large shaders get shorter live ranges, and the driver compiles them much faster
+- code moved next to its uses (sink, move and global code motion) and a peephole select limit of 64: large shaders get shorter live ranges, and the driver compiles them much faster. Not for the `DXIL_SPIRV_SHADER_MESH_AS_COMPUTE` stage (a geometry or mesh program run as a compute shader): with the code motion, one game's sprites lost a corner on the Xbox
 
 Build it once, with the static C runtime so that the DLL imports nothing a UWP app does not have (it imports only `KERNEL32.dll` and an API set):
 
