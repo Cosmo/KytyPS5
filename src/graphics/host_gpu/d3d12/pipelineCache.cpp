@@ -468,8 +468,9 @@ void RootLayout::Add(const IR::CompiledShaderInfo& program, bool program_runtime
 	runtime_data   = runtime_data || program_runtime_data;
 	// Guest memory by address: through the descriptor heap, or the guest buffer table.
 	const bool table = ShaderRecompiler::GetHostShaderFeatures().guest_pointer_table;
-	heap_indexing    = heap_indexing || (program.info.uses_dma && !table);
-	guest_table      = guest_table || (program.info.uses_dma && table);
+	const bool reads_address = program.info.uses_dma || program.info.uses_device_address;
+	heap_indexing = heap_indexing || (reads_address && !table);
+	guest_table   = guest_table || (reads_address && table);
 	// The lock words of emulated 64-bit image atomics are in the guest buffer table too.
 	if (ShaderRecompiler::GetHostShaderFeatures().image_atomic64_lock) {
 		guest_table = guest_table || std::ranges::any_of(program.info.images, [](const IR::ImageResource& image) { return image.atomic64; });
@@ -555,7 +556,6 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	// Shaders can only index the descriptor heap from shader model 6.6 (not on the Series X): below
 	// it, guest memory is read through a table of buffers. (Set before any shader is translated.)
 	auto features                = ShaderRecompiler::GetHostShaderFeatures();
-	features.mesh_index_device_address = false;
 	features.guest_pointer_table = !m_compiler.SupportsHeapIndexing();
 	{
 		// A program of 32 lanes runs in a wave of up to WaveLaneCountMax lanes (64 on the Series X), where its active lanes can all be
@@ -597,8 +597,9 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 }
 
 std::string PipelineCache::CacheSignature() const {
-	// Kept across builds (a developer setting), the cache is tied to the shader compiler only.
-	return fmt::format("KytyD3D12PC2:{}:{}\n", Config::PipelineCacheAnyBuild() ? "any-build" : KYTY_GIT_REVISION,
+	// The mesh draw constants now hold a buffer descriptor and offset, so an older cached
+	// pipeline cannot be used even when the developer setting keeps caches across builds.
+	return fmt::format("KytyD3D12PC3:{}:{}\n", Config::PipelineCacheAnyBuild() ? "any-build" : KYTY_GIT_REVISION,
 	                   m_compiler.CacheSignature());
 }
 
@@ -1883,7 +1884,8 @@ void PipelineCache::SetOutputState(Stream& stream, const GraphicsKey& key) const
 	}
 }
 
-PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(CommandBuffer& command, const DrawRenderState& state, const RenderDepthInfo& depth,
+PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(CommandBuffer& command, const DrawRenderState& state,
+                                                            std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
                                                             uint32_t strip_cut, FacePass faces) {
 	KYTY_PROFILER_BLOCK("PipelineCache::GetGraphicsPipeline");
 	const auto  vertex_info   = state.VertexStages();
@@ -1901,7 +1903,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(CommandBuffer& comma
 		programs.pixel = *ps_input_info->stage.module;
 	}
 	GraphicsKey key;
-	key.state = MakeGraphicsPipelineKey(m_graphics, std::span {state.color_info, state.color_count}, depth, vertex_info, command,
+	key.state = MakeGraphicsPipelineKey(m_graphics, colors, depth, vertex_info, command,
 	                                    ps_input_info, state.topology, state.primitive_restart_enable, vertex_ids, programs.pixel.id);
 	key.depth_stencil = DepthStencilDesc(depth, key.state.rendering);
 	key.strip_cut     = strip_cut;
