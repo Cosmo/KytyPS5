@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/d3d12/buffer.h"
 
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
+
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/profiler.h"
@@ -165,6 +167,15 @@ void Buffer::UploadRegions(CommandBuffer& command, const Buffer& source,
 	for (const auto& copy: copies) {
 		command.Handle()->CopyBufferRegion(m_resource, copy.dstOffset, source.m_resource,
 		                                   copy.srcOffset, copy.size);
+	}
+}
+
+void Buffer::UploadRegions(CommandBuffer& command, const Buffer& source, std::span<const BufferUpload> uploads,
+                           std::span<const vk::BufferCopy> copies) {
+	size_t first = 0;
+	for (const auto& upload: uploads) {
+		upload.buffer->UploadRegions(command, source, copies.subspan(first, upload.end - first));
+		first = upload.end;
 	}
 }
 
