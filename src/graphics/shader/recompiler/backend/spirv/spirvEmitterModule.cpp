@@ -412,6 +412,11 @@ void DefineDescriptors(EmitterState& state) {
 			}
 		}
 	}
+	// Mesh indices can come directly from a draw's buffer descriptor without a guest page table.
+	if (GetHostShaderFeatures().guest_pointer_table && info.uses_device_address &&
+	    state.guest_buffer_table == 0) {
+		DefineGuestBufferTable(state);
+	}
 	// The lock words of 64-bit image atomics are in the guest buffer table (IR::ImageAtomic64LockSlot).
 	if (GetHostShaderFeatures().image_atomic64_lock && state.guest_buffer_table == 0 &&
 	    std::ranges::any_of(info.images, [](const IR::ImageResource& image) { return image.atomic64; })) {
@@ -858,9 +863,10 @@ void DefineModule(EmitterState& state) {
 	}
 	// Guest memory is read through physical storage buffer pointers, or (where the host cannot use
 	// them) through the guest buffer table. Resident image heaps read their slots through pointers.
-	const bool physical_pointers = (state.program.info.uses_dma && state.guest_buffer_table == 0) ||
-	                               state.program.info.uses_image_heap || state.program.info.uses_device_address;
-	if (state.program.info.uses_dma || physical_pointers) {
+	const bool reads_address = state.program.info.uses_dma || state.program.info.uses_device_address;
+	const bool physical_pointers = (reads_address && state.guest_buffer_table == 0) ||
+	                               state.program.info.uses_image_heap;
+	if (reads_address || physical_pointers) {
 		state.builder.RequireCapability(spv::CapabilityInt64);
 	}
 	if (physical_pointers) {

@@ -1311,22 +1311,12 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 				const auto index_low    = draw(3);
 				const auto byte_offset  = entry_ir.IAdd(entry_ir.BitwiseAnd(index_low, u32(3)),
 				                                           entry_ir.IMul(input_vertex, index_bytes));
-				const auto active = entry_ir.LogicalAnd(indexed, entry_ir.ULessThan(local, vertices));
-				const auto aligned = entry_ir.BitwiseAnd(index_low, u32(~3u));
-				const auto offset = entry_ir.BitwiseAnd(byte_offset, u32(~3u));
-				const auto packed_index = [&] {
-					if (GetHostShaderFeatures().mesh_index_device_address) {
-						return entry_ir.Emit(IR::ValueOpcode::LoadDeviceAddressU32,
-						                     {aligned, draw(4), offset, active});
-					}
-					const auto resource = entry_ir.Emit(IR::ValueOpcode::GetAddressResource,
-					                                    {aligned, draw(4)});
-					const auto memory_index = static_cast<uint32_t>(result.memory_info.size());
-					result.memory_info.push_back({.kind = IR::ResourceKind::Global});
-					return entry_ir.Emit(IR::ValueOpcode::LoadAddressU32,
-					                     {resource, offset, u32(0), active},
-					                     IR::MemoryFlags {.index = memory_index});
-				}();
+				// Indexed draws pass the device address of their indices.
+				const auto packed_index = entry_ir.Emit(
+				    IR::ValueOpcode::LoadDeviceAddressU32,
+				    {entry_ir.BitwiseAnd(index_low, u32(~3u)), draw(4),
+				     entry_ir.BitwiseAnd(byte_offset, u32(~3u)),
+				     entry_ir.LogicalAnd(indexed, entry_ir.ULessThan(local, vertices))});
 				const auto index = IR::U32(entry_ir.Emit(
 				    IR::ValueOpcode::BitFieldUExtract,
 				    {packed_index, entry_ir.IMul(entry_ir.BitwiseAnd(byte_offset, u32(3)), u32(8)),
