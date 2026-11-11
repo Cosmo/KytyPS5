@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <type_traits>
 #include <utility>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
@@ -21,8 +22,6 @@ public:
 	SpeculativeLoads(EmitterState& state, bool on): m_state(state), m_saved(state.speculative_loads) {
 		state.speculative_loads = on && GetHostShaderFeatures().speculative_buffer_loads;
 	}
-	SpeculativeLoads(EmitterState& state, IR::ResourceKind kind)
-	    : SpeculativeLoads(state, kind == IR::ResourceKind::Buffer || kind == IR::ResourceKind::ScalarBuffer) {}
 	~SpeculativeLoads() { m_state.speculative_loads = m_saved; }
 	SpeculativeLoads(const SpeculativeLoads&)            = delete;
 	SpeculativeLoads& operator=(const SpeculativeLoads&) = delete;
@@ -1107,6 +1106,12 @@ uint32_t LoadIndirectFormattedX(ValueEmitContext& ctx, const IndirectBufferAcces
 	return result;
 }
 
+template <typename Apply>
+uint32_t EmitLockedAtomic64(EmitterState& state, uint32_t key, uint32_t low, uint32_t high,
+                            spv::Scope scope, spv::MemorySemanticsMask memory, Apply&& apply);
+
+constexpr uint32_t BufferAtomic64LockSalt = 0x51ed270bu;
+
 uint32_t LoadRawBuffer(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
                        const MemoryResourceAccess& resource, uint32_t components) {
 	auto&      state  = ctx.state;
@@ -1122,11 +1127,16 @@ uint32_t LoadRawBuffer(ValueEmitContext& ctx, const IR::Inst& inst, const IR::Me
 
 	const auto first  = ByteAddress(ctx, inst, mem, resource.byte_offset);
 	const auto second = ByteAddress(ctx, inst, RebaseRawComponent(mem, 1), resource.byte_offset);
-	const auto wide =
-	    PrepareStorageBufferResourceAccess(state, mem, state.storage_buffers[3],
-	                                       resource.non_uniform ? resource.descriptor_index : 0u);
+	const bool locked = GetHostShaderFeatures().int64_atomics_lock;
+	const auto wide   = locked ? resource
+	                           : PrepareStorageBufferResourceAccess(
+	                                 state, mem, state.storage_buffers[3],
+	                                 resource.non_uniform ? resource.descriptor_index : 0u);
 	const auto index =
 	    Binary(state, spv::OpShiftRightLogical, TypeU32(state), first, ConstantU32(state, 3));
+	const auto low = locked ? Binary(state, spv::OpShiftRightLogical, TypeU32(state), first,
+	                                 ConstantU32(state, 2)) : 0u;
+	const auto high = locked ? EmitAddU32(state, low, ConstantU32(state, 1)) : 0u;
 	auto atomic =
 	    Binary(state, spv::OpIEqual, TypeBool(state),
 	           Binary(state, spv::OpBitwiseAnd, TypeU32(state), first, ConstantU32(state, 7)),
@@ -1134,24 +1144,36 @@ uint32_t LoadRawBuffer(ValueEmitContext& ctx, const IR::Inst& inst, const IR::Me
 	atomic = AndCondition(state, atomic,
 	                      Binary(state, spv::OpIEqual, TypeBool(state), second,
 	                             EmitAddU32(state, first, ConstantU32(state, 4))));
-	// The 64-bit alias requires the entire pair; partial and swizzled reads retain DWORD bounds.
-	atomic = AndCondition(state, atomic, EmitMemoryElementInBounds(state, wide, index));
+	// Only aligned, fully in-bounds pairs can use a single synchronized read.
+	atomic = AndCondition(state, atomic, EmitMemoryElementInBounds(state, wide, locked ? high : index));
 	const auto atomic_label = state.builder.AllocateId(), scalar_label = state.builder.AllocateId();
 	const auto merge = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpSelectionMerge, merge, spv::SelectionControlMaskNone);
 	state.builder.AddFunction(spv::OpBranchConditional, atomic, atomic_label, scalar_label);
 	EmitLabel(state, atomic_label);
-	const auto pointer = EmitStorageBufferElementPointer(
-	    state, wide, index, TypeStorageBufferElementPointer(state, 64));
-	const auto snapshot = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpAtomicLoad, TypeU64(state), snapshot, pointer,
-	                          ConstantU32(state, spv::ScopeDevice),
-	                          ConstantU32(state, spv::MemorySemanticsAcquireMask |
-	                                                 spv::MemorySemanticsUniformMemoryMask));
+	uint32_t snapshot;
+	if (locked) {
+		const auto key = Binary(state, spv::OpBitwiseXor, TypeU32(state), index,
+		                        ConstantU32(state, BufferAtomic64LockSalt));
+		const auto type = TypeStorageBufferElementPointer(state, 32);
+		const auto low_pointer = EmitStorageBufferElementPointer(state, wide, low, type);
+		const auto high_pointer = EmitStorageBufferElementPointer(state, wide, high, type);
+		snapshot = EmitLockedAtomic64(state, key, low_pointer, high_pointer, spv::ScopeDevice,
+		                              spv::MemorySemanticsUniformMemoryMask, nullptr);
+	} else {
+		const auto pointer = EmitStorageBufferElementPointer(
+		    state, wide, index, TypeStorageBufferElementPointer(state, 64));
+		snapshot = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAtomicLoad, TypeU64(state), snapshot, pointer,
+		                          ConstantU32(state, spv::ScopeDevice),
+		                          ConstantU32(state, spv::MemorySemanticsAcquireMask |
+		                                                 spv::MemorySemanticsUniformMemoryMask));
+	}
 	const std::array<uint32_t, 4> words {
 	    EmitCompositeExtractU64(state, snapshot, IR::Value(0u)),
 	    EmitCompositeExtractU64(state, snapshot, IR::Value(1u))};
 	const auto pair = ConstructU32Composite(state, 2, words);
+	const auto pair_exit = state.current_label;
 	state.builder.AddFunction(spv::OpBranch, merge);
 	EmitLabel(state, scalar_label);
 	const auto fallback    = scalar();
@@ -1159,7 +1181,7 @@ uint32_t LoadRawBuffer(ValueEmitContext& ctx, const IR::Inst& inst, const IR::Me
 	state.builder.AddFunction(spv::OpBranch, merge);
 	EmitLabel(state, merge);
 	const auto result = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpPhi, TypeU32Composite(state, 2), result, pair, atomic_label,
+	state.builder.AddFunction(spv::OpPhi, TypeU32Composite(state, 2), result, pair, pair_exit,
 	                          fallback, scalar_exit);
 	return result;
 }
@@ -1683,13 +1705,15 @@ uint32_t EmitLockedAtomic64(EmitterState& state, uint32_t key, uint32_t low, uin
 		state.builder.AddFunction(spv::OpAtomicOr, TypeU32(state), value, pointer, words, none, ConstantU32(state, 0));
 		return value;
 	};
-	const auto old     = PackU64(state, read(low), read(high));
-	const auto updated = Unary(state, spv::OpBitcast, TypeU32Vector(state, 2), apply(old));
-	for (const auto [pointer, component]: {std::pair {low, 0u}, std::pair {high, 1u}}) {
-		const auto word = state.builder.AllocateId();
-		state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), word, updated, component);
-		const auto previous_word = state.builder.AllocateId();
-		state.builder.AddFunction(spv::OpAtomicExchange, TypeU32(state), previous_word, pointer, words, none, word);
+	const auto old = PackU64(state, read(low), read(high));
+	if constexpr (std::is_invocable_v<Apply, uint32_t>) {
+		const auto updated = Unary(state, spv::OpBitcast, TypeU32Vector(state, 2), apply(old));
+		for (const auto [pointer, component]: {std::pair {low, 0u}, std::pair {high, 1u}}) {
+			const auto word = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), word, updated, component);
+			const auto previous_word = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpAtomicExchange, TypeU32(state), previous_word, pointer, words, none, word);
+		}
 	}
 	const auto released = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAtomicExchange, TypeU32(state), released, lock, device, release, ConstantU32(state, 0));
@@ -1746,7 +1770,7 @@ uint32_t EmitBufferAtomic64(ValueEmitContext& ctx, const IR::Inst& inst) {
 					                                                                            TypeStorageBufferElementPointer(state, 32));
 				                                     };
 				                                     return EmitLockedAtomic64(
-				                                         state, Binary(state, spv::OpBitwiseXor, TypeU32(state), qword, ConstantU32(state, 0x51ed270bu)),
+				                                         state, Binary(state, spv::OpBitwiseXor, TypeU32(state), qword, ConstantU32(state, BufferAtomic64LockSalt)),
 				                                         pointer(low), pointer(high), spv::ScopeDevice, spv::MemorySemanticsUniformMemoryMask,
 				                                         [&](uint32_t old) { return Atomic64Result(ctx, inst, old); });
 			                                     });
@@ -2001,7 +2025,9 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto buffer_components = IR::BufferComponentCount(op);
 	const auto shared_components = IR::SharedComponentCount(op);
 	const auto address_info      = IR::AddressOpcodeInfoOf(op);
-	const SpeculativeLoads speculative(ctx.state, mem.kind);
+	const bool locked_pair = GetHostShaderFeatures().int64_atomics_lock && mem.IsCoherentBufferPairLoad(op);
+	const SpeculativeLoads speculative(ctx.state, mem.kind == IR::ResourceKind::ScalarBuffer ||
+	                                                (mem.kind == IR::ResourceKind::Buffer && !locked_pair));
 	uint32_t   value;
 	if (mem.kind == IR::ResourceKind::FlatLocal)
 		value = LoadLocalFlat(ctx, inst);
