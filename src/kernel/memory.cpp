@@ -924,6 +924,11 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 
 uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
 	EXIT_IF(g_virtual_ranges == nullptr);
+	// The backing table covers section-backed pages. Lazy and private mappings still use the
+	// virtual ranges. For large spans the range walk is cheaper than checking every page.
+	if (size <= (uint64_t {1} << 24u) && g_guest_address_space->IsBacked(vaddr, size)) {
+		return size;
+	}
 
 	const auto clamped_size = g_virtual_ranges->ClampRangeSize(vaddr, size);
 	if (clamped_size == 0) {

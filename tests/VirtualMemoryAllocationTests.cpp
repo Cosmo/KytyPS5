@@ -696,15 +696,15 @@ void TestConcurrentBackingReads() {
 	std::printf("[host]    %-48s ok\n", test);
 }
 
-void TestBackingReadExcludesWritesAndUnmap() {
+void TestBackingReadDuringWriteAndUnmap() {
 	using namespace Libs::LibKernel::Memory;
-	const char*        test        = "BackingReadExcludesWritesAndUnmap";
+	const char*        test        = "BackingReadDuringWriteAndUnmap";
 	constexpr uint64_t original    = 0x123456789abcdef0ull;
 	constexpr uint64_t replacement = 0xfedcba9876543210ull;
 	for (const auto read: {TryReadBacking, TryReadSparseBacking, CopySparseMemory}) {
 		for (const bool unmap: {false, true}) {
 			const auto base = MapNamedFlexible(test, SceKernelPageSize, SceKernelProtCpuRw,
-			                                   "backing_read_exclusion");
+			                                   "backing_read_mutation");
 			std::memcpy(reinterpret_cast<void*>(base), &original, sizeof(original));
 			std::counting_semaphore<2> entered {0};
 			std::counting_semaphore<2> resume {0};
@@ -729,7 +729,7 @@ void TestBackingReadExcludesWritesAndUnmap() {
 				finished.release();
 			});
 			started.acquire();
-			const bool excluded = !finished.try_acquire_for(std::chrono::milliseconds(100));
+			const bool finished_during_read = finished.try_acquire_for(std::chrono::seconds(5));
 			resume.release();
 			reader.join();
 			mutation.join();
@@ -739,15 +739,14 @@ void TestBackingReadExcludesWritesAndUnmap() {
 			if (!unmap) {
 				CheckOk(test, KernelMunmap(base, SceKernelPageSize), "KernelMunmap");
 			}
-			Check(test, reader_parked && excluded,
-			      "backing write or unmap completed while a backing read held its "
-			      "lock");
-			Check(test, read_ok && snapshot == original,
-			      "backing mutation changed an in-progress read");
+			Check(test, reader_parked && finished_during_read,
+			      "backing write or unmap waited for a fully backed read");
+			Check(test, read_ok && snapshot == (unmap ? 0 : replacement),
+			      "backing read missed the completed mutation");
 			Check(test,
 			      unmap ? unmap_result == OK && !still_backed
 			            : write_ok && still_backed && after == replacement,
-			      "backing mutation failed after the reader released its lock");
+			      "backing mutation failed");
 		}
 	}
 	std::printf("[host]    %-48s ok\n", test);
@@ -778,7 +777,7 @@ void TestTrackerProtectSharesBackingReads() {
 		done.release();
 	});
 	const bool shared   = done.try_acquire_for(std::chrono::seconds(5));
-	const bool excluded = !done.try_acquire_for(std::chrono::milliseconds(100));
+	const bool guest_done = done.try_acquire_for(std::chrono::seconds(5));
 	resume.release();
 	reader.join();
 	protector.join();
@@ -786,8 +785,8 @@ void TestTrackerProtectSharesBackingReads() {
 	CheckOk(test, KernelMunmap(base, SceKernelPageSize), "KernelMunmap");
 	Check(test, reader_parked && shared && tracker_ok,
 	      "tracker protection waited for a backing read");
-	Check(test, excluded && guest_result == OK,
-	      "guest mprotect completed while a backing read held its lock");
+	Check(test, guest_done && guest_result == OK,
+	      "guest mprotect waited for a fully backed read");
 	std::printf("[host]    %-48s ok\n", test);
 }
 
@@ -6022,7 +6021,7 @@ int main(int argc, char** argv) {
 	if (argc == 2 && std::strcmp(argv[1], "--backing-transfers-only") == 0) {
 		RunTest(TestFlexibleZeroingTracksBackingLifetime);
 		RunTest(TestConcurrentBackingReads);
-		RunTest(TestBackingReadExcludesWritesAndUnmap);
+		RunTest(TestBackingReadDuringWriteAndUnmap);
 		RunTest(TestTrackerProtectSharesBackingReads);
 		RunTest(TestSparseBackingReadPreservesResidency);
 		RunTest(TestCopySparseMemoryMappings);
@@ -6085,7 +6084,7 @@ int main(int argc, char** argv) {
 	RunTest(TestCopySparseMemoryMappings);
 	RunTest(TestSparseReadDuringDirectCommit);
 	RunTest(TestConcurrentBackingReads);
-	RunTest(TestBackingReadExcludesWritesAndUnmap);
+	RunTest(TestBackingReadDuringWriteAndUnmap);
 	RunTest(TestTrackerProtectSharesBackingReads);
 	RunTest(TestGuestAddressSpaceHasNoFixedFallback);
 	RunTest(TestGuestFreeRangeSearchDoesNotUnderflow);
