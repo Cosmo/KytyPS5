@@ -146,7 +146,8 @@ public:
 	enum class FacePass : uint8_t { Guest, Front, Back };
 	// The draw state's pipeline with the depth state `depth` (the state's own, or its back faces' values); `strip_cut` is the
 	// index that restarts strips (a D3D12_INDEX_BUFFER_STRIP_CUT_VALUE).
-	Pipeline& GetGraphicsPipeline(CommandBuffer& command, const DrawRenderState& state, const RenderDepthInfo& depth,
+	Pipeline& GetGraphicsPipeline(CommandBuffer& command, const DrawRenderState& state,
+	                             std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
 	                              uint32_t strip_cut, FacePass faces = FacePass::Guest);
 
 	struct Statistics {
