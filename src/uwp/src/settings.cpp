@@ -81,6 +81,7 @@ AppSettings LoadSettings() {
 	read("guest_tsc", settings.guest_tsc);
 	read("occlusion_queries", settings.occlusion_queries);
 	read("relaxed_shader_float", settings.relaxed_shader_float);
+	read("pssr_upscaler", settings.pssr_upscaler);
 	if (const auto draws = json.find("flush_draws");
 	    draws != json.end() && draws->is_number_unsigned() && draws->get<uint64_t>() <= 99999) {
 		settings.flush_draws = draws->get<uint32_t>();
@@ -178,6 +179,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["guest_tsc"]              = settings.guest_tsc;
 	json["occlusion_queries"]      = settings.occlusion_queries;
 	json["relaxed_shader_float"]   = settings.relaxed_shader_float;
+	json["pssr_upscaler"] = settings.pssr_upscaler;
 	json["flush_draws"]            = settings.flush_draws;
 	json["debug_layer"]      = settings.debug_layer;
 	json["game_output"]      = settings.game_output;
