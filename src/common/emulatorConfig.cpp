@@ -122,7 +122,7 @@ PssrUpscaler GetPssrUpscaler() {
 }
 
 bool FsrFrameGenerationEnabled() {
-	return g_config->fsr_frame_generation;
+	return g_config != nullptr && g_config->fsr_frame_generation;
 }
 
 uint32_t GetFsr1Upscaling() {
