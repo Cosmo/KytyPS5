@@ -136,6 +136,9 @@ struct AppSettings {
 	std::string pssr_upscaler = "Linear";
 	// The settings page, Testing: FSR frame generation from the PSSR hook (Config::fsr_frame_generation). Off.
 	bool fsr_frame_generation = false;
+	// The settings page, Testing: AMD FSR 1 for pictures smaller than the screen (Config::fsr1_upscaling): "Off", "Low", "Medium" or
+	// "High" sharpness. Off.
+	std::string fsr1_upscaling = "Off";
 	// Number of draws between host GPU submissions. Zero uses normal batching.
 	uint32_t flush_draws = 0;
 	// Debugging, only in the file: ask for a frame dump this many seconds after the game started (0: never; the game menu has Save frame dump).
