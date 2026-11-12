@@ -942,6 +942,14 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    {L"How PS5 Pro mode upscales the games that use PSSR.",
 		     L"FSR (AMD FSR 3.1) uses the game's depth and motion. Takes effect the next time a game starts."});
 	}
+	AddSwitch(
+	    testing, explanation, L"FSR frame generation", settings.fsr_frame_generation,
+	    [state, save](bool on) {
+		    state->settings.fsr_frame_generation = on;
+		    save();
+	    },
+	    {L"Experimental. Shows a frame made by AMD FSR 3.1 between two game frames, from the game's PSSR depth and motion.",
+	     L"Needs PS5 Pro mode, a game that uses PSSR, SDR output and a game at half the refresh rate (30 fps at 60 Hz). Takes effect the next time a game starts."});
 #endif
 	AddSwitch(
 	    testing, explanation, L"Guest clock at PS5 speed", settings.guest_tsc,
