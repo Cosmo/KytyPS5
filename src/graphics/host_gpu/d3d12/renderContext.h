@@ -7,6 +7,9 @@
 #include "graphics/host_gpu/d3d12/computeKernels.h"
 #include "graphics/host_gpu/d3d12/descriptorHeap.h"
 #include "graphics/host_gpu/d3d12/graphicContext.h"
+#ifdef KYTY_HAS_FSR
+#include "graphics/host_gpu/d3d12/fidelityfx.h"
+#endif
 #include "graphics/host_gpu/d3d12/imageHeap.h"
 #include "graphics/host_gpu/d3d12/occlusionQueries.h"
 #include "graphics/host_gpu/d3d12/pipelineCache.h"
@@ -43,6 +46,9 @@ public:
 	[[nodiscard]] GuestGpu&                 GetGpu() const;
 	[[nodiscard]] VideoOut::VideoOutDriver& GetVideoOut() const;
 
+#ifdef KYTY_HAS_FSR
+	FidelityFx* GetFidelityFx() noexcept { return m_fidelityfx.get(); }
+#endif
 	Common::Mutex&    GetMutex() { return m_mutex; }
 	CommandScheduler& GetCommandScheduler() { return m_command_scheduler; }
 	DescriptorHeap&   GetDescriptorHeap() { return m_descriptor_heap; }
@@ -100,6 +106,9 @@ private:
 	RangeSet                  m_mapped_ranges;
 	// A shader that reads guest memory by address ran; its faults are processed at the next garbage collection.
 	bool                      m_fault_process_pending = false;
+#ifdef KYTY_HAS_FSR
+	std::unique_ptr<FidelityFx> m_fidelityfx;
+#endif
 	std::unique_ptr<GuestGpu> m_gpu;
 	VideoOut::VideoOutDriver* m_video_out = nullptr;
 

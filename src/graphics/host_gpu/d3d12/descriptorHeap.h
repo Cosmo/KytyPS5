@@ -69,6 +69,7 @@ public:
 	// when recorded or copied into the shader-visible heap, so a freed slot is reusable at once.
 	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE AllocateCpu(D3D12_DESCRIPTOR_HEAP_TYPE type);
 	void FreeCpu(D3D12_DESCRIPTOR_HEAP_TYPE type, D3D12_CPU_DESCRIPTOR_HANDLE handle);
+	void InvalidateBinding() noexcept { m_bound_tick = 0; }
 
 private:
 	class Ring {

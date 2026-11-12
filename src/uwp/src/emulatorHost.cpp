@@ -187,6 +187,9 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.network_connected         = settings.network_connected;
 		config.psn_emulation_enabled     = settings.emulate_psn;
 		config.pro_enabled               = settings.pro_mode;
+#ifdef KYTY_HAS_FSR
+		config.pssr_upscaler = settings.pssr_upscaler == "FSR" ? Config::PssrUpscaler::FSR : Config::PssrUpscaler::Linear;
+#endif
 		config.guest_tsc_enabled         = settings.guest_tsc;
 		config.readback_linear_images    = settings.readback_linear_images;
 		config.lod_stats_enabled         = settings.lod_stats;
