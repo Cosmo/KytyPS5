@@ -66,6 +66,10 @@ target_include_directories(kyty_uwp PRIVATE "${KYTY_UWP_DIR}/src" ${inc_headers}
 target_link_options(kyty_uwp PRIVATE "/APPCONTAINER" "/LIBPATH:$ENV{VCToolsInstallDir}lib/x64/store"
 	"/DEBUG:FULL" "/PDB:${CMAKE_CURRENT_BINARY_DIR}/kyty_uwp.pdb")
 target_link_libraries(kyty_uwp PRIVATE WindowsApp.lib ${kyty_emulator_link_libraries} cpuinfo spdlog::spdlog ZArchive::zarchive Tracy::TracyClient)
+include("${KYTY_UWP_DIR}/fidelityfx.cmake")
+if(KYTY_ENABLE_FSR)
+	kyty_add_fidelityfx(kyty_uwp)
+endif()
 
 # The package layout next to the executable, updated after every link: register it with `uwp.ps1 deploy`.
 set(KYTY_UWP_LAYOUT "${CMAKE_BINARY_DIR}/uwp-layout")
@@ -83,6 +87,11 @@ add_custom_command(TARGET kyty_uwp POST_BUILD
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${KYTY_NOTO_SANS_FONTS} "${KYTY_UWP_LAYOUT}/fonts/"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_NOTO_SANS_DIR}/LICENSE" "${KYTY_UWP_LAYOUT}/fonts/NotoSans-LICENSE.txt"
 	COMMENT "Updating the UWP package layout")
+if(KYTY_ENABLE_FSR)
+	add_custom_command(TARGET kyty_uwp POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${kyty_fidelityfx_source}/LICENSE.txt" "${KYTY_UWP_LAYOUT}/FidelityFX-LICENSE.txt"
+		VERBATIM)
+endif()
 # A changed manifest or asset links the app again, so that it reaches the layout too.
 file(GLOB kyty_uwp_assets CONFIGURE_DEPENDS "${KYTY_UWP_DIR}/Assets/*")
 set_property(TARGET kyty_uwp APPEND PROPERTY LINK_DEPENDS "${CMAKE_BINARY_DIR}/uwp/AppxManifest.xml" ${kyty_uwp_assets})

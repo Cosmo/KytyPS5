@@ -834,7 +834,7 @@ void GameOverlay::State::Update() {
 	const auto size        = [](uint32_t width, uint32_t height) {
 		return width == 0 || height == 0 ? std::wstring(L"\u2013") : std::to_wstring(width) + L" \u00d7 " + std::to_wstring(height);
 	};
-	output_resolution.Text(size(resolutions.output_width, resolutions.output_height));
+	output_resolution.Text(size(resolutions.output_width, resolutions.output_height) + (resolutions.fsr ? L" FSR" : L""));
 	render_resolution.Text(size(resolutions.render_width, resolutions.render_height));
 	display_resolution.Text(size(resolutions.display_width, resolutions.display_height));
 
