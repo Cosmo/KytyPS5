@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <thread>
@@ -41,6 +42,56 @@ namespace Kyty::Uwp {
 namespace core = winrt::Windows::UI::Core;
 
 namespace {
+
+// The app's memory in the log: a line every 10 s, and below 1 GB free every half second when it moved by 8 MB (at least every 2 s), so that
+// the log shows what filled the memory when a game ends at the app's limit. The system's memory events get a line each.
+void StartMemoryWatch() {
+	using winrt::Windows::System::AppMemoryUsageLevel;
+	using winrt::Windows::System::MemoryManager;
+	static std::atomic_bool started = false;
+	if (started.exchange(true)) {
+		return;
+	}
+	MemoryManager::AppMemoryUsageIncreased([](auto const&, auto const&) {
+		const auto level = MemoryManager::AppMemoryUsageLevel();
+		if (level == AppMemoryUsageLevel::High || level == AppMemoryUsageLevel::OverLimit) {
+			Log("memory: the system reports %s usage, %llu of %llu MB\n", level == AppMemoryUsageLevel::High ? "high" : "over-limit",
+			    static_cast<unsigned long long>(MemoryManager::AppMemoryUsage() >> 20u),
+			    static_cast<unsigned long long>(MemoryManager::AppMemoryUsageLimit() >> 20u));
+		}
+	});
+	MemoryManager::AppMemoryUsageLimitChanging([](auto const&, winrt::Windows::System::AppMemoryUsageLimitChangingEventArgs const& args) {
+		Log("memory: the system changes the limit from %llu to %llu MB\n", static_cast<unsigned long long>(args.OldLimit() >> 20u),
+		    static_cast<unsigned long long>(args.NewLimit() >> 20u));
+	});
+	std::thread([] {
+		Common::Thread::SetCurrentName("Memory watch");
+		constexpr uint64_t MiB       = uint64_t {1} << 20u;
+		uint64_t           last_free = UINT64_MAX;
+		uint64_t           last_ms   = 0;
+		for (;;) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(500));
+			const uint64_t limit = Config::AppMemoryLimit();
+			if (limit == 0) {
+				continue;
+			}
+			const uint64_t used  = MemoryManager::AppMemoryUsage();
+			const uint64_t free  = used < limit ? limit - used : 0;
+			const uint64_t now   = GetTickCount64();
+			const uint64_t moved = free > last_free ? free - last_free : last_free - free;
+			const bool     due   = free >= 1024 * MiB ? now - last_ms >= 10000 : (moved >= 8 * MiB || now - last_ms >= 2000);
+			if (!due) {
+				continue;
+			}
+			const auto totals = CurrentMemoryTotals();
+			Log("memory: %llu MB free of %llu (game in RAM %llu MB, GPU %llu MB, swap file %llu MB)\n", static_cast<unsigned long long>(free / MiB),
+			    static_cast<unsigned long long>(limit / MiB), static_cast<unsigned long long>(totals.game / MiB),
+			    static_cast<unsigned long long>(totals.gpu / MiB), static_cast<unsigned long long>(totals.swapped / MiB));
+			last_free = free;
+			last_ms   = now;
+		}
+	}).detach();
+}
 
 bool IsAmdCpu() {
 	return Common::GetSystemInfo().ProcessorName.find("AMD") != std::string::npos;
@@ -188,6 +239,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.app_memory_usage            = [] { return static_cast<uint64_t>(winrt::Windows::System::MemoryManager::AppMemoryUsage()); };
 		config.app_memory_limit_bytes      = settings.app_memory_limit_mb != 0 ? static_cast<uint64_t>(settings.app_memory_limit_mb) << 20u
 		                                                                       : static_cast<uint64_t>(winrt::Windows::System::MemoryManager::AppMemoryUsageLimit());
+		StartMemoryWatch();
 		Pad::StartAutoPress(settings.auto_press_ms);
 		if (settings.frame_dump_after_s != 0) {
 			std::thread([seconds = settings.frame_dump_after_s] {
