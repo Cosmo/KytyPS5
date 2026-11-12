@@ -121,6 +121,10 @@ PssrUpscaler GetPssrUpscaler() {
 	return g_config->pssr_upscaler;
 }
 
+bool FsrFrameGenerationEnabled() {
+	return g_config->fsr_frame_generation;
+}
+
 const std::filesystem::path& GetDlssFolder() {
 	return g_config->dlss_folder;
 }

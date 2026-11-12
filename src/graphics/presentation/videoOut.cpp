@@ -803,7 +803,11 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		total_wait -= frame_begin - sleep_begin;
 
 		VblankBegin();
+#ifdef KYTY_HAS_FSR
+		bool presented = (Config::FsrFrameGenerationEnabled() && m_presenter.PresentPendingFrame()) || m_flip_queue.Flip();
+#else
 		bool presented = m_flip_queue.Flip();
+#endif
 		if (!presented && m_presenter.NeedsSystemOverlayRefresh()) {
 			if (!m_presenter.PresentLastFrame()) {
 				m_presenter.Present(m_presenter.PrepareBlankFrame(width, height, true));
@@ -1002,9 +1006,9 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 	Graphics::Presenter::Frame* frame = nullptr;
 	if (special) {
 		frame = &m_presenter.PrepareBlankFrame(m_width, m_height,
-		                                       index == VIDEO_OUT_BUFFER_INDEX_BLACK, &buffer);
+		                                       index == VIDEO_OUT_BUFFER_INDEX_BLACK, &buffer, cfg->bus == VIDEO_OUT_BUS_TYPE_MAIN);
 	} else {
-		frame = &m_presenter.PrepareFrame(buffer, source_info, hdr, headset);
+		frame = &m_presenter.PrepareFrame(buffer, source_info, hdr, headset, cfg->bus == VIDEO_OUT_BUS_TYPE_MAIN);
 		if (headset) {
 			g_headset_mirror = true;
 		}
@@ -1078,6 +1082,13 @@ bool FlipQueue::Flip() {
 		return false;
 	}
 	const uint64_t group = owner->id;
+#ifdef KYTY_HAS_FSR
+	const bool interpolation_available = Config::FsrFrameGenerationEnabled() &&
+	    std::none_of(std::next(owner), m_requests.end(), [](const auto& request) {
+		    return request.id == request.group && request.state == RequestState::Ready;
+	    });
+	bool allow_interpolation = false;
+#endif
 	if (std::any_of(m_cpu_requests.begin(), m_cpu_requests.end(),
 	                [group](const auto& r) { return r.group == group; }) ||
 	    std::any_of(m_requests.begin(), m_requests.end(), [group](const auto& r) {
@@ -1112,6 +1123,10 @@ bool FlipQueue::Flip() {
 		due &= r.cfg->generation == r.generation;
 		if (r.id == group) {
 			due &= IsFlipDueLocked(*r.cfg);
+#ifdef KYTY_HAS_FSR
+			allow_interpolation = interpolation_available && r.cfg->bus == VIDEO_OUT_BUS_TYPE_MAIN && r.cfg->flip_status.count > 0 &&
+			                      r.cfg->vblank_status.count - r.cfg->flip_vblank == 2;
+#endif
 		}
 		if (r.cfg->bus == VIDEO_OUT_BUS_TYPE_MAIN &&
 		    g_headset_mirror.load(std::memory_order_relaxed)) {
@@ -1127,7 +1142,11 @@ bool FlipQueue::Flip() {
 			m_presenter.Discard(*hidden);
 		}
 		if (layer_count != 0) {
+#ifdef KYTY_HAS_FSR
+			m_presenter.PresentWithInterpolation(std::span(layers.data(), layer_count), allow_interpolation);
+#else
 			m_presenter.Present(std::span(layers.data(), layer_count));
+#endif
 		}
 		if (requests[0].cfg->bus == 0) {
 			Graphics::PerformanceOverlayRecordFlip(m_width, m_height);
