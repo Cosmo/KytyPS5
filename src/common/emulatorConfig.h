@@ -71,6 +71,8 @@ struct ConfigOptions {
 	bool                   vr_enabled                  = false;
 	bool                   pro_enabled                 = false;
 	PssrUpscaler           pssr_upscaler               = PssrUpscaler::Linear;
+	// (UWP, experimental) AMD FSR 3.1 frame interpolation from the game's PSSR depth and motion: a generated frame between two flips.
+	bool                   fsr_frame_generation        = false;
 	std::filesystem::path  dlss_folder;
 	uint32_t               dlss_preset                 = 0; // 0 is the model default
 	std::filesystem::path  fsr_folder;
@@ -220,6 +222,7 @@ bool     StretchEnabled();
 bool     VrEnabled();
 bool     Ps5ProEnabled();
 PssrUpscaler GetPssrUpscaler();
+bool         FsrFrameGenerationEnabled();
 const std::filesystem::path& GetDlssFolder();
 uint32_t GetDlssPreset();
 const std::filesystem::path& GetFsrFolder();
