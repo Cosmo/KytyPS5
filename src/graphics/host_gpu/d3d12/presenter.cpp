@@ -41,6 +41,11 @@ struct Presenter::Frame {
 	std::array<float, 4>          color        = {0.0f, 0.0f, 0.0f, 1.0f};
 	uint64_t                      present_tick = 0;
 	bool                          busy         = false;
+#ifdef KYTY_HAS_FSR
+	D3D12::ComPtr<ID3D12Resource> generated;
+	uint64_t guest_sequence = 0;
+	bool generated_valid = false;
+#endif
 
 	void Configure(GraphicContext& graphics, uint32_t frame_width, uint32_t frame_height, vk::Format frame_format);
 	void Transition(ID3D12GraphicsCommandList* list, D3D12_RESOURCE_STATES after);
@@ -402,7 +407,7 @@ public:
 	[[nodiscard]] bool Ready() const noexcept { return m_root_signature != nullptr; }
 
 	void Record(ID3D12GraphicsCommandList* list, const Presenter::Frame& frame, D3D12_CPU_DESCRIPTOR_HANDLE target, const D3D12_RECT& rect,
-	            bool overlay, bool premultiplied) {
+	            bool overlay, bool premultiplied, ID3D12Resource* generated = nullptr) {
 		const auto width  = static_cast<uint32_t>(rect.right - rect.left);
 		const auto height = static_cast<uint32_t>(rect.bottom - rect.top);
 		if (!Ready()) {
@@ -416,11 +421,11 @@ public:
 		cpu.ptr += static_cast<SIZE_T>(slot) * m_increment;
 		gpu.ptr += static_cast<UINT64>(slot) * m_increment;
 		D3D12_SHADER_RESOURCE_VIEW_DESC view {};
-		view.Format                  = frame.format.view;
+		view.Format                  = generated ? DXGI_FORMAT_R8G8B8A8_UNORM : frame.format.view;
 		view.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
-		view.Shader4ComponentMapping = frame.format.mapping;
+		view.Shader4ComponentMapping = generated ? D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING : frame.format.mapping;
 		view.Texture2D.MipLevels     = 1;
-		m_device->CreateShaderResourceView(frame.image.Get(), &view, cpu);
+		m_device->CreateShaderResourceView(generated ? generated : frame.image.Get(), &view, cpu);
 
 		D3D12::VertexRuntimeData runtime {};
 		runtime.yz_flip_mask    = 1;
@@ -478,7 +483,7 @@ struct Presenter::Impl {
 		frames.Initialize(Swapchain::BufferCount);
 	}
 
-	void Present();
+	void Present(bool interpolate = false);
 
 	Image& ResolveSurface(const ImageInfo& info) {
 		TextureCache::ImageDesc desc {};
@@ -502,6 +507,10 @@ struct Presenter::Impl {
 	FramePool            frames;
 	Common::Mutex        present_mutex;
 	std::array<Layer, 2> layers {};
+#ifdef KYTY_HAS_FSR
+	uint64_t guest_sequence = 0;
+	bool real_frame_pending = false;
+#endif
 };
 
 Presenter::Presenter(WindowContext& window): m_impl(std::make_unique<Impl>(window)) {}
@@ -511,13 +520,18 @@ Presenter::~Presenter() {
 }
 
 Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info, bool hdr,
-                                          bool /*headset*/) {
+                                          bool /*headset*/, [[maybe_unused]] bool main_bus) {
 	KYTY_PROFILER_FUNCTION();
 	// No HDR output here (IsHdrSupported): an HDR10 frame is converted to SDR when it is shown (FrameBlitter::Record).
 	// (No headset either: the OpenXR output is Vulkan only, and the headset port shows like the main one.)
 	EXIT_IF(buffer.IsInvalid());
 	auto*             frame = m_impl->frames.Acquire();
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
+#ifdef KYTY_HAS_FSR
+	frame->generated_valid = false;
+	frame->guest_sequence = main_bus ? ++m_impl->guest_sequence : 0;
+	auto* fx = main_bus ? m_impl->renderer.GetFidelityFx() : nullptr;
+#endif
 	auto&             image        = m_impl->ResolveSurface(info);
 	auto              frame_format = info.pixel_format;
 	switch (frame_format) {
@@ -529,6 +543,11 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 		// An image the backend cannot hold (an unsupported format): the frame stays black.
 		frame->blank = true;
 		frame->color = {0.0f, 0.0f, 0.0f, 1.0f};
+#ifdef KYTY_HAS_FSR
+		if (fx && Config::FsrFrameGenerationEnabled()) {
+			fx->SkipFlip();
+		}
+#endif
 		return *frame;
 	}
 	frame->Configure(m_impl->window.graphic_ctx, image.backing.extent.width, image.backing.extent.height, frame_format);
@@ -536,17 +555,46 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	frame->blank  = false;
 	frame->hdr    = hdr;
 	frame->linear = frame_format == vk::Format::eR16G16B16A16Sfloat;
+#ifdef KYTY_HAS_FSR
+	if (fx && Config::FsrFrameGenerationEnabled()) {
+		frame->generated_valid = fx->Interpolate(buffer, frame->image.Get(), frame->format.view,
+		                                         hdr || frame->linear, frame->generated);
+	}
+#endif
 	return *frame;
 }
 
-Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t /*width*/, uint32_t /*height*/, bool opaque, CommandBuffer* /*producer*/) {
+Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t /*width*/, uint32_t /*height*/, bool opaque, [[maybe_unused]] CommandBuffer* producer, [[maybe_unused]] bool main_bus) {
 	KYTY_PROFILER_FUNCTION();
 	auto* frame  = m_impl->frames.Acquire();
+#ifdef KYTY_HAS_FSR
+	frame->generated_valid = false;
+	frame->guest_sequence = 0;
+	if (main_bus && producer) {
+		Common::LockGuard lock(m_impl->renderer.GetMutex());
+		frame->guest_sequence = ++m_impl->guest_sequence;
+		if (auto* fx = m_impl->renderer.GetFidelityFx(); fx && Config::FsrFrameGenerationEnabled()) {
+			fx->SkipFlip();
+		}
+	}
+#endif
 	frame->blank = true;
 	frame->hdr   = false;
 	frame->color = {0.0f, 0.0f, 0.0f, opaque ? 1.0f : 0.0f};
 	return *frame;
 }
+
+#ifdef KYTY_HAS_FSR
+bool Presenter::PresentPendingFrame() {
+	Common::LockGuard lock(m_impl->present_mutex);
+	if (!m_impl->real_frame_pending) {
+		return false;
+	}
+	m_impl->real_frame_pending = false;
+	m_impl->Present();
+	return true;
+}
+#endif
 
 bool Presenter::PresentLastFrame() {
 	Common::LockGuard lock(m_impl->present_mutex);
@@ -575,11 +623,24 @@ void Presenter::Present(Frame& frame) {
 }
 
 void Presenter::Present(std::span<const Layer> layers) {
+#ifdef KYTY_HAS_FSR
+	PresentWithInterpolation(layers, false);
+}
+
+void Presenter::PresentWithInterpolation(std::span<const Layer> layers, bool allow_interpolation) {
+#endif
 	Common::LockGuard lock(m_impl->present_mutex);
+	bool interpolate = false;
 	for (const auto& layer: layers) {
 		EXIT_IF(layer.bus < 0 || layer.bus >= static_cast<int>(m_impl->layers.size()));
 		m_impl->frames.ValidateForPresent(layer.frame);
 		auto& previous = m_impl->layers[layer.bus];
+#ifdef KYTY_HAS_FSR
+		if (layer.bus == 0) {
+			interpolate = allow_interpolation && !m_impl->real_frame_pending && layer.frame->generated_valid &&
+			              previous.frame && previous.frame->guest_sequence + 1 == layer.frame->guest_sequence;
+		}
+#endif
 		if (previous.frame != nullptr) {
 			m_impl->frames.Release(previous.frame);
 		}
@@ -588,7 +649,10 @@ void Presenter::Present(std::span<const Layer> layers) {
 			FrameResolution::NoteOutput(layer.frame->width, layer.frame->height);
 		}
 	}
-	m_impl->Present();
+#ifdef KYTY_HAS_FSR
+	m_impl->real_frame_pending = interpolate;
+#endif
+	m_impl->Present(interpolate);
 }
 
 void Presenter::ClearLayer(int bus) {
@@ -597,13 +661,18 @@ void Presenter::ClearLayer(int bus) {
 	}
 	Common::LockGuard lock(m_impl->present_mutex);
 	auto&             layer = m_impl->layers[bus];
+#ifdef KYTY_HAS_FSR
+	if (bus == 0) {
+		m_impl->real_frame_pending = false;
+	}
+#endif
 	if (layer.frame != nullptr) {
 		m_impl->frames.Release(layer.frame);
 		layer = {};
 	}
 }
 
-void Presenter::Impl::Present() {
+void Presenter::Impl::Present([[maybe_unused]] bool interpolate) {
 	KYTY_PROFILER_FUNCTION();
 
 	if (swapchain.NeedsResize()) {
@@ -632,7 +701,23 @@ void Presenter::Impl::Present() {
 			if (!full_screen) {
 				list->ClearRenderTargetView(target, black.data(), 0, nullptr);
 			}
-			blitter.Record(list, *base, target, game_rect, false, true);
+			ID3D12Resource* generated = nullptr;
+#ifdef KYTY_HAS_FSR
+			if (interpolate) {
+				generated = base->generated.Get();
+				D3D12_RESOURCE_BARRIER barrier {};
+				barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+				barrier.Transition = {generated, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+				                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+				list->ResourceBarrier(1, &barrier);
+				blitter.Record(list, *base, target, game_rect, false, true, generated);
+				std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+				list->ResourceBarrier(1, &barrier);
+			}
+#endif
+			if (!generated) {
+				blitter.Record(list, *base, target, game_rect, false, true);
+			}
 		}
 		if (overlay != nullptr) {
 			if (!overlay->blank) {
