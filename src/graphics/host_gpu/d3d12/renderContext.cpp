@@ -34,7 +34,7 @@ RenderContext::~RenderContext() {
 void RenderContext::InitializeGpu(VideoOut::VideoOutDriver* video_out) {
 	EXIT_IF(m_gpu != nullptr);
 #ifdef KYTY_HAS_FSR
-	if (Config::GetPssrUpscaler() == Config::PssrUpscaler::FSR) {
+	if (Config::GetPssrUpscaler() == Config::PssrUpscaler::FSR || Config::FsrFrameGenerationEnabled()) {
 		m_fidelityfx = std::make_unique<FidelityFx>(*this);
 	}
 #endif
