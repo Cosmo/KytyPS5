@@ -88,6 +88,8 @@ void RenderExecutor::ProcessPssr(CommandBuffer& buffer, const Pssr::Request& req
 		}
 		binding.image_view = cache.FindTexture(binding.image_id, binding.desc);
 	};
+	// The overlay's Generated row: frame generation needs PSSR.
+	FrameResolution::NotePssr();
 #ifdef KYTY_HAS_FSR
 	auto*      fx  = m_context.GetFidelityFx();
 	const bool fsr = Config::GetPssrUpscaler() == Config::PssrUpscaler::FSR;
