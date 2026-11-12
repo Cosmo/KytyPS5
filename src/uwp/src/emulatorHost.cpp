@@ -189,6 +189,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.pro_enabled               = settings.pro_mode;
 #ifdef KYTY_HAS_FSR
 		config.pssr_upscaler = settings.pssr_upscaler == "FSR" ? Config::PssrUpscaler::FSR : Config::PssrUpscaler::Linear;
+		config.fsr_frame_generation = settings.fsr_frame_generation;
 #endif
 		config.guest_tsc_enabled         = settings.guest_tsc;
 		config.readback_linear_images    = settings.readback_linear_images;
