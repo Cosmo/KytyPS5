@@ -1181,6 +1181,12 @@ static bool SelfTestSub64SharedPlaceholderAlias() {
 
 static int ReplaceFixedRangeWithReserved(uint64_t start, uint64_t size);
 
+// A guest memory call the kernel refuses, in the log of every build: the call, why, and its arguments.
+static int LogRefused(int result, const char* call, const char* reason, const std::string& arguments) {
+	Log::WriteToConsoleAndLog(fmt::format("Kernel: {} refused, {} (0x{:08x}): {}\n", call, reason, static_cast<uint32_t>(result), arguments));
+	return result;
+}
+
 void Initialize() {
 	const auto params = Loader::SystemContentGetMemoryParams();
 	if (params.flexible_size != 0) {
@@ -2334,7 +2340,8 @@ int AllocateDirectMemory(int64_t search_start, int64_t search_end, size_t len, s
 	if (search_start < 0 || search_end <= search_start || len == 0 ||
 	    (len & (PAGE_SIZE - 1u)) != 0 || (alignment != 0 && (alignment & (PAGE_SIZE - 1u)) != 0) ||
 	    phys_addr_out == nullptr) {
-		return KERNEL_ERROR_EINVAL;
+		return LogRefused(KERNEL_ERROR_EINVAL, "AllocateDirectMemory", "arguments",
+		                  fmt::format("search 0x{:x}-0x{:x}, len 0x{:x}, align 0x{:x}, type {}", search_start, search_end, len, alignment, memory_type));
 	}
 
 	uint64_t addr = 0;
@@ -2343,7 +2350,8 @@ int AllocateDirectMemory(int64_t search_start, int64_t search_end, size_t len, s
 	if (!g_physical_memory->Alloc(search_start, search_end, len, alignment, &addr, memory_type,
 	                              kind)) {
 		LOGF_COLOR(Log::Color::Red, "\t[Fail]\n");
-		return KERNEL_ERROR_EAGAIN;
+		return LogRefused(KERNEL_ERROR_EAGAIN, "AllocateDirectMemory", "no free range",
+		                  fmt::format("search 0x{:x}-0x{:x}, len 0x{:x}, align 0x{:x}, type {}", search_start, search_end, len, alignment, memory_type));
 	}
 
 	*phys_addr_out = static_cast<int64_t>(addr);
@@ -2464,15 +2472,20 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 	constexpr uint64_t PAGE_SIZE              = 0x4000;
 	constexpr int      GUEST_MAP_FIXED        = 0x10;
 	constexpr int      GUEST_MAP_NO_OVERWRITE = 0x80;
+	const auto refuse = [&](int result, const char* reason) {
+		return LogRefused(result, "MapDirectMemory", reason,
+		                  fmt::format("addr 0x{:x}, len 0x{:x}, dmem 0x{:x}, align 0x{:x}, flags 0x{:x}, prot 0x{:x}",
+		                              reinterpret_cast<uint64_t>(*addr), len, direct_memory_start, alignment, flags, prot));
+	};
 
 	if (len == 0 || (len & (PAGE_SIZE - 1u)) != 0 || direct_memory_start < 0 ||
 	    (static_cast<uint64_t>(direct_memory_start) & (PAGE_SIZE - 1u)) != 0 ||
 	    (alignment != 0 && (alignment & (alignment - 1u)) != 0 &&
 	     (alignment & (PAGE_SIZE - 1u)) != 0)) {
-		return KERNEL_ERROR_EINVAL;
+		return refuse(KERNEL_ERROR_EINVAL, "length, start or alignment not in 16 KB pages");
 	}
 	if ((prot & PROT_CPU_EXEC) != 0) {
-		return KERNEL_ERROR_EACCES;
+		return refuse(KERNEL_ERROR_EACCES, "executable");
 	}
 
 	bool fixed        = ((flags & GUEST_MAP_FIXED) != 0);
@@ -2481,10 +2494,10 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 	VirtualMemory::Mode mode     = VirtualMemory::Mode::NoAccess;
 
 	if (!DecodeMemoryProtection(prot, &mode)) {
-		return KERNEL_ERROR_EINVAL;
+		return refuse(KERNEL_ERROR_EINVAL, "protection");
 	}
 	if (!g_physical_memory->CanMapDirect(static_cast<uint64_t>(direct_memory_start), len)) {
-		return KERNEL_ERROR_ENOMEM;
+		return refuse(KERNEL_ERROR_ENOMEM, "direct memory not allocated");
 	}
 
 	auto                              in_addr        = reinterpret_cast<uint64_t>(*addr);
@@ -2502,10 +2515,10 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 	if (fixed) {
 		if (in_addr == 0 || (in_addr & (PAGE_SIZE - 1u)) != 0 ||
 		    (alignment != 0 && in_addr % alignment != 0)) {
-			return KERNEL_ERROR_EINVAL;
+			return refuse(KERNEL_ERROR_EINVAL, "fixed address not aligned");
 		}
 		if (no_overwrite && g_virtual_ranges->HasOverlap(in_addr, len)) {
-			return KERNEL_ERROR_ENOMEM;
+			return refuse(KERNEL_ERROR_ENOMEM, "fixed range in use");
 		}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
@@ -2573,7 +2586,7 @@ static int MapDirectMemory(void** addr, size_t len, int prot, int flags,
 	     GuestBackingStore::GetFailureReasonName(shared_failure));
 
 	if (out_addr == 0) {
-		return KERNEL_ERROR_ENOMEM;
+		return refuse(KERNEL_ERROR_ENOMEM, GuestBackingStore::GetFailureReasonName(shared_failure));
 	}
 
 	PhysicalMemory::AllocatedBlock mapped_block {};
@@ -2707,10 +2720,12 @@ int KYTY_SYSV_ABI KernelQueryMemoryProtection(void* addr, void** start, void** e
 static int ReplaceFixedRangeWithReserved(uint64_t start, uint64_t size) {
 	std::vector<VirtualRanges::Range> ranges;
 	g_virtual_ranges->QueryFragments(start, size, &ranges);
-	if (!g_guest_address_space->Owns(start, size) ||
-	    std::any_of(ranges.begin(), ranges.end(),
-	                [](const auto& range) { return range.type == VirtualRangeType::Pooled; })) {
-		return KERNEL_ERROR_EINVAL;
+	const auto arguments = [&] { return fmt::format("0x{:x}, 0x{:x} bytes", start, size); };
+	if (!g_guest_address_space->Owns(start, size)) {
+		return LogRefused(KERNEL_ERROR_EINVAL, "a fixed mapping", "not all in the guest address space", arguments());
+	}
+	if (std::any_of(ranges.begin(), ranges.end(), [](const auto& range) { return range.type == VirtualRangeType::Pooled; })) {
+		return LogRefused(KERNEL_ERROR_EINVAL, "a fixed mapping", "it covers pooled memory", arguments());
 	}
 	UnmapGpuRanges(ranges);
 	for (const auto& range: ranges) {
