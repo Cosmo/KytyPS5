@@ -1,6 +1,6 @@
 # Xbox changes to KytyPS5
 
-KytyPS5 (upstream `KytyPS5/KytyPS5` at `bc934ef03`) plus what it takes to run on the Xbox Series X: a UWP app with a D3D12 renderer. This branch (`xbox-on-upstream-2026-11-11-bc934ef0`) has one commit per topic, and each commit adds its row below, so the series can be read, tried and moved to a newer upstream one commit at a time.
+KytyPS5 (upstream `KytyPS5/KytyPS5` at `11d834dd8`) plus what it takes to run on the Xbox Series X: a UWP app with a D3D12 renderer. This branch (`xbox-on-upstream-2026-11-14-11d834dd`) has one commit per topic, and each commit adds its row below, so the series can be read, tried and moved to a newer upstream one commit at a time.
 
 The "Checked" column says how a change was checked when it was made, before the work was regrouped into this series.
 
@@ -142,4 +142,5 @@ Guards G1 to G15 of the research are applied as `docs/d3d12-backend.md` lists, e
 - **G3** (uint view of a BC texture) and **G7** (stencil plane copy to a buffer): not handled specially; not run on the console.
 - **G5** and **G13**: nothing in the shaders of the test game needed them, so they are neither applied nor tried.
 - **Tessellation**: the renderer reports it once and skips those draws. Mesh programs run as compute shaders where the device has no mesh shaders (see the change list).
+- **Native ray tracing**: upstream's `--native-rt` (eb3e86d5a), which mirrors the games' BVHs into Vulkan acceleration structures, is not in the D3D12 renderer: UWP apps on the Xbox have no DirectX Raytracing.
 - **Shader model 6.6 heap indexing**: below 6.6 (the Series X has 6.4) shaders read guest memory by address through a table of buffers instead (see the change list).
