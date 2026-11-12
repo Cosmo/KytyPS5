@@ -27,15 +27,19 @@ public:
 	KYTY_CLASS_NO_COPY(Presenter);
 
 	[[nodiscard]] Frame&         PrepareFrame(CommandBuffer& command, const ImageInfo& info,
-	                                          bool hdr = false, bool headset = false);
+	                                          bool hdr = false, bool headset = false, bool main_bus = false);
 	[[nodiscard]] Frame&         PrepareBlankFrame(uint32_t width, uint32_t height, bool opaque,
-	                                               CommandBuffer* producer = nullptr);
+	                                               CommandBuffer* producer = nullptr, bool main_bus = false);
 	[[nodiscard]] bool           PresentLastFrame();
 	[[nodiscard]] bool           IsHdrSupported() const noexcept;
 	[[nodiscard]] bool           NeedsSystemOverlayRefresh() const noexcept;
 	[[nodiscard]] RenderContext& Renderer() const noexcept;
 	void                         Present(Frame& frame);
 	void                         Present(std::span<const Layer> layers);
+#ifdef KYTY_HAS_FSR
+	void PresentWithInterpolation(std::span<const Layer> layers, bool allow_interpolation);
+	[[nodiscard]] bool PresentPendingFrame();
+#endif
 	void                         ClearLayer(int bus);
 	void                         Discard(Frame& frame);
 
