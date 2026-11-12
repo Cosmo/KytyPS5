@@ -405,6 +405,9 @@ add_gpu_blit_shader(gpu_bvh_mirror gpu_bvh_mirror.comp)
 add_gpu_blit_shader(gpu_bvh_walk gpu_bvh_mirror.comp -DWALK=1)
 if(KYTY_BUILD_UWP)
 	add_gpu_blit_shader(gpu_pssr_input gpu_pssr_input.comp)
+	# AMD FidelityFX FSR 1 (3rdparty/fidelityfx-fsr, MIT) in the D3D12 presenter.
+	add_gpu_blit_shader(gpu_blit_fsr1_easu gpu_blit_fsr1_easu.frag "-I${KYTY_THIRD_PARTY_DIR}/fidelityfx-fsr")
+	add_gpu_blit_shader(gpu_blit_fsr1_rcas gpu_blit_fsr1_rcas.frag "-I${KYTY_THIRD_PARTY_DIR}/fidelityfx-fsr")
 endif()
 # At SPIR-V 1.6 glslang declares a task shader's workgroup size with LocalSizeId, which needs maintenance4.
 add_gpu_blit_shader(gpu_mesh_indirect gpu_mesh_indirect.task --target-env spirv1.5)

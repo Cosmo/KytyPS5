@@ -191,6 +191,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.pssr_upscaler = settings.pssr_upscaler == "FSR" ? Config::PssrUpscaler::FSR : Config::PssrUpscaler::Linear;
 		config.fsr_frame_generation = settings.fsr_frame_generation;
 #endif
+		config.fsr1_upscaling = settings.fsr1_upscaling == "High" ? 3 : settings.fsr1_upscaling == "Medium" ? 2 : settings.fsr1_upscaling == "Low" ? 1 : 0;
 		config.guest_tsc_enabled         = settings.guest_tsc;
 		config.readback_linear_images    = settings.readback_linear_images;
 		config.lod_stats_enabled         = settings.lod_stats;
