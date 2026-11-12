@@ -131,6 +131,9 @@ struct AppSettings {
 	bool occlusion_queries = false;
 	// The settings page, Testing: upstream's --relaxed-shader-float, the GPU's own float operations in shaders (Config::relaxed_shader_float). Off.
 	bool relaxed_shader_float = false;
+	// The settings page, Testing: upstream's --pssr-upscaler, how PS5 Pro mode upscales PSSR: "Linear" (upstream's default) or "FSR" (AMD
+	// FSR 3.1, built from the FidelityFX SDK's MIT source). Linear.
+	std::string pssr_upscaler = "Linear";
 	// Number of draws between host GPU submissions. Zero uses normal batching.
 	uint32_t flush_draws = 0;
 	// Debugging, only in the file: ask for a frame dump this many seconds after the game started (0: never; the game menu has Save frame dump).

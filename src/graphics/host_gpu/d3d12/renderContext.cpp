@@ -33,6 +33,11 @@ RenderContext::~RenderContext() {
 
 void RenderContext::InitializeGpu(VideoOut::VideoOutDriver* video_out) {
 	EXIT_IF(m_gpu != nullptr);
+#ifdef KYTY_HAS_FSR
+	if (Config::GetPssrUpscaler() == Config::PssrUpscaler::FSR) {
+		m_fidelityfx = std::make_unique<FidelityFx>(*this);
+	}
+#endif
 	m_video_out = video_out;
 	m_gpu       = std::make_unique<GuestGpu>(*this);
 }
@@ -47,6 +52,9 @@ void RenderContext::ShutdownGpu() {
 			m_command_scheduler.Finish();
 		}
 		m_command_scheduler.DrainPriorityOperations();
+#ifdef KYTY_HAS_FSR
+		m_fidelityfx.reset();
+#endif
 		m_video_out = nullptr;
 	}
 }
