@@ -1,7 +1,9 @@
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/threads.h"
 #include "gpu_blit_shaders/gpu_pssr_linear_spv.h"
 #include "graphics/guest_gpu/pssr.h"
+#include "graphics/host_gpu/frameResolution.h"
 #include "graphics/host_gpu/d3d12/computeKernels.h"
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
 #include "graphics/host_gpu/d3d12/render.h"
@@ -9,6 +11,8 @@
 #include "graphics/shader/shaderBindings.h"
 
 #include <algorithm>
+#include <array>
+#include <optional>
 #include <cstring>
 
 // Upstream's linear PSSR (renderer/renderPssr.cpp) on D3D12: the same checks and the same kernel (gpu_pssr_linear.comp), run as one of
@@ -84,6 +88,30 @@ void RenderExecutor::ProcessPssr(CommandBuffer& buffer, const Pssr::Request& req
 		}
 		binding.image_view = cache.FindTexture(binding.image_id, binding.desc);
 	};
+#ifdef KYTY_HAS_FSR
+	auto*      fx  = m_context.GetFidelityFx();
+	const bool fsr = Config::GetPssrUpscaler() == Config::PssrUpscaler::FSR;
+	const bool temporal = fx && fx->BeginPssr(request, parameters.output_size[0], parameters.output_size[1]);
+	const std::array<const uint32_t*, 3> temporal_words {request.depth, request.motion, request.exposure};
+	std::array<std::optional<TextureBinding>, 3> temporal_bindings;
+	if (temporal) {
+		for (size_t i = 0; i < temporal_words.size(); ++i) {
+			ShaderTextureResource descriptor {};
+			std::copy_n(temporal_words[i], 8, descriptor.fields);
+			if (descriptor.IsNull() || (descriptor.Type() != Prospero::ImageType::kColor2D &&
+			                            descriptor.Type() != Prospero::ImageType::kColor2DArray)) {
+				continue;
+			}
+			temporal_bindings[i] = resolve(temporal_words[i], false);
+			BindImage(temporal_bindings[i]->image_id, false);
+		}
+	}
+	for (size_t i = 0; i < temporal_bindings.size(); ++i) {
+		if (temporal_bindings[i]) {
+			acquire(*temporal_bindings[i], temporal_words[i], false);
+		}
+	}
+#endif
 	acquire(input, request.input, false);
 	acquire(output, request.output, true);
 	auto&       source           = cache.GetImage(input.image_id);
@@ -100,10 +128,61 @@ void RenderExecutor::ProcessPssr(CommandBuffer& buffer, const Pssr::Request& req
 	           input.image_view);
 	destination.Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
 	                ImageSubresourceRange {destination_view.base_level, 1, destination_view.base_layer, 1}, output.image_view);
+	auto input_srv = source.ShaderResourceView(input.image_view);
+#ifdef KYTY_HAS_FSR
+	D3D12_CPU_DESCRIPTOR_HANDLE upscaled {};
+	if (temporal) {
+		using Input = FidelityFx::Input;
+		const auto copy_input = [&](Input slot, const TextureBinding& binding) {
+			auto& image = cache.GetImage(binding.image_id);
+			const auto& view = binding.desc.view_info;
+			const uint32_t extent_x = image.backing.extent.width >> view.base_level;
+			const uint32_t extent_y = image.backing.extent.height >> view.base_level;
+			const bool exposure = slot == Input::Exposure;
+			const uint32_t width = exposure ? 1 : request.width;
+			const uint32_t height = exposure ? 1 : request.height;
+			// Depth or motion may already be cropped to the requested render rectangle.
+			const bool cropped = slot != Input::Color && extent_x == width && extent_y == height;
+			const uint32_t x = exposure || cropped ? 0 : request.x;
+			const uint32_t y = exposure || cropped ? 0 : request.y;
+			if (image.backing.samples != 1 || width > extent_x || height > extent_y || x > extent_x - width ||
+			    y > extent_y - height || binding.image_id == output.image_id ||
+			    !image.ShaderResourceView(binding.image_view).ptr) {
+				return false;
+			}
+			image.Use(buffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+			          ImageSubresourceRange {view.base_level, 1, view.base_layer, 1}, binding.image_view);
+			return fx->CopyInput(buffer, slot, image.ShaderResourceView(binding.image_view), width, height, x, y);
+		};
+		const bool has_motion_and_depth = temporal_bindings[0] && temporal_bindings[1] &&
+		                                  copy_input(Input::Depth, *temporal_bindings[0]) &&
+		                                  copy_input(Input::Motion, *temporal_bindings[1]);
+		if (has_motion_and_depth && fsr) {
+			copy_input(Input::Color, input);
+			if (temporal_bindings[2] && (request.flags & Pssr::kAutoExposure) == 0) {
+				copy_input(Input::Exposure, *temporal_bindings[2]);
+			}
+		}
+		if (fsr) {
+			upscaled = fx->Upscale(buffer);
+			if (upscaled.ptr) {
+				input_srv = upscaled;
+				std::copy_n(parameters.output_size, 2, parameters.input_size);
+				// The overlay's Scaled row says FSR.
+				FrameResolution::NoteFsrUpscale();
+			}
+		}
+	}
+#endif
 	uint32_t constants[sizeof(PssrParameters) / sizeof(uint32_t)] {};
 	std::memcpy(constants, &parameters, sizeof(parameters));
-	kernels.DispatchImages(buffer, pipeline, source.ShaderResourceView(input.image_view), destination.UnorderedAccessView(output.image_view),
+	kernels.DispatchImages(buffer, pipeline, input_srv, destination.UnorderedAccessView(output.image_view),
 	                       constants, (parameters.output_size[0] + 7) / 8, (parameters.output_size[1] + 7) / 8, 1);
+#ifdef KYTY_HAS_FSR
+	if (upscaled.ptr) {
+		fx->FinishUpscale(buffer);
+	}
+#endif
 	ResetBindings();
 }
 
