@@ -7,6 +7,8 @@
 #include "common/profiler.h"
 #include "common/threads.h"
 #include "gpu_blit_shaders/gpu_blit_fs_triangle_spv.h"
+#include "gpu_blit_shaders/gpu_blit_fsr1_easu_spv.h"
+#include "gpu_blit_shaders/gpu_blit_fsr1_rcas_spv.h"
 #include "gpu_blit_shaders/gpu_blit_present_spv.h"
 #include "graphics/host_gpu/frameResolution.h"
 #include "graphics/host_gpu/d3d12/d3d12Common.h"
@@ -20,8 +22,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -463,6 +467,270 @@ private:
 	uint32_t                            m_next      = 0;
 };
 
+uint32_t FloatBits(float value) {
+	uint32_t bits = 0;
+	std::memcpy(&bits, &value, sizeof(bits));
+	return bits;
+}
+
+// FsrEasuCon in ffx_fsr1.h for the whole input image.
+std::array<uint32_t, 16> EasuConstants(float input_width, float input_height, float output_width, float output_height) {
+	return {FloatBits(input_width / output_width),
+	        FloatBits(input_height / output_height),
+	        FloatBits(0.5f * input_width / output_width - 0.5f),
+	        FloatBits(0.5f * input_height / output_height - 0.5f),
+	        FloatBits(1.0f / input_width),
+	        FloatBits(1.0f / input_height),
+	        FloatBits(1.0f / input_width),
+	        FloatBits(-1.0f / input_height),
+	        FloatBits(-1.0f / input_width),
+	        FloatBits(2.0f / input_height),
+	        FloatBits(1.0f / input_width),
+	        FloatBits(2.0f / input_height),
+	        FloatBits(0.0f),
+	        FloatBits(4.0f / input_height),
+	        0,
+	        0};
+}
+
+// FsrRcasCon in ffx_fsr1.h (its packed half values are for the 16-bit shader, which is not used); then the top left of the picture on the swap chain
+// (gpu_blit_fsr1_rcas.frag).
+std::array<uint32_t, 16> RcasConstants(float sharpness, uint32_t left, uint32_t top) {
+	return {FloatBits(std::exp2(-sharpness)), 0, 0, 0, left, top, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+}
+
+// RCAS's sharpness in stops below its maximum for Config::fsr1_upscaling 1..3 (low, medium, high); AMD's samples use 0.25.
+float Fsr1Sharpness(uint32_t mode) {
+	return mode >= 3 ? 0.0f : mode == 2 ? 0.25f : 1.0f;
+}
+
+// Experiment: AMD FidelityFX FSR 1 (3rdparty/fidelityfx-fsr, MIT) instead of the blitter for game pictures smaller than their place on the screen: its
+// edge adaptive upsampling (EASU) scales the picture into a texture of that place's size, and its robust contrast adaptive sharpening (RCAS) draws that
+// onto the swap chain. Both are fullscreen triangles like the blitter's (32-bit: the Series X has no 16-bit shader ops).
+class Fsr1Scaler final {
+public:
+	Fsr1Scaler(GraphicContext& graphics, const D3D12::DxilCompiler& compiler): m_device(graphics.device) {
+		using Kind = D3D12::LinkedStage::Kind;
+		const D3D12::LinkedStage easu[] {{GPU_BLIT_FS_TRIANGLE_SPV, Kind::Vertex, true}, {GPU_BLIT_FSR1_EASU_SPV, Kind::Pixel}};
+		const D3D12::LinkedStage rcas[] {{GPU_BLIT_FS_TRIANGLE_SPV, Kind::Vertex, true}, {GPU_BLIT_FSR1_RCAS_SPV, Kind::Pixel}};
+		const auto               easu_shaders = compiler.CompileLinked(easu, 0);
+		const auto               rcas_shaders = compiler.CompileLinked(rcas, 0);
+		if (!easu_shaders[0].IsValid() || !easu_shaders[1].IsValid() || !rcas_shaders[0].IsValid() || !rcas_shaders[1].IsValid()) {
+			Log::WriteToConsoleAndLog("FSR 1: its shaders could not be translated; pictures are scaled without it\n");
+			return;
+		}
+
+		// As the blitter's, with FSR's 16 constants.
+		D3D12_DESCRIPTOR_RANGE1 range {};
+		range.RangeType      = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+		range.NumDescriptors = 1;
+		D3D12_ROOT_PARAMETER1 parameters[3] {};
+		parameters[0].ParameterType            = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+		parameters[0].Constants.Num32BitValues = D3D12::RuntimeDataDwords;
+		parameters[0].Constants.RegisterSpace  = D3D12::RuntimeDataSpace;
+		parameters[1].ParameterType            = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+		parameters[1].Constants.Num32BitValues = 16;
+		parameters[1].Constants.RegisterSpace  = D3D12::PushConstantSpace;
+		parameters[1].ShaderVisibility         = D3D12_SHADER_VISIBILITY_PIXEL;
+		parameters[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+		parameters[2].DescriptorTable.NumDescriptorRanges = 1;
+		parameters[2].DescriptorTable.pDescriptorRanges   = &range;
+		parameters[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+		D3D12_STATIC_SAMPLER_DESC sampler {};
+		sampler.Filter           = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+		sampler.AddressU         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+		sampler.AddressV         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+		sampler.AddressW         = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+		sampler.MaxLOD           = D3D12_FLOAT32_MAX;
+		sampler.ShaderRegister   = 1;
+		sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+		D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc {};
+		desc.Version                    = D3D_ROOT_SIGNATURE_VERSION_1_1;
+		desc.Desc_1_1.NumParameters     = 3;
+		desc.Desc_1_1.pParameters       = parameters;
+		desc.Desc_1_1.NumStaticSamplers = 1;
+		desc.Desc_1_1.pStaticSamplers   = &sampler;
+		D3D12::ComPtr<ID3DBlob> blob;
+		D3D12::ComPtr<ID3DBlob> error;
+		if (FAILED(D3D12SerializeVersionedRootSignature(&desc, &blob, &error)) ||
+		    FAILED(m_device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&m_root_signature)))) {
+			Log::WriteToConsoleAndLog("FSR 1: no root signature; pictures are scaled without it\n");
+			m_root_signature.Reset();
+			return;
+		}
+
+		for (int pass = 0; pass < 2; pass++) {
+			const auto&                        shaders = pass == 0 ? easu_shaders : rcas_shaders;
+			D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline {};
+			pipeline.pRootSignature                  = m_root_signature.Get();
+			pipeline.VS                              = {shaders[0].bytecode.data(), shaders[0].bytecode.size()};
+			pipeline.PS                              = {shaders[1].bytecode.data(), shaders[1].bytecode.size()};
+			pipeline.BlendState.RenderTarget[0]      = {FALSE,
+			                                            FALSE,
+			                                            D3D12_BLEND_ONE,
+			                                            D3D12_BLEND_ZERO,
+			                                            D3D12_BLEND_OP_ADD,
+			                                            D3D12_BLEND_ONE,
+			                                            D3D12_BLEND_ZERO,
+			                                            D3D12_BLEND_OP_ADD,
+			                                            D3D12_LOGIC_OP_NOOP,
+			                                            D3D12_COLOR_WRITE_ENABLE_ALL};
+			pipeline.SampleMask                      = UINT_MAX;
+			pipeline.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+			pipeline.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+			pipeline.RasterizerState.DepthClipEnable = TRUE;
+			pipeline.DepthStencilState.DepthFunc     = D3D12_COMPARISON_FUNC_ALWAYS;
+			pipeline.DepthStencilState.FrontFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
+			pipeline.DepthStencilState.BackFace  = pipeline.DepthStencilState.FrontFace;
+			pipeline.PrimitiveTopologyType       = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+			pipeline.NumRenderTargets            = 1;
+			pipeline.RTVFormats[0]               = Swapchain::Format;
+			pipeline.SampleDesc.Count            = 1;
+			if (FAILED(m_device->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(&m_pipelines[pass])))) {
+				Log::WriteToConsoleAndLog("FSR 1: no pipeline; pictures are scaled without it\n");
+				m_root_signature.Reset();
+				return;
+			}
+		}
+
+		D3D12_DESCRIPTOR_HEAP_DESC heap {};
+		heap.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+		heap.NumDescriptors = Slots;
+		heap.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+		D3D12::Check(m_device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&m_views)), "create the FSR 1 view heap");
+		m_increment = m_device->GetDescriptorHandleIncrementSize(heap.Type);
+		D3D12_DESCRIPTOR_HEAP_DESC rtv {};
+		rtv.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+		rtv.NumDescriptors = 1;
+		D3D12::Check(m_device->CreateDescriptorHeap(&rtv, IID_PPV_ARGS(&m_rtv_heap)), "create the FSR 1 RTV heap");
+		Log::WriteToConsoleAndLog("FSR 1: on\n");
+	}
+	KYTY_CLASS_NO_COPY(Fsr1Scaler);
+
+	[[nodiscard]] bool Ready() const noexcept { return m_root_signature != nullptr; }
+
+	// Records both passes: the source (input_width x input_height, in PIXEL_SHADER_RESOURCE) onto rect of the back buffer. The scaled texture follows
+	// rect's size; it is only replaced after the GPU finished with it (the presenter waits for its last submission first).
+	bool Record(ID3D12GraphicsCommandList* list, ID3D12Resource* source, DXGI_FORMAT view_format, UINT mapping, uint32_t input_width,
+	            uint32_t input_height, D3D12_CPU_DESCRIPTOR_HANDLE target, const D3D12_RECT& rect, float sharpness, const std::function<void()>& wait_idle) {
+		const auto width  = static_cast<uint32_t>(rect.right - rect.left);
+		const auto height = static_cast<uint32_t>(rect.bottom - rect.top);
+		if (m_scaled == nullptr || m_width != width || m_height != height) {
+			if (m_scaled != nullptr) {
+				wait_idle();
+			}
+			if (!CreateScaled(width, height)) {
+				return false;
+			}
+		}
+		Transition(list, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		const D3D12_RECT scaled_rect {0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+		Draw(list, m_pipelines[0].Get(), source, view_format, mapping, m_rtv_heap->GetCPUDescriptorHandleForHeapStart(), scaled_rect,
+		     EasuConstants(static_cast<float>(input_width), static_cast<float>(input_height), static_cast<float>(width), static_cast<float>(height)));
+		Transition(list, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		Draw(list, m_pipelines[1].Get(), m_scaled.Get(), Swapchain::Format, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING, target, rect,
+		     RcasConstants(sharpness, static_cast<uint32_t>(rect.left), static_cast<uint32_t>(rect.top)));
+		return true;
+	}
+
+private:
+	static constexpr uint32_t Slots = 64;
+
+	bool CreateScaled(uint32_t width, uint32_t height) {
+		D3D12_RESOURCE_DESC desc {};
+		desc.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		desc.Width            = width;
+		desc.Height           = height;
+		desc.DepthOrArraySize = 1;
+		desc.MipLevels        = 1;
+		desc.Format           = Swapchain::Format;
+		desc.SampleDesc.Count = 1;
+		desc.Flags            = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+		D3D12_HEAP_PROPERTIES heap {};
+		heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+		m_scaled.Reset();
+		m_width  = 0;
+		m_height = 0;
+		if (FAILED(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+		                                             IID_PPV_ARGS(&m_scaled)))) {
+			// No memory for it: this picture is scaled without FSR 1.
+			m_scaled.Reset();
+			return false;
+		}
+		m_device->CreateRenderTargetView(m_scaled.Get(), nullptr, m_rtv_heap->GetCPUDescriptorHandleForHeapStart());
+		m_state  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+		m_width  = width;
+		m_height = height;
+		return true;
+	}
+
+	void Transition(ID3D12GraphicsCommandList* list, D3D12_RESOURCE_STATES after) {
+		if (m_state == after) {
+			return;
+		}
+		D3D12_RESOURCE_BARRIER barrier {};
+		barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+		barrier.Transition.pResource   = m_scaled.Get();
+		barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+		barrier.Transition.StateBefore = m_state;
+		barrier.Transition.StateAfter  = after;
+		list->ResourceBarrier(1, &barrier);
+		m_state = after;
+	}
+
+	void Draw(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pipeline, ID3D12Resource* source, DXGI_FORMAT view_format, UINT mapping,
+	          D3D12_CPU_DESCRIPTOR_HANDLE target, const D3D12_RECT& rect, const std::array<uint32_t, 16>& constants) {
+		const auto width  = static_cast<uint32_t>(rect.right - rect.left);
+		const auto height = static_cast<uint32_t>(rect.bottom - rect.top);
+		// The slots are used round robin, as the blitter's.
+		const auto slot = m_next++ % Slots;
+		auto       cpu  = m_views->GetCPUDescriptorHandleForHeapStart();
+		auto       gpu  = m_views->GetGPUDescriptorHandleForHeapStart();
+		cpu.ptr += static_cast<SIZE_T>(slot) * m_increment;
+		gpu.ptr += static_cast<UINT64>(slot) * m_increment;
+		D3D12_SHADER_RESOURCE_VIEW_DESC view {};
+		view.Format                  = view_format;
+		view.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+		view.Shader4ComponentMapping = mapping;
+		view.Texture2D.MipLevels     = 1;
+		m_device->CreateShaderResourceView(source, &view, cpu);
+
+		D3D12::VertexRuntimeData runtime {};
+		runtime.yz_flip_mask    = 1;
+		runtime.viewport_width  = static_cast<float>(width);
+		runtime.viewport_height = static_cast<float>(height);
+		uint32_t runtime_constants[D3D12::RuntimeDataDwords] {};
+		std::memcpy(runtime_constants, &runtime, sizeof(runtime));
+
+		ID3D12DescriptorHeap* heaps[] {m_views.Get()};
+		list->SetDescriptorHeaps(1, heaps);
+		list->SetGraphicsRootSignature(m_root_signature.Get());
+		list->SetPipelineState(pipeline);
+		list->SetGraphicsRoot32BitConstants(0, D3D12::RuntimeDataDwords, runtime_constants, 0);
+		list->SetGraphicsRoot32BitConstants(1, 16, constants.data(), 0);
+		list->SetGraphicsRootDescriptorTable(2, gpu);
+		const D3D12_VIEWPORT viewport {static_cast<float>(rect.left), static_cast<float>(rect.top), static_cast<float>(width), static_cast<float>(height),
+		                               0.0f, 1.0f};
+		list->RSSetViewports(1, &viewport);
+		list->RSSetScissorRects(1, &rect);
+		list->OMSetRenderTargets(1, &target, FALSE, nullptr);
+		list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		list->DrawInstanced(3, 1, 0, 0);
+	}
+
+	ID3D12Device*                       m_device = nullptr;
+	D3D12::ComPtr<ID3D12RootSignature>  m_root_signature;
+	D3D12::ComPtr<ID3D12PipelineState>  m_pipelines[2];
+	D3D12::ComPtr<ID3D12DescriptorHeap> m_views;
+	D3D12::ComPtr<ID3D12DescriptorHeap> m_rtv_heap;
+	D3D12::ComPtr<ID3D12Resource>       m_scaled;
+	D3D12_RESOURCE_STATES               m_state     = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	uint32_t                            m_width     = 0;
+	uint32_t                            m_height    = 0;
+	uint32_t                            m_increment = 0;
+	uint32_t                            m_next      = 0;
+};
+
 // The view VideoOut reads a guest flip image through.
 ImageViewInfo SurfaceView(const ImageInfo& info) {
 	ImageViewInfo view {};
@@ -485,6 +753,32 @@ struct Presenter::Impl {
 
 	void Present(bool interpolate = false);
 
+	// The game's picture (or the frame generated before it) onto rect of the back buffer: with FSR 1 when it is on and the picture is smaller than
+	// rect, else with the blitter. Not for HDR10 pictures: FSR 1 has no conversion to SDR.
+	void DrawBase(ID3D12GraphicsCommandList* list, const Frame& frame, D3D12_CPU_DESCRIPTOR_HANDLE target, const D3D12_RECT& rect,
+	              ID3D12Resource* generated = nullptr) {
+		const auto mode   = Config::GetFsr1Upscaling();
+		const auto width  = static_cast<uint32_t>(rect.right - rect.left);
+		const auto height = static_cast<uint32_t>(rect.bottom - rect.top);
+		bool       scaled = false;
+		if (mode != 0 && !frame.hdr && !frame.linear && (frame.width < width || frame.height < height)) {
+			if (fsr1 == nullptr) {
+				fsr1 = std::make_unique<Fsr1Scaler>(window.graphic_ctx, renderer.GetPipelineCache().GetCompiler());
+			}
+			if (fsr1->Ready()) {
+				scaled = fsr1->Record(list, generated != nullptr ? generated : frame.image.Get(),
+				                      generated != nullptr ? DXGI_FORMAT_R8G8B8A8_UNORM : frame.format.view,
+				                      generated != nullptr ? D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING : frame.format.mapping, frame.width, frame.height,
+				                      target, rect, Fsr1Sharpness(mode),
+				                      [this] { present_scheduler.Wait(present_scheduler.CurrentTick() - 1); });
+			}
+		}
+		FrameResolution::NoteFsr1(scaled);
+		if (!scaled) {
+			blitter.Record(list, frame, target, rect, false, true, generated);
+		}
+	}
+
 	Image& ResolveSurface(const ImageInfo& info) {
 		TextureCache::ImageDesc desc {};
 		desc.info      = info;
@@ -503,6 +797,8 @@ struct Presenter::Impl {
 	WindowContext&       window;
 	Swapchain            swapchain;
 	FrameBlitter         blitter;
+	// Made the first time a picture needs it (Config::fsr1_upscaling).
+	std::unique_ptr<Fsr1Scaler> fsr1;
 	CommandScheduler     present_scheduler;
 	FramePool            frames;
 	Common::Mutex        present_mutex;
@@ -710,13 +1006,13 @@ void Presenter::Impl::Present([[maybe_unused]] bool interpolate) {
 				barrier.Transition = {generated, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
 				                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
 				list->ResourceBarrier(1, &barrier);
-				blitter.Record(list, *base, target, game_rect, false, true, generated);
+				DrawBase(list, *base, target, game_rect, generated);
 				std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
 				list->ResourceBarrier(1, &barrier);
 			}
 #endif
 			if (!generated) {
-				blitter.Record(list, *base, target, game_rect, false, true);
+				DrawBase(list, *base, target, game_rect);
 			}
 		}
 		if (overlay != nullptr) {

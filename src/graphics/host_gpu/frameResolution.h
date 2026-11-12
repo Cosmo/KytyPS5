@@ -24,6 +24,7 @@ inline std::atomic<uint64_t> g_render {0};      // the frame being drawn: width 
 inline std::atomic<uint64_t> g_last_output {0}; // the last flipped frame
 inline std::atomic<uint64_t> g_last_render {0};
 inline std::atomic<uint64_t> g_display {0};     // the presenter's swap chain
+inline std::atomic<bool>     g_fsr1 {false};    // the last picture was scaled with FSR 1 (D3D12 presenter)
 inline std::atomic<bool>     g_fsr {false};     // the frame being drawn was upscaled by FSR (PSSR)
 inline std::atomic<bool>     g_last_fsr {false};
 
@@ -59,6 +60,14 @@ inline void NoteFsrUpscale() {
 // The presenter's picture on the screen got this size (its swap chain).
 inline void NoteDisplay(uint32_t width, uint32_t height) {
 	Detail::g_display.store(Detail::Pack(width, height), std::memory_order_relaxed);
+}
+
+// Whether the presenter scaled the game's last picture with FSR 1 (only when it is on and the picture is smaller than its place on the screen).
+inline void NoteFsr1(bool used) {
+	Detail::g_fsr1.store(used, std::memory_order_relaxed);
+}
+[[nodiscard]] inline bool Fsr1Used() {
+	return Detail::g_fsr1.load(std::memory_order_relaxed);
 }
 
 [[nodiscard]] inline Sizes Last() {
