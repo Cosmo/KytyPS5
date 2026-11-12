@@ -929,6 +929,20 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    },
 	    {L"Tells games that support it that they run on a PS5 Pro.",
 	     L"Experimental. PS5 Pro features are not supported; games can run out of memory."});
+#ifdef KYTY_HAS_FSR
+	{
+		// Upstream's --pssr-upscaler. DLSS is NVIDIA's and Vulkan's, so the Xbox has Linear and FSR (built in).
+		std::vector<std::wstring> names {L"Linear", L"FSR"};
+		AddChoice(
+		    testing, explanation, L"PSSR upscaler", std::move(names), settings.pssr_upscaler == "FSR" ? 1 : 0,
+		    [state, save](size_t index) {
+			    state->settings.pssr_upscaler = index == 1 ? "FSR" : "Linear";
+			    save();
+		    },
+		    {L"How PS5 Pro mode upscales the games that use PSSR.",
+		     L"FSR (AMD FSR 3.1) uses the game's depth and motion. Takes effect the next time a game starts."});
+	}
+#endif
 	AddSwitch(
 	    testing, explanation, L"Guest clock at PS5 speed", settings.guest_tsc,
 	    [state, save](bool on) {
