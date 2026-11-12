@@ -1,0 +1,16 @@
+#version 450 core
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform texture2D source;
+layout(binding = 1) writeonly uniform image2D destination;
+layout(push_constant) uniform Parameters {
+	uvec2 size;
+	uvec2 offset;
+} parameters;
+
+void main() {
+	uvec2 coordinate = gl_GlobalInvocationID.xy;
+	if (any(greaterThanEqual(coordinate, parameters.size))) return;
+	imageStore(destination, ivec2(coordinate), texelFetch(source, ivec2(coordinate + parameters.offset), 0));
+}

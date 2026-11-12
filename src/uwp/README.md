@@ -107,6 +107,12 @@ The layout is registered in place, so after a rebuild the app runs the new binar
 
 To install next to another build of the app, give this one other names: `$env:KYTY_UWP_PACKAGE_NAME`, `$env:KYTY_UWP_DISPLAY_NAME` and `$env:KYTY_UWP_PROTOCOL` at configure time (defaults `KytyPS5`, `KytyPS5`, `kyty`).
 
+### FidelityFX on D3D12
+
+The UWP build fetches AMD's pinned [FidelityFX SDK v1.1.4 source archive](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v1.1.4) (MIT) and compiles FSR 3.1.4 and its shaders into the app; no AMD DLL is shipped. For a local archive, set `$env:KYTY_FSR_SDK_ROOT` to the extracted folder containing `sdk` and `LICENSE.txt` before running `uwp.ps1 configure`. CMake's `-DKYTY_ENABLE_FSR=OFF` omits it.
+
+**Settings → Testing → PSSR upscaler** chooses how PS5 Pro mode upscales the games that use PSSR: Linear (upstream's default) or FSR.
+
 ### The emulator in the app
 
 `KYTY_BUILD_UWP=ON` (set by `uwp.ps1 configure`) builds the whole repository for UWP: the root `CMakeLists.txt` includes `src/uwp/uwp.cmake`, which compiles the emulator's sources into the app (without the SDL window and host input, which the app replaces) next to the launcher. The emulator code is compiled as ordinary desktop code with `KYTY_PLATFORM_UWP` defined; what separates it from a desktop build:
