@@ -7,7 +7,9 @@
 #include "settings.h"
 
 #include "common/compileActivity.h"
+#include "common/emulatorConfig.h"
 #include "common/pipelinePrewarm.h"
+#include "graphics/host_gpu/frameResolution.h"
 
 #include <windows.h>
 #include <fileapifromapp.h>
@@ -66,8 +68,8 @@ constexpr size_t LOG_LINES    = 20;
 // The rates and the values per frame are over at least this many seconds.
 constexpr double RATE_SECONDS = 1.0;
 // The rows of the swap file in the statistics (OverlayMarkup): its group and its row in Waiting, and the gap above the group.
-constexpr std::array<int32_t, 5> SWAP_ROWS {16, 17, 18, 19, 30};
-constexpr uint32_t               SWAP_GAP_ROW = 15;
+constexpr std::array<int32_t, 5> SWAP_ROWS {17, 18, 19, 20, 31};
+constexpr uint32_t               SWAP_GAP_ROW = 16;
 // The compile notice: how long the emulator has to compile (with gaps shorter than the grace) before it shows, and how long it stays after the
 // last compile.
 constexpr uint64_t NOTICE_DELAY_MS = 500;
@@ -152,6 +154,7 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
           <RowDefinition Height="8" />
           <RowDefinition Height="Auto" />
           <RowDefinition Height="Auto" />
@@ -182,71 +185,74 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
           <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="0" Text="Frame" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="4" Text="Resolution" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="8" Text="System" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="11" Text="RAM" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="16" Text="Swap file" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="21" Text="Shaders" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="25" Text="Pipelines" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="29" Text="Waiting" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="5" Text="Resolution" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="9" Text="System" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="12" Text="RAM" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="17" Text="Swap file" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="22" Text="Shaders" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="26" Text="Pipelines" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="30" Text="Waiting" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
         <!-- Draws made per frame; draws skipped per frame as not supported here (with the last reason); the GPU's time per frame. -->
         <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="0" Grid.Column="1" Text="Draws" />
         <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="1" Grid.Column="1" Text="Skipped" />
         <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="2" Grid.Column="1" Text="GPU time" />
+        <!-- Frames made by FSR frame generation per second, and the game's own; shown while its switch is on. -->
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="GeneratedLabel" Grid.Row="3" Grid.Column="1" Text="Generated" Visibility="Collapsed" />
         <!-- Internal: the largest viewport the game draws its scene into; Scaled: the picture it hands over each frame, after its own upscaling;
              Display: what the app shows on the screen (the TV's resolution on the Xbox, the window's size on a PC). -->
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="4" Grid.Column="1" Text="Internal" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="5" Grid.Column="1" Text="Scaled" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="6" Grid.Column="1" Text="Display" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="8" Grid.Column="1" Text="CPU" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="9" Grid.Column="1" Text="Disk" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="5" Grid.Column="1" Text="Internal" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="6" Grid.Column="1" Text="Scaled" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="7" Grid.Column="1" Text="Display" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="9" Grid.Column="1" Text="CPU" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="10" Grid.Column="1" Text="Disk" />
         <!-- RAM in use and its parts: the game's memory in RAM, the GPU's memory (in RAM on the Xbox, on the graphics card on a PC) and the rest (the
              emulator and the app). -->
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="11" Grid.Column="1" Text="Used" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="12" Grid.Column="1" Text="Game" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="13" Grid.Column="1" Text="GPU" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="14" Grid.Column="1" Text="Other" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="12" Grid.Column="1" Text="Used" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="13" Grid.Column="1" Text="Game" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="14" Grid.Column="1" Text="GPU" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="15" Grid.Column="1" Text="Other" />
         <!-- The game's memory in the swap file (not in RAM), the compressed pool in RAM in front of it (its size and the share of reads it
              served; - without one), and what was written to the file and read back from it. -->
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="16" Grid.Column="1" Text="Size" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="17" Grid.Column="1" Text="Pool" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="18" Grid.Column="1" Text="Out" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="19" Grid.Column="1" Text="In" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="17" Grid.Column="1" Text="Size" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="18" Grid.Column="1" Text="Pool" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="19" Grid.Column="1" Text="Out" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="20" Grid.Column="1" Text="In" />
         <!-- The game's shaders so far, and the shaders translated in this run (not taken from the cache an earlier run saved). -->
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="21" Grid.Column="1" Text="Drawing" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="22" Grid.Column="1" Text="Compute" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="23" Grid.Column="1" Text="New" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="22" Grid.Column="1" Text="Drawing" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="23" Grid.Column="1" Text="Compute" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="24" Grid.Column="1" Text="New" />
         <!-- The pipelines this run made, those of them not made from the cache, and the cache file's. -->
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="25" Grid.Column="1" Text="This run" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="26" Grid.Column="1" Text="New" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="27" Grid.Column="1" Text="In cache" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="26" Grid.Column="1" Text="This run" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="27" Grid.Column="1" Text="New" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="28" Grid.Column="1" Text="In cache" />
         <!-- The time per second the work stood still for compiling shaders and making pipelines, and for the swap file. -->
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="29" Grid.Column="1" Text="Compiling" />
-        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="30" Grid.Column="1" Text="Swap file" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="30" Grid.Column="1" Text="Compiling" />
+        <TextBlock Typography.NumeralAlignment="Tabular" Grid.Row="31" Grid.Column="1" Text="Swap file" />
         <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Draws" Grid.Row="0" Grid.Column="2" />
         <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Skipped" Grid.Row="1" Grid.Column="2" />
         <TextBlock Typography.NumeralAlignment="Tabular" x:Name="GpuTime" Grid.Row="2" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="RenderResolution" Grid.Row="4" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="OutputResolution" Grid.Row="5" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="DisplayResolution" Grid.Row="6" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Cpu" Grid.Row="8" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Disk" Grid.Row="9" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Memory" Grid.Row="11" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="GameMemory" Grid.Row="12" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="GpuMemory" Grid.Row="13" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="OtherMemory" Grid.Row="14" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SwappedMemory" Grid.Row="16" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SwapPool" Grid.Row="17" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SwapOut" Grid.Row="18" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SwapIn" Grid.Row="19" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="DrawingShaders" Grid.Row="21" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="ComputeShaders" Grid.Row="22" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="NewShaders" Grid.Row="23" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Pipelines" Grid.Row="25" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="NewPipelines" Grid.Row="26" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SavedPipelines" Grid.Row="27" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="CompileWait" Grid.Row="29" Grid.Column="2" />
-        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SwapWait" Grid.Row="30" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Generated" Grid.Row="3" Grid.Column="2" Visibility="Collapsed" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="RenderResolution" Grid.Row="5" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="OutputResolution" Grid.Row="6" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="DisplayResolution" Grid.Row="7" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Cpu" Grid.Row="9" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Disk" Grid.Row="10" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Memory" Grid.Row="12" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="GameMemory" Grid.Row="13" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="GpuMemory" Grid.Row="14" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="OtherMemory" Grid.Row="15" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SwappedMemory" Grid.Row="17" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SwapPool" Grid.Row="18" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SwapOut" Grid.Row="19" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SwapIn" Grid.Row="20" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="DrawingShaders" Grid.Row="22" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="ComputeShaders" Grid.Row="23" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="NewShaders" Grid.Row="24" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Pipelines" Grid.Row="26" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="NewPipelines" Grid.Row="27" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SavedPipelines" Grid.Row="28" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="CompileWait" Grid.Row="30" Grid.Column="2" />
+        <TextBlock Typography.NumeralAlignment="Tabular" x:Name="SwapWait" Grid.Row="31" Grid.Column="2" />
       </Grid>
       <!-- Compact: the GPU's time per frame, RAM in use and the game's memory in the swap file (where there is one), as in Statistics. -->
       <Grid x:Name="Compact" ColumnSpacing="12" Visibility="Collapsed">
@@ -706,6 +712,8 @@ struct GameOverlay::State {
 	xaml::Controls::TextBlock  draws {nullptr};
 	xaml::Controls::TextBlock  skipped {nullptr};
 	xaml::Controls::TextBlock  gpu_time {nullptr};
+	xaml::Controls::TextBlock  generated_label {nullptr};
+	xaml::Controls::TextBlock  generated {nullptr};
 	xaml::Controls::TextBlock  output_resolution {nullptr};
 	xaml::Controls::TextBlock  render_resolution {nullptr};
 	xaml::Controls::TextBlock  display_resolution {nullptr};
@@ -743,6 +751,7 @@ struct GameOverlay::State {
 		uint64_t                              frames = 0;
 		WorkTotals                            work;
 		MemoryTotals                          memory;
+		uint64_t                              generated = 0; // frames made by FSR frame generation and shown, so far
 	};
 	std::optional<Sample> sample;
 	bool                  swap_shown = true;
@@ -1140,7 +1149,8 @@ void GameOverlay::State::UpdateNotice() {
 
 // The rates and the values per frame, over the last second (they stay until the next second is over).
 void GameOverlay::State::UpdateRates(const MemoryTotals& totals) {
-	const Sample current {std::chrono::steady_clock::now(), EmulatorHost::Get().FramesPresented(), CurrentWorkTotals(), totals};
+	const Sample current {std::chrono::steady_clock::now(), EmulatorHost::Get().FramesPresented(), CurrentWorkTotals(), totals,
+	                      Libs::Graphics::FrameResolution::GeneratedFrames()};
 	if (!sample) {
 		sample = current;
 		return;
@@ -1177,6 +1187,19 @@ void GameOverlay::State::UpdateRates(const MemoryTotals& totals) {
 		wchar_t text[32];
 		swprintf_s(text, L"%.1f ms", per_frame(delta(current.work.gpu_ns, before.work.gpu_ns)) / 1e6);
 		gpu_time.Text(RegionNumbers(text));
+	}
+	// FSR frame generation's frames per second, with the game's own (all frames shown less the made ones), while its switch is on.
+	const bool generation = Config::FsrFrameGenerationEnabled();
+	generated_label.Visibility(VisibleIf(generation));
+	generated.Visibility(VisibleIf(generation));
+	if (generation) {
+		const uint64_t made = delta(current.generated, before.generated);
+		if (made == 0) {
+			generated.Text(Libs::Graphics::FrameResolution::LastHadPssr() ? L"–  needs 30 fps" : L"–  needs PSSR");
+		} else {
+			const auto per_second = [seconds](uint64_t count) { return std::lround(static_cast<double>(count) / seconds); };
+			generated.Text(Count(per_second(made)) + L" fps  (game " + Count(per_second(delta(frames, made))) + L")");
+		}
 	}
 	disk.Text(mb_per_second(counted(Counter::GuestFileReadBytes)) + L" read");
 	swap_out.Text(mb_per_second(delta(totals.swapped_out, before.memory.swapped_out)));
@@ -1513,6 +1536,8 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.draws             = find(L"Draws").as<xaml::Controls::TextBlock>();
 	state.skipped           = find(L"Skipped").as<xaml::Controls::TextBlock>();
 	state.gpu_time          = find(L"GpuTime").as<xaml::Controls::TextBlock>();
+	state.generated_label   = find(L"GeneratedLabel").as<xaml::Controls::TextBlock>();
+	state.generated         = find(L"Generated").as<xaml::Controls::TextBlock>();
 	state.output_resolution = find(L"OutputResolution").as<xaml::Controls::TextBlock>();
 	state.render_resolution = find(L"RenderResolution").as<xaml::Controls::TextBlock>();
 	state.display_resolution = find(L"DisplayResolution").as<xaml::Controls::TextBlock>();

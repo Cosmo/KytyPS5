@@ -27,6 +27,9 @@ inline std::atomic<uint64_t> g_display {0};     // the presenter's swap chain
 inline std::atomic<bool>     g_fsr1 {false};    // the last picture was scaled with FSR 1 (D3D12 presenter)
 inline std::atomic<bool>     g_fsr {false};     // the frame being drawn was upscaled by FSR (PSSR)
 inline std::atomic<bool>     g_last_fsr {false};
+inline std::atomic<bool>     g_pssr {false};    // the frame being drawn asked for PSSR
+inline std::atomic<bool>     g_last_pssr {false};
+inline std::atomic<uint64_t> g_generated {0};   // frames made by FSR frame generation and shown
 
 [[nodiscard]] inline uint64_t Pack(uint32_t width, uint32_t height) {
 	return (static_cast<uint64_t>(width) << 32u) | height;
@@ -50,6 +53,23 @@ inline void NoteOutput(uint32_t width, uint32_t height) {
 	Detail::g_last_output.store(Detail::Pack(width, height), std::memory_order_relaxed);
 	Detail::g_last_render.store(Detail::g_render.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
 	Detail::g_last_fsr.store(Detail::g_fsr.exchange(false, std::memory_order_relaxed), std::memory_order_relaxed);
+	Detail::g_last_pssr.store(Detail::g_pssr.exchange(false, std::memory_order_relaxed), std::memory_order_relaxed);
+}
+
+// The game asked for PSSR in the frame being drawn (the D3D12 renderer).
+inline void NotePssr() {
+	Detail::g_pssr.store(true, std::memory_order_relaxed);
+}
+[[nodiscard]] inline bool LastHadPssr() {
+	return Detail::g_last_pssr.load(std::memory_order_relaxed);
+}
+
+// A frame made by FSR frame generation was shown (the D3D12 presenter); the overlay counts them per second.
+inline void NoteGeneratedFrame() {
+	Detail::g_generated.fetch_add(1, std::memory_order_relaxed);
+}
+[[nodiscard]] inline uint64_t GeneratedFrames() {
+	return Detail::g_generated.load(std::memory_order_relaxed);
 }
 
 // The game's PSSR request was upscaled by FSR (the D3D12 renderer).

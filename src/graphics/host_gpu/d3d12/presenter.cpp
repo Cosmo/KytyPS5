@@ -1007,6 +1007,7 @@ void Presenter::Impl::Present([[maybe_unused]] bool interpolate) {
 				                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
 				list->ResourceBarrier(1, &barrier);
 				DrawBase(list, *base, target, game_rect, generated);
+				FrameResolution::NoteGeneratedFrame();
 				std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
 				list->ResourceBarrier(1, &barrier);
 			}
