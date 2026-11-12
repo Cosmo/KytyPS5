@@ -134,6 +134,8 @@ struct AppSettings {
 	// The settings page, Testing: upstream's --pssr-upscaler, how PS5 Pro mode upscales PSSR: "Linear" (upstream's default) or "FSR" (AMD
 	// FSR 3.1, built from the FidelityFX SDK's MIT source). Linear.
 	std::string pssr_upscaler = "Linear";
+	// The settings page, Testing: FSR frame generation from the PSSR hook (Config::fsr_frame_generation). Off.
+	bool fsr_frame_generation = false;
 	// Number of draws between host GPU submissions. Zero uses normal batching.
 	uint32_t flush_draws = 0;
 	// Debugging, only in the file: ask for a frame dump this many seconds after the game started (0: never; the game menu has Save frame dump).

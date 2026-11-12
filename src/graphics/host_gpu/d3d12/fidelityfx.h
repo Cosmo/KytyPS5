@@ -25,6 +25,9 @@ public:
 	               uint32_t width, uint32_t height, uint32_t x, uint32_t y);
 	D3D12_CPU_DESCRIPTOR_HANDLE Upscale(CommandBuffer& command);
 	void FinishUpscale(CommandBuffer& command);
+	void SkipFlip();
+	bool Interpolate(CommandBuffer& command, ID3D12Resource* color, DXGI_FORMAT format, bool hdr,
+	                 D3D12::ComPtr<ID3D12Resource>& generated);
 
 private:
 	struct Impl;

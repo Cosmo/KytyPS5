@@ -25,6 +25,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr auto ComputeRead = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 constexpr auto UnorderedAccess = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+constexpr auto GeneratedFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 
 void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* image, D3D12_RESOURCE_STATES before,
                 D3D12_RESOURCE_STATES after) {
@@ -122,7 +123,7 @@ struct Effect {
 		}
 	}
 
-	bool Ensure(RenderContext& renderer, Description next) {
+	bool Ensure(RenderContext& renderer, Description next, bool interpolate) {
 		if (desc.flags == next.flags && desc.format == next.format && desc.output_width == next.output_width &&
 		    desc.output_height == next.output_height) {
 			next.width = std::max(desc.width, next.width);
@@ -142,7 +143,7 @@ struct Effect {
 		reset = true;
 		ticks.fill(0);
 
-		const size_t count = FFX_FSR3UPSCALER_CONTEXT_COUNT;
+		const size_t count = interpolate ? FFX_FSR3_CONTEXT_COUNT : FFX_FSR3UPSCALER_CONTEXT_COUNT;
 		scratch.assign(ffxGetScratchMemorySizeDX12(count), std::byte {});
 		context = std::make_unique<FfxFsr3Context>();
 		FfxInterface backend {};
@@ -161,11 +162,19 @@ struct Effect {
 			result = ffxFsr3ContextCreate(context.get(), &parameters);
 			ready = result == FFX_OK;
 		}
+		if (ready && interpolate) {
+			// The UWP backend leaves swapchain configuration to Kyty.
+			FfxFrameGenerationConfig config {};
+			config.frameGenerationEnabled = true;
+			result = ffxFsr3ConfigureFrameGeneration(context.get(), &config);
+		}
 		// (in the emulator log: LOGF reaches only the console, which nobody sees on the Xbox)
 		if (result != FFX_OK) {
-			Log::WriteToConsoleAndLog(fmt::format("FSR: upscaling could not start (FidelityFX error 0x{:08x})\n", static_cast<unsigned>(result)));
+			Log::WriteToConsoleAndLog(fmt::format("FSR: {} could not start (FidelityFX error 0x{:08x})\n", interpolate ? "frame generation" : "upscaling",
+			                                      static_cast<unsigned>(result)));
 		} else {
-			Log::WriteToConsoleAndLog(fmt::format("FSR: upscaling {}x{} to {}x{}\n", desc.width, desc.height, desc.output_width, desc.output_height));
+			Log::WriteToConsoleAndLog(fmt::format("FSR: {} {}x{} to {}x{}\n", interpolate ? "frame generation for" : "upscaling", desc.width, desc.height,
+			                                      desc.output_width, desc.output_height));
 		}
 		return result == FFX_OK;
 	}
@@ -197,16 +206,20 @@ struct FidelityFx::Impl {
 
 	RenderContext& renderer;
 	Effect upscale;
+	Effect interpolate;
 	std::array<Texture, 4> inputs;
 	Texture output;
 	Pssr::Request request {};
 	uint32_t output_width = 0;
 	uint32_t output_height = 0;
+	uint32_t requests_since_flip = 0;
 	uint64_t previous_upscale_owner = 0;
+	uint64_t previous_interpolate_owner = 0;
 	bool pending = false;
 	bool has_color = false;
 	bool has_exposure = false;
 	Clock::time_point upscale_time = Clock::now();
+	Clock::time_point interpolate_time = Clock::now();
 
 	uint32_t DepthFlags() const {
 		return (request.flags & Pssr::kReverseDepth) ? FFX_FSR3_ENABLE_DEPTH_INVERTED : 0;
@@ -222,6 +235,7 @@ FidelityFx::~FidelityFx() = default;
 
 bool FidelityFx::BeginPssr(const Pssr::Request& request, uint32_t width, uint32_t height) {
 	auto& fx = *m_impl;
+	fx.requests_since_flip = std::min(2u, fx.requests_since_flip + 1);
 	fx.pending = false;
 	fx.has_color = false;
 	fx.has_exposure = false;
@@ -276,7 +290,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE FidelityFx::Upscale(CommandBuffer& command) {
 	                       FFX_FSR3_ENABLE_DYNAMIC_RESOLUTION | fx.DepthFlags() |
 	                       (!fx.has_exposure || (fx.request.flags & Pssr::kAutoExposure) ? FFX_FSR3_ENABLE_AUTO_EXPOSURE : 0);
 	if (!effect.Ensure(fx.renderer, {fx.request.width, fx.request.height, fx.output_width, fx.output_height, flags,
-	                                DXGI_FORMAT_R16G16B16A16_FLOAT})) {
+	                                DXGI_FORMAT_R16G16B16A16_FLOAT}, false)) {
 		return {};
 	}
 	effect.Begin(fx.renderer);
@@ -322,6 +336,85 @@ D3D12_CPU_DESCRIPTOR_HANDLE FidelityFx::Upscale(CommandBuffer& command) {
 
 void FidelityFx::FinishUpscale(CommandBuffer& command) {
 	Transition(command.Handle(), m_impl->output.image.Get(), ComputeRead, UnorderedAccess);
+}
+
+void FidelityFx::SkipFlip() {
+	auto& fx = *m_impl;
+	fx.requests_since_flip = 0;
+	fx.pending = false;
+	fx.interpolate.reset = true;
+}
+
+bool FidelityFx::Interpolate(CommandBuffer& command, ID3D12Resource* color, DXGI_FORMAT format, bool hdr,
+                             D3D12::ComPtr<ID3D12Resource>& generated) {
+	auto& fx = *m_impl;
+	auto& effect = fx.interpolate;
+	const auto desc = color->GetDesc();
+	if (!fx.pending || fx.requests_since_flip != 1 || hdr ||
+	    (format != DXGI_FORMAT_R8G8B8A8_UNORM && format != DXGI_FORMAT_B8G8R8A8_UNORM) ||
+	    desc.Width != fx.output_width || desc.Height != fx.output_height) {
+		SkipFlip();
+		return false;
+	}
+	fx.requests_since_flip = 0;
+	fx.pending = false;
+	const auto width = fx.output_width;
+	const auto height = fx.output_height;
+	if (!generated || generated->GetDesc().Width != width || generated->GetDesc().Height != height) {
+		generated.Reset();
+		if (!CreateTexture(fx.renderer.GetGraphics().device, GeneratedFormat, width, height, generated)) {
+			effect.reset = true;
+			return false;
+		}
+	}
+	const uint32_t flags = FFX_FSR3_ENABLE_INTERPOLATION_ONLY | fx.DepthFlags();
+	if (!effect.Ensure(fx.renderer, {fx.request.width, fx.request.height, width, height, flags, format}, true)) {
+		return false;
+	}
+	effect.Begin(fx.renderer);
+	auto* list = command.Handle();
+	Transition(list, color, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, ComputeRead);
+	for (size_t i: {1, 2}) {
+		Transition(list, fx.inputs[i].image.Get(), UnorderedAccess, ComputeRead);
+	}
+	FfxFsr3DispatchFrameGenerationPrepareDescription prepare {};
+	prepare.commandList = ffxGetCommandListDX12(list);
+	prepare.depth = fx.ReadInput(1);
+	prepare.motionVectors = fx.ReadInput(2);
+	prepare.jitterOffset = {fx.request.jitter[0], fx.request.jitter[1]};
+	prepare.motionVectorScale = {fx.request.motion_scale[0], fx.request.motion_scale[1]};
+	prepare.renderSize = {fx.request.width, fx.request.height};
+	prepare.frameTimeDelta = Elapsed(fx.interpolate_time);
+	prepare.cameraNear = CameraNear;
+	prepare.cameraFar = CameraFar;
+	prepare.cameraFovAngleVertical = CameraFov;
+	prepare.viewSpaceToMetersFactor = 1.0f;
+	prepare.frameID = effect.frame_id;
+	FfxFrameGenerationDispatchDescription interpolate {};
+	interpolate.commandList = prepare.commandList;
+	interpolate.presentColor = Wrap(color, FFX_RESOURCE_STATE_COMPUTE_READ, format);
+	interpolate.outputs[0] = Wrap(generated.Get(), FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+	interpolate.numInterpolatedFrames = 1;
+	interpolate.reset = effect.reset || fx.previous_interpolate_owner != fx.request.context || (fx.request.flags & Pssr::kReset);
+	interpolate.backBufferTransferFunction = FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+	interpolate.minMaxLuminance[1] = 100.0f;
+	interpolate.interpolationRect = {0, 0, static_cast<int32_t>(width), static_cast<int32_t>(height)};
+	interpolate.frameID = prepare.frameID;
+	auto result = ffxFsr3ContextDispatchFrameGenerationPrepare(effect.context.get(), &prepare);
+	if (result == FFX_OK) {
+		result = ffxFsr3DispatchFrameGeneration(&interpolate);
+	}
+	fx.renderer.GetDescriptorHeap().InvalidateBinding();
+	Transition(list, color, ComputeRead, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	for (size_t i: {1, 2}) {
+		Transition(list, fx.inputs[i].image.Get(), ComputeRead, UnorderedAccess);
+	}
+	effect.reset = result != FFX_OK;
+	fx.previous_interpolate_owner = fx.request.context;
+	if (effect.reset) {
+		Log::WriteToConsoleAndLog(fmt::format("FSR: a frame generation dispatch failed (FidelityFX error 0x{:08x})\n", static_cast<unsigned>(result)));
+	}
+	return !interpolate.reset && !effect.reset;
 }
 
 } // namespace Libs::Graphics
