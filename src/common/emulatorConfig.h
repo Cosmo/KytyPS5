@@ -73,6 +73,8 @@ struct ConfigOptions {
 	PssrUpscaler           pssr_upscaler               = PssrUpscaler::Linear;
 	// (UWP, experimental) AMD FSR 3.1 frame interpolation from the game's PSSR depth and motion: a generated frame between two flips.
 	bool                   fsr_frame_generation        = false;
+	// (UWP, experimental) AMD FSR 1 scales games whose picture is smaller than the screen: 0 off, 1..3 low, medium, high sharpness.
+	uint32_t               fsr1_upscaling              = 0;
 	std::filesystem::path  dlss_folder;
 	uint32_t               dlss_preset                 = 0; // 0 is the model default
 	std::filesystem::path  fsr_folder;
@@ -223,6 +225,7 @@ bool     VrEnabled();
 bool     Ps5ProEnabled();
 PssrUpscaler GetPssrUpscaler();
 bool         FsrFrameGenerationEnabled();
+uint32_t     GetFsr1Upscaling();
 const std::filesystem::path& GetDlssFolder();
 uint32_t GetDlssPreset();
 const std::filesystem::path& GetFsrFolder();

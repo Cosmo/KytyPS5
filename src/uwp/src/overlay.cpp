@@ -836,7 +836,7 @@ void GameOverlay::State::Update() {
 	};
 	output_resolution.Text(size(resolutions.output_width, resolutions.output_height) + (resolutions.fsr ? L" FSR" : L""));
 	render_resolution.Text(size(resolutions.render_width, resolutions.render_height));
-	display_resolution.Text(size(resolutions.display_width, resolutions.display_height));
+	display_resolution.Text(size(resolutions.display_width, resolutions.display_height) + (resolutions.fsr1 ? L" FSR 1" : L""));
 
 	// Memory: on Xbox the limit is the app's budget; on a PC it's no real limit.
 	const uint64_t used  = winrt::Windows::System::MemoryManager::AppMemoryUsage();
