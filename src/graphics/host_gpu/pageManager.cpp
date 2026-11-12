@@ -45,6 +45,13 @@ constexpr uint64_t REGION_PAGES = REGION_SIZE / PAGE_SIZE;
 	va_end(args);
 	std::fputc('\n', stderr);
 	std::fflush(stderr);
+	// The same in the emulator log (stdout): on the Xbox stderr does not reach it, and the app would end without a word.
+	std::fputs("PageManager fatal: ", stdout);
+	va_start(args, format);
+	std::vfprintf(stdout, format, args);
+	va_end(args);
+	std::fputc('\n', stdout);
+	std::fflush(stdout);
 	std::_Exit(322);
 }
 
