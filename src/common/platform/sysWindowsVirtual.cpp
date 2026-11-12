@@ -13,6 +13,11 @@
 #include "common/platform/sysWindowsVirtual.h"
 #include "common/virtualMemory.h"
 
+#include <algorithm> // (ProtectLazy, also in the desktop build)
+#include <atomic>
+#include <cinttypes>
+#include <cstdio>
+
 #if defined(KYTY_PLATFORM_UWP)
 #include <algorithm>
 #include <atomic>
@@ -387,7 +392,35 @@ bool DecommitLazy(uint64_t address, uint64_t size) {
 
 bool ProtectLazy(uint64_t address, uint64_t size, Mode mode) {
 	// Not Protect(): lazy memory is never write-execute, and this runs on every page watcher change.
-	return HostVirtualProtect(reinterpret_cast<void*>(address), size, GetProtectionFlag(mode));
+	if (HostVirtualProtect(reinterpret_cast<void*>(address), size, GetProtectionFlag(mode))) {
+		return true;
+	}
+	// One VirtualProtect cannot span two allocations (ERROR_INVALID_ADDRESS). Neighbouring windows are separate allocations once one of them
+	// came back from the pager's store and was reserved again on its own, so a run of them is protected allocation by allocation then.
+	const DWORD    error  = GetLastError();
+	uint64_t       cursor = address;
+	const uint64_t end    = address + size;
+	bool           ok     = true;
+	while (cursor < end) {
+		MEMORY_BASIC_INFORMATION info {};
+		if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0) {
+			ok = false;
+			break;
+		}
+		const uint64_t part_end = std::min<uint64_t>(end, reinterpret_cast<uint64_t>(info.BaseAddress) + info.RegionSize);
+		if (info.State != MEM_COMMIT || !HostVirtualProtect(reinterpret_cast<void*>(cursor), part_end - cursor, GetProtectionFlag(mode))) {
+			ok = false;
+			break;
+		}
+		cursor = part_end;
+	}
+	static std::atomic<int> logged = 0;
+	if (!ok || logged.fetch_add(1) < 4) {
+		printf("ProtectLazy: 0x%016" PRIx64 " +0x%" PRIx64 " spans more than one allocation (error %u): %s\n", address, size,
+		       static_cast<uint32_t>(error), ok ? "protected part by part" : "failed part by part too");
+		fflush(stdout);
+	}
+	return ok;
 }
 
 namespace {
