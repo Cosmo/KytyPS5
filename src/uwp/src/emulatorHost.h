@@ -49,6 +49,7 @@ struct FrameResolutions {
 	uint32_t render_height  = 0;
 	uint32_t display_width  = 0; // the picture on the screen (the presenter's swap chain)
 	uint32_t display_height = 0;
+	bool     fsr1           = false; // the picture was scaled up with FSR 1
 	bool     fsr            = false; // the picture was upscaled by FSR as the game's PSSR upscaler
 };
 [[nodiscard]] FrameResolutions CurrentFrameResolutions();

@@ -951,6 +951,19 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    {L"Experimental. Shows a frame made by AMD FSR 3.1 between two game frames, from the game's PSSR depth and motion.",
 	     L"Needs PS5 Pro mode, a game that uses PSSR, SDR output and a game at half the refresh rate (30 fps at 60 Hz). Takes effect the next time a game starts."});
 #endif
+	{
+		const std::vector<std::string> values {"Off", "Low", "Medium", "High"};
+		std::vector<std::wstring>      names {L"Off", L"Sharpness low", L"Sharpness medium", L"Sharpness high"};
+		const auto                     found = std::find(values.begin(), values.end(), settings.fsr1_upscaling);
+		AddChoice(
+		    testing, explanation, L"FSR 1 upscaling", std::move(names), found != values.end() ? static_cast<size_t>(found - values.begin()) : 0,
+		    [state, save, values](size_t index) {
+			    state->settings.fsr1_upscaling = values[index < values.size() ? index : 0];
+			    save();
+		    },
+		    {L"Experimental. Scales games whose picture is smaller than the screen with AMD FSR 1 and sharpens them, instead of a plain scale.",
+		     L"Not for HDR pictures. Takes effect the next time a game starts."});
+	}
 	AddSwitch(
 	    testing, explanation, L"Guest clock at PS5 speed", settings.guest_tsc,
 	    [state, save](bool on) {

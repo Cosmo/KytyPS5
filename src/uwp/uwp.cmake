@@ -86,6 +86,7 @@ add_custom_command(TARGET kyty_uwp POST_BUILD
 	COMMAND ${CMAKE_COMMAND} -E make_directory "${KYTY_UWP_LAYOUT}/fonts"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different ${KYTY_NOTO_SANS_FONTS} "${KYTY_UWP_LAYOUT}/fonts/"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_NOTO_SANS_DIR}/LICENSE" "${KYTY_UWP_LAYOUT}/fonts/NotoSans-LICENSE.txt"
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different "${KYTY_THIRD_PARTY_DIR}/fidelityfx-fsr/license.txt" "${KYTY_UWP_LAYOUT}/FidelityFX-FSR1-LICENSE.txt"
 	COMMENT "Updating the UWP package layout")
 if(KYTY_ENABLE_FSR)
 	add_custom_command(TARGET kyty_uwp POST_BUILD

@@ -125,6 +125,10 @@ bool FsrFrameGenerationEnabled() {
 	return g_config->fsr_frame_generation;
 }
 
+uint32_t GetFsr1Upscaling() {
+	return g_config->fsr1_upscaling;
+}
+
 const std::filesystem::path& GetDlssFolder() {
 	return g_config->dlss_folder;
 }
