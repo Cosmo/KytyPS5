@@ -10,12 +10,14 @@
 #include "common/emulatorConfig.h"
 #include "common/pipelinePrewarm.h"
 #include "graphics/host_gpu/frameResolution.h"
+#include "kytyGitVersion.h"
 
 #include <windows.h>
 #include <fileapifromapp.h>
 // windows.h's FindText macro breaks Windows.UI.Text.h.
 #undef FindText
 
+#include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Globalization.NumberFormatting.h>
@@ -278,6 +280,9 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
         <TextBlock Typography.NumeralAlignment="Tabular" x:Name="CompactMemory" Grid.Row="1" Grid.Column="1" />
         <TextBlock Typography.NumeralAlignment="Tabular" x:Name="CompactSwap" Grid.Row="2" Grid.Column="1" />
       </Grid>
+      <!-- The app's version and the commit it was built from, the last line (Full and Detailed). -->
+      <TextBlock x:Name="Build" Style="{StaticResource CaptionTextBlockStyle}" Typography.NumeralAlignment="Tabular" Margin="0,4,0,0"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" Visibility="Collapsed" />
     </StackPanel>
   </Border>
   </StackPanel>
@@ -510,6 +515,20 @@ xaml::Visibility VisibleIf(bool shown) {
 	return shown ? xaml::Visibility::Visible : xaml::Visibility::Collapsed;
 }
 
+// The overlay's last line: the app's version and the commit it was built from, "1.1.26317.620 · 668bd1d" (KYTY_GIT_HASH: "-dirty" when built from
+// uncommitted changes, "unknown" without git).
+winrt::hstring BuildLine() {
+	constexpr wchar_t SEPARATOR[] = {L' ', 0x00B7, L' ', 0};
+	std::wstring      version     = L"unknown";
+	try {
+		const auto number = winrt::Windows::ApplicationModel::Package::Current().Id().Version();
+		version = std::to_wstring(number.Major) + L"." + std::to_wstring(number.Minor) + L"." + std::to_wstring(number.Build) + L"." +
+		          std::to_wstring(number.Revision);
+	} catch (winrt::hresult_error const&) {
+	}
+	return winrt::hstring(version + SEPARATOR + std::wstring(winrt::to_hstring(KYTY_GIT_HASH)));
+}
+
 // ---- Detailed: panels beside the frame rate's box, grouped as the desktop's performance panel (upstream) groups them.
 
 // The busiest threads Detailed shows.
@@ -717,6 +736,7 @@ struct GameOverlay::State {
 	xaml::Controls::TextBlock  output_resolution {nullptr};
 	xaml::Controls::TextBlock  render_resolution {nullptr};
 	xaml::Controls::TextBlock  display_resolution {nullptr};
+	xaml::Controls::TextBlock  build {nullptr};
 	xaml::Controls::TextBlock  cpu {nullptr};
 	xaml::Controls::TextBlock  disk {nullptr};
 	xaml::Controls::TextBlock  memory {nullptr};
@@ -1541,6 +1561,8 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.output_resolution = find(L"OutputResolution").as<xaml::Controls::TextBlock>();
 	state.render_resolution = find(L"RenderResolution").as<xaml::Controls::TextBlock>();
 	state.display_resolution = find(L"DisplayResolution").as<xaml::Controls::TextBlock>();
+	state.build              = find(L"Build").as<xaml::Controls::TextBlock>();
+	state.build.Text(BuildLine());
 	state.cpu               = find(L"Cpu").as<xaml::Controls::TextBlock>();
 	state.disk              = find(L"Disk").as<xaml::Controls::TextBlock>();
 	state.memory            = find(L"Memory").as<xaml::Controls::TextBlock>();
@@ -1644,6 +1666,7 @@ void GameOverlay::Apply(const AppSettings& settings) {
 	state.graph.Visibility(VisibleIf(state.detail != OVERLAY_FRAME_RATE));
 	state.statistics.Visibility(VisibleIf(state.detail == OVERLAY_FULL));
 	state.compact.Visibility(VisibleIf(state.detail == OVERLAY_COMPACT));
+	state.build.Visibility(VisibleIf(state.detail == OVERLAY_FULL || state.detail == OVERLAY_DETAILED));
 	for (const auto& panel: state.detailed_panels) {
 		panel.Visibility(VisibleIf(state.detail == OVERLAY_DETAILED));
 	}
