@@ -84,6 +84,7 @@ AppSettings LoadSettings() {
 	read("pssr_upscaler", settings.pssr_upscaler);
 	read("fsr_frame_generation", settings.fsr_frame_generation);
 	read("fsr1_upscaling", settings.fsr1_upscaling);
+	read("output_resolution", settings.output_resolution);
 	if (const auto draws = json.find("flush_draws");
 	    draws != json.end() && draws->is_number_unsigned() && draws->get<uint64_t>() <= 99999) {
 		settings.flush_draws = draws->get<uint32_t>();
@@ -184,6 +185,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["pssr_upscaler"] = settings.pssr_upscaler;
 	json["fsr_frame_generation"] = settings.fsr_frame_generation;
 	json["fsr1_upscaling"] = settings.fsr1_upscaling;
+	json["output_resolution"] = settings.output_resolution;
 	json["flush_draws"]            = settings.flush_draws;
 	json["debug_layer"]      = settings.debug_layer;
 	json["game_output"]      = settings.game_output;
