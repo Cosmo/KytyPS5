@@ -50,6 +50,7 @@ jobs:
           "KYTY_DEPS=$deps" >> $env:GITHUB_ENV
           "KYTY_UWP_BUILD=$env:RUNNER_TEMP\uwp" >> $env:GITHUB_ENV
           "KYTY_SPIRV_TO_DXIL_ROOT=$deps\spirv_to_dxil" >> $env:GITHUB_ENV
+          "KYTY_FSR_SDK_ROOT=$deps\fidelityfx-sdk" >> $env:GITHUB_ENV
           "KYTY_WINPTHREAD_DLL=C:\msys64\ucrt64\bin\libwinpthread-1.dll" >> $env:GITHUB_ENV
 
       - name: Cache spirv_to_dxil
@@ -85,6 +86,31 @@ jobs:
           Copy-Item "$mesa\src\microsoft\spirv_to_dxil\spirv_to_dxil.h", "$mesa\src\microsoft\compiler\dxil_versions.h" "$root\include"
           Copy-Item "$mesa\build\src\microsoft\spirv_to_dxil\spirv_to_dxil.lib" "$root\lib"
           Copy-Item "$mesa\build\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll" "$root\bin"
+
+      # AMD's FidelityFX SDK v1.1.4 source (MIT) for FSR: the archive that src/uwp/fidelityfx.cmake names, with the same checksum. Only its
+      # sdk folder and license are kept (not AMD's prebuilt DLLs), and the cache saves the 200 MB download on later runs.
+      - name: Cache FidelityFX SDK
+        id: fidelityfx-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\deps\fidelityfx-sdk
+          key: fidelityfx-sdk-v1.1.4-9a19e1f20bf269163f052186ed563209c5a1d0f7b1cf7e567e643dee6cc61179
+
+      - name: FidelityFX SDK
+        if: steps.fidelityfx-cache.outputs.cache-hit != 'true'
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $zip = "$env:RUNNER_TEMP\fidelityfx-sdk.zip"
+          Invoke-WebRequest https://codeload.github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/zip/refs/tags/v1.1.4 -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne '9a19e1f20bf269163f052186ed563209c5a1d0f7b1cf7e567e643dee6cc61179') { throw 'FidelityFX SDK: unexpected download' }
+          $unpacked = "$env:RUNNER_TEMP\fidelityfx"
+          New-Item -ItemType Directory $unpacked -Force | Out-Null
+          & "$env:SystemRoot\System32\tar.exe" -xf $zip -C $unpacked
+          $source = (Get-ChildItem $unpacked -Directory | Select-Object -First 1).FullName
+          New-Item -ItemType Directory $env:KYTY_FSR_SDK_ROOT -Force | Out-Null
+          Copy-Item "$source\LICENSE.txt" $env:KYTY_FSR_SDK_ROOT
+          Copy-Item "$source\sdk" $env:KYTY_FSR_SDK_ROOT -Recurse
+          if (-not (Test-Path "$env:KYTY_FSR_SDK_ROOT\sdk\tools\binary_store\FidelityFX_SC.exe")) { throw 'FidelityFX SDK: no shader compiler' }
 
       - name: WinUI 2 packages
         run: |
