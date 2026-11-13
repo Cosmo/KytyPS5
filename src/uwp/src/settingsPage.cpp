@@ -12,6 +12,7 @@
 
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Display.Core.h>
 #include <winrt/Windows.Storage.Pickers.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.System.h>
@@ -25,6 +26,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <utility>
@@ -33,6 +35,27 @@
 namespace Kyty::Uwp {
 
 namespace {
+
+// The Xbox's current TV mode as the Your TV tile shows it ("4K · 120 Hz"; HdmiDisplayInformation, on the UI thread).
+std::wstring TvModeName() {
+	try {
+		const auto hdmi = winrt::Windows::Graphics::Display::Core::HdmiDisplayInformation::GetForCurrentView();
+		const auto mode = hdmi != nullptr ? hdmi.GetCurrentDisplayMode() : nullptr;
+		if (mode != nullptr) {
+			const auto   width  = mode.ResolutionWidthInRawPixels();
+			const auto   height = mode.ResolutionHeightInRawPixels();
+			std::wstring name   = width == 3840 && height == 2160   ? L"4K"
+			                      : width == 2560 && height == 1440 ? L"1440p"
+			                      : width == 1920 && height == 1080 ? L"1080p"
+			                      : width == 1280 && height == 720  ? L"720p"
+			                                                        : std::to_wstring(width) + L" \u00D7 " + std::to_wstring(height);
+			return name + L" \u00B7 " + std::to_wstring(std::lround(mode.RefreshRate())) + L" Hz";
+		}
+	} catch (winrt::hresult_error const&) {
+	}
+	return L"Unknown";
+}
+
 
 namespace xaml = winrt::Windows::UI::Xaml;
 
@@ -140,7 +163,10 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
         <Grid>
           <!-- A category's settings: one column, or two groups with headings where one column would be taller than the screen, as the Xbox
                groups a page's settings in columns. -->
-          <StackPanel x:Name="Display" Width="219" Spacing="8" />
+          <StackPanel x:Name="Display" Orientation="Horizontal" Spacing="36">
+            <StackPanel x:Name="DisplayGames" Width="219" Spacing="8" />
+            <StackPanel x:Name="DisplayPicture" Width="219" Spacing="8" />
+          </StackPanel>
 
           <StackPanel x:Name="Overlay" Orientation="Horizontal" Spacing="18" Visibility="Collapsed">
             <StackPanel x:Name="OverlayGroup" Width="219" Spacing="8" />
@@ -376,36 +402,43 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	const auto panel       = [&page](const wchar_t* name) { return page.FindName(name).as<xaml::Controls::Panel>(); };
 	const auto explanation = page.FindName(L"Explanation").as<xaml::Controls::StackPanel>();
 
-	// Display.
-	const auto display = panel(L"Display");
+	// Display: the TV, what games see, then upscaling and frame rate (two columns, as the Xbox's Settings group a page's tiles).
+	const auto games   = panel(L"DisplayGames");
+	const auto picture = panel(L"DisplayPicture");
+	// A heading under other tiles keeps a gap above it.
+	const auto heading = [](xaml::Controls::Panel const& column, const wchar_t* text) {
+		const bool below = column.Children().Size() > 0;
+		AddHeading(column, text);
+		if (below) {
+			auto added = column.Children().GetAt(column.Children().Size() - 1).as<xaml::FrameworkElement>();
+			added.Margin(xaml::ThicknessHelper::FromLengths(0, 16, 0, 4));
+		}
+	};
+	if (IsXbox()) {
+		heading(games, L"Your TV");
+		AddAction(
+		    games, explanation, TvModeName().c_str(), L"Set in Xbox settings", [] {},
+		    {L"This is the mode your console sends to your TV. To change it, go to Settings \u203A General \u203A TV & display options."});
+	}
+	heading(games, L"What games see");
 	{
 		std::vector<std::wstring> names;
 		for (const auto& resolution: RESOLUTIONS) {
 			names.emplace_back(resolution.name);
 		}
-		// Older sizes from the settings file (1280 × 720, 2560 × 1440) are told as 1080p, and show as it.
+		// Older sizes from the settings file (1280 x 720, 2560 x 1440) are told as 1080p, and show as it.
 		const size_t selected = settings.screen_width >= 3840 && settings.screen_height >= 2160 ? 1 : 0;
 		AddChoice(
-		    display, explanation, L"TV resolution", std::move(names), selected,
+		    games, explanation, L"PS5 resolution", std::move(names), selected,
 		    [state, save](size_t index) {
 			    state->settings.screen_width  = RESOLUTIONS[index].width;
 			    state->settings.screen_height = RESOLUTIONS[index].height;
 			    save();
 		    },
-		    {L"The TV resolution the games are told.", L"Some games choose their render resolution from it. There, 4K looks sharper and needs more of the GPU.",
-		     L"Games that don't ask are always told 4K. The picture is scaled to the screen either way."});
+		    {IsXbox() ? L"Some games choose how sharp to render based on this. 4K looks sharper but can lower the frame rate. Your TV's mode doesn't change."
+		              : L"Some games choose how sharp to render based on this. 4K looks sharper but can lower the frame rate. Your display's mode doesn't "
+		                L"change."});
 	}
-	AddSwitch(
-	    display, explanation, L"V-Sync", settings.vsync,
-	    [state, save](bool on) {
-		    state->settings.vsync = on;
-		    save();
-	    },
-	    IsXbox() ? Paragraphs {L"Syncs each frame to the display's refresh for smooth, even motion, at the cost of slightly higher input latency.",
-	                           L"When off, frames are shown as soon as they're ready, with lower latency.",
-	                           L"To run games above 60 frames per second, turn V-Sync off."}
-	             : Paragraphs {L"Syncs each frame to the display's refresh for smooth, even motion, at the cost of slightly higher input latency.",
-	                           L"When off, frames are shown as soon as they're ready, with lower latency."});
 	{
 		// The settings page's rates; another one from the settings file stays a choice of its own.
 		std::vector<uint32_t> rates {30, 60, 120};
@@ -418,24 +451,81 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 			names.push_back(std::to_wstring(rate) + L" Hz");
 		}
 		AddChoice(
-		    display, explanation, L"Refresh rate", std::move(names), static_cast<size_t>(std::find(rates.begin(), rates.end(), current) - rates.begin()),
+		    games, explanation, L"PS5 refresh rate", std::move(names), static_cast<size_t>(std::find(rates.begin(), rates.end(), current) - rates.begin()),
 		    [state, save, rates](size_t index) {
 			    state->settings.vblank_frequency = rates[index];
 			    save();
 		    },
-		    {L"The refresh rate the console reports to games. Most games are designed for 60 Hz.",
-		     IsXbox() ? L"At 120 Hz, games that offer a 120 Hz mode can run at up to 120 frames per second. This requires a TV that supports 120 Hz, "
-		                L"120 Hz selected in TV & display options, and V-Sync turned off."
-		              : L"At 120 Hz, games that offer a 120 Hz mode can run at up to 120 frames per second on a display that supports 120 Hz.",
-		     L"A lower rate limits games to that frame rate."});
+		    IsXbox() ? Paragraphs {L"Most games are made for 60 Hz. If a game has a 120 Hz mode, choose 120 Hz to let it run at up to 120 frames per second. "
+		                           L"Your TV needs to be set to 120 Hz, and V-Sync needs to be off."}
+		             : Paragraphs {L"The refresh rate the console reports to games. Most games are designed for 60 Hz.",
+		                           L"At 120 Hz, games that offer a 120 Hz mode can run at up to 120 frames per second on a display that supports 120 Hz.",
+		                           L"A lower rate limits games to that frame rate."});
 	}
 	AddSwitch(
-	    display, explanation, IsXbox() ? L"Stretch to screen" : L"Stretch to window", settings.stretch,
+	    games, explanation, L"PS5 Pro mode", settings.pro_mode,
 	    [state, save](bool on) {
-		    state->settings.stretch = on;
+		    state->settings.pro_mode = on;
 		    save();
 	    },
-	    {L"Fills the whole screen with the picture. When off, the picture keeps the game's shape, with black bars where it doesn't fit."});
+	    {L"Games that support PS5 Pro use their Pro graphics settings. This is experimental, and some games may run out of memory sooner."});
+	heading(picture, L"Upscaling");
+	if (IsXbox()) {
+		std::vector<std::wstring> names {L"Match TV", L"1080p"};
+		AddChoice(
+		    picture, explanation, L"Output resolution", std::move(names), settings.output_resolution == "1080p" ? 1 : 0,
+		    [state, save](size_t index) {
+			    state->settings.output_resolution = index == 1 ? "1080p" : "Match TV";
+			    save();
+		    },
+		    {L"Match TV keeps 4K games sharp on a 4K TV. 1080p uses less memory, and your console scales the picture up to your TV."});
+	}
+#ifdef KYTY_HAS_FSR
+	{
+		// Upstream's --pssr-upscaler. DLSS is NVIDIA's and Vulkan's, so the Xbox has Linear and FSR (built in).
+		std::vector<std::wstring> names {L"Linear", L"FSR"};
+		AddChoice(
+		    picture, explanation, L"PSSR upscaler", std::move(names), settings.pssr_upscaler == "FSR" ? 1 : 0,
+		    [state, save](size_t index) {
+			    state->settings.pssr_upscaler = index == 1 ? "FSR" : "Linear";
+			    save();
+		    },
+		    {L"Some PS5 Pro games upscale their picture with PSSR, Sony's upscaler. FSR emulates PSSR with AMD's upscaler and gives a sharper picture. "
+		     L"Linear is a plain scale."});
+	}
+#endif
+	{
+		const std::vector<std::string> values {"Off", "Low", "Medium", "High"};
+		std::vector<std::wstring>      names {L"Off", L"Sharpness low", L"Sharpness medium", L"Sharpness high"};
+		const auto                     found = std::find(values.begin(), values.end(), settings.fsr1_upscaling);
+		AddChoice(
+		    picture, explanation, L"FSR 1", std::move(names), found != values.end() ? static_cast<size_t>(found - values.begin()) : 0,
+		    [state, save, values](size_t index) {
+			    state->settings.fsr1_upscaling = values[index < values.size() ? index : 0];
+			    save();
+		    },
+		    {L"Sharpens and upscales games that render below the output resolution. This is experimental and doesn't work with HDR."});
+	}
+	heading(picture, L"Frame rate");
+	AddSwitch(
+	    picture, explanation, L"V-Sync", settings.vsync,
+	    [state, save](bool on) {
+		    state->settings.vsync = on;
+		    save();
+	    },
+	    IsXbox() ? Paragraphs {L"Syncs each frame to your TV's refresh for smooth motion. Turn it off to let games run above 60 frames per second."}
+	             : Paragraphs {L"Syncs each frame to the display's refresh for smooth, even motion, at the cost of slightly higher input latency.",
+	                           L"When off, frames are shown as soon as they're ready, with lower latency."});
+#ifdef KYTY_HAS_FSR
+	AddSwitch(
+	    picture, explanation, L"FSR frame generation", settings.fsr_frame_generation,
+	    [state, save](bool on) {
+		    state->settings.fsr_frame_generation = on;
+		    save();
+	    },
+	    {L"Adds a generated frame between game frames for smoother motion. Works only with PS5 Pro games that use PSSR and run at half your refresh "
+	     L"rate, like 30 fps at 60 Hz. This is experimental."});
+#endif
 	// Overlay: the same tiles as in the game menu's Overlay, in two groups.
 	AddHeading(panel(L"OverlayGroup"), L"Overlay");
 	AddHeading(panel(L"OnScreenGroup"), L"Also on screen");
@@ -860,6 +950,14 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	AddHeading(developer, L"Diagnostics");
 	AddHeading(testing, L"Testing");
 	AddSwitch(
+	    testing, explanation, IsXbox() ? L"Stretch to screen" : L"Stretch to window", settings.stretch,
+	    [state, save](bool on) {
+		    state->settings.stretch = on;
+		    save();
+	    },
+	    {IsXbox() ? L"Fills the screen even if the game's picture has a different shape. When off, black bars fill the gaps."
+	              : L"Fills the window even if the game's picture has a different shape. When off, black bars fill the gaps."});
+	AddSwitch(
 	    developer, explanation, L"Graphics debug layer", settings.debug_layer,
 	    [state, save](bool on) {
 		    state->settings.debug_layer = on;
@@ -921,49 +1019,6 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    save();
 	    },
 	    {L"Tells games that a VR headset is connected and worn.", L"Only for testing games that need one."});
-	AddSwitch(
-	    testing, explanation, L"PS5 Pro mode", settings.pro_mode,
-	    [state, save](bool on) {
-		    state->settings.pro_mode = on;
-		    save();
-	    },
-	    {L"Tells games that support it that they run on a PS5 Pro.",
-	     L"Experimental. PS5 Pro features are not supported; games can run out of memory."});
-#ifdef KYTY_HAS_FSR
-	{
-		// Upstream's --pssr-upscaler. DLSS is NVIDIA's and Vulkan's, so the Xbox has Linear and FSR (built in).
-		std::vector<std::wstring> names {L"Linear", L"FSR"};
-		AddChoice(
-		    testing, explanation, L"PSSR upscaler", std::move(names), settings.pssr_upscaler == "FSR" ? 1 : 0,
-		    [state, save](size_t index) {
-			    state->settings.pssr_upscaler = index == 1 ? "FSR" : "Linear";
-			    save();
-		    },
-		    {L"How PS5 Pro mode upscales the games that use PSSR.",
-		     L"FSR (AMD FSR 3.1) uses the game's depth and motion. Takes effect the next time a game starts."});
-	}
-	AddSwitch(
-	    testing, explanation, L"FSR frame generation", settings.fsr_frame_generation,
-	    [state, save](bool on) {
-		    state->settings.fsr_frame_generation = on;
-		    save();
-	    },
-	    {L"Experimental. Shows a frame made by AMD FSR 3.1 between two game frames, from the game's PSSR depth and motion.",
-	     L"Needs PS5 Pro mode, a game that uses PSSR, SDR output and a game at half the refresh rate (30 fps at 60 Hz). Takes effect the next time a game starts."});
-#endif
-	{
-		const std::vector<std::string> values {"Off", "Low", "Medium", "High"};
-		std::vector<std::wstring>      names {L"Off", L"Sharpness low", L"Sharpness medium", L"Sharpness high"};
-		const auto                     found = std::find(values.begin(), values.end(), settings.fsr1_upscaling);
-		AddChoice(
-		    testing, explanation, L"FSR 1 upscaling", std::move(names), found != values.end() ? static_cast<size_t>(found - values.begin()) : 0,
-		    [state, save, values](size_t index) {
-			    state->settings.fsr1_upscaling = values[index < values.size() ? index : 0];
-			    save();
-		    },
-		    {L"Experimental. Scales games whose picture is smaller than the screen with AMD FSR 1 and sharpens them, instead of a plain scale.",
-		     L"Not for HDR pictures. Takes effect the next time a game starts."});
-	}
 	AddSwitch(
 	    testing, explanation, L"Guest clock at PS5 speed", settings.guest_tsc,
 	    [state, save](bool on) {
