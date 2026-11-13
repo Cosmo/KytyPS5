@@ -66,9 +66,17 @@ namespace {
 // and the console scaled that up. RetroArch makes its picture the size of the TV's mode (HdmiDisplayInformation), and the DirectX team's notes
 // on UWP for Xbox Series X|S allow a 4K swap chain that the console scales as needed. The factor by which the TV's mode is larger than the window's
 // pixels (1 elsewhere): the panel's pixel scale grows by it, so the swap chain gets the TV's size and its inverse transform keeps it in the panel.
-float OutputScale(float composition_scale) {
+// With the setting Output resolution at 1080p, the picture keeps the window's pixels.
+float OutputScale(float composition_scale, bool match_tv) {
 	static float logged = 0.0f;
 	if (!IsXbox() || composition_scale <= 0.0f) {
+		return 1.0f;
+	}
+	if (!match_tv) {
+		if (logged != -1.0f) {
+			logged = -1.0f;
+			Log("screen: Output resolution 1080p: the picture keeps the window's pixels\n");
+		}
 		return 1.0f;
 	}
 	float scale = 1.0f;
@@ -807,8 +815,10 @@ xaml::UIElement CreateEmulatorPage(std::filesystem::path game) {
 		panel.Width(panel_width);
 		panel.Height(panel_height);
 	});
-	const auto                     report_size = [](xaml::Controls::SwapChainPanel const& panel) {
-		const float output = OutputScale(panel.CompositionScaleX());
+	// The settings page only opens from the library, so the setting is read once for the game.
+	const bool                     match_tv    = LoadSettings().output_resolution != "1080p";
+	const auto                     report_size = [match_tv](xaml::Controls::SwapChainPanel const& panel) {
+		const float output = OutputScale(panel.CompositionScaleX(), match_tv);
         EmulatorHost::Get().SetPanelSize(static_cast<float>(panel.ActualWidth()),
 		                                                     static_cast<float>(panel.ActualHeight()),
 		                                                     panel.CompositionScaleX() * output,
