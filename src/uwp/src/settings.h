@@ -123,22 +123,25 @@ struct AppSettings {
 	// The settings page, Testing: upstream's command-line flags --playgo-hack (Config::playgo_hack_enabled) and --vr (Config::vr_enabled). Off.
 	bool playgo_fallback    = false;
 	bool virtual_vr_headset = false;
-	// The settings page, Testing: upstream's --trinity, the PS5 Pro mode with linear PSSR (Config::pro_enabled), and --guest-tsc, the
-	// guest's time stamp counter at the PS5's 1.6 GHz (Config::guest_tsc_enabled). Off.
+	// The settings page: upstream's --trinity, the PS5 Pro mode with linear PSSR (Config::pro_enabled; Display), and --guest-tsc, the
+	// guest's time stamp counter at the PS5's 1.6 GHz (Config::guest_tsc_enabled; Testing). Off.
 	bool pro_mode  = false;
 	bool guest_tsc = false;
 	// The settings page, Testing: upstream's --occlusion-queries (Config::occlusion_queries_enabled). Off.
 	bool occlusion_queries = false;
 	// The settings page, Testing: upstream's --relaxed-shader-float, the GPU's own float operations in shaders (Config::relaxed_shader_float). Off.
 	bool relaxed_shader_float = false;
-	// The settings page, Testing: upstream's --pssr-upscaler, how PS5 Pro mode upscales PSSR: "Linear" (upstream's default) or "FSR" (AMD
+	// The settings page, Display: upstream's --pssr-upscaler, how PS5 Pro mode upscales PSSR: "Linear" (upstream's default) or "FSR" (AMD
 	// FSR 3.1, built from the FidelityFX SDK's MIT source). Linear.
 	std::string pssr_upscaler = "Linear";
-	// The settings page, Testing: FSR frame generation from the PSSR hook (Config::fsr_frame_generation). Off.
+	// The settings page, Display: FSR frame generation from the PSSR hook (Config::fsr_frame_generation). Off.
 	bool fsr_frame_generation = false;
-	// The settings page, Testing: AMD FSR 1 for pictures smaller than the screen (Config::fsr1_upscaling): "Off", "Low", "Medium" or
+	// The settings page, Display: AMD FSR 1 for pictures smaller than the screen (Config::fsr1_upscaling): "Off", "Low", "Medium" or
 	// "High" sharpness. Off.
 	std::string fsr1_upscaling = "Off";
+	// The settings page, Display, Xbox only: the size of the picture the app sends to the TV: "Match TV" (the TV's mode, see
+	// OutputScale in app.cpp) or "1080p" (the window's pixels, which the console scales to the TV). Match TV.
+	std::string output_resolution = "Match TV";
 	// Number of draws between host GPU submissions. Zero uses normal batching.
 	uint32_t flush_draws = 0;
 	// Debugging, only in the file: ask for a frame dump this many seconds after the game started (0: never; the game menu has Save frame dump).
