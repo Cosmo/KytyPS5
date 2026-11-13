@@ -32,6 +32,7 @@
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Display.Core.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Windows.System.h>
@@ -42,6 +43,7 @@
 #include <winrt/Windows.UI.Xaml.Media.h>
 #include <winrt/Windows.UI.Xaml.Shapes.h>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
@@ -59,6 +61,40 @@ namespace xaml       = winrt::Windows::UI::Xaml;
 namespace activation = winrt::Windows::ApplicationModel::Activation;
 
 namespace {
+
+// On an Xbox the app's window has 1920 x 1080 pixels whatever mode the TV is in, so without this the game's picture went to the screen at 1080p
+// and the console scaled that up. RetroArch makes its picture the size of the TV's mode (HdmiDisplayInformation), and the DirectX team's notes
+// on UWP for Xbox Series X|S allow a 4K swap chain that the console scales as needed. The factor by which the TV's mode is larger than the window's
+// pixels (1 elsewhere): the panel's pixel scale grows by it, so the swap chain gets the TV's size and its inverse transform keeps it in the panel.
+float OutputScale(float composition_scale) {
+	static float logged = 0.0f;
+	if (!IsXbox() || composition_scale <= 0.0f) {
+		return 1.0f;
+	}
+	float scale = 1.0f;
+	try {
+		const auto hdmi = winrt::Windows::Graphics::Display::Core::HdmiDisplayInformation::GetForCurrentView();
+		if (hdmi == nullptr) {
+			return 1.0f;
+		}
+		const auto  mode          = hdmi.GetCurrentDisplayMode();
+		const auto  bounds        = xaml::Window::Current().Bounds();
+		const float window_pixels = bounds.Width * composition_scale;
+		if (mode == nullptr || window_pixels <= 0.0f) {
+			return 1.0f;
+		}
+		scale = std::max(1.0f, static_cast<float>(mode.ResolutionWidthInRawPixels()) / window_pixels);
+		if (scale != logged) {
+			logged = scale;
+			Log("screen: the TV is at %ux%u, the window has %.0fx%.0f pixels: the picture is made %.2f times larger\n", mode.ResolutionWidthInRawPixels(),
+			    mode.ResolutionHeightInRawPixels(), window_pixels, bounds.Height * composition_scale, scale);
+		}
+	} catch (winrt::hresult_error const& error) {
+		Log("screen: the TV's mode could not be read (0x%08x)\n", static_cast<uint32_t>(error.code()));
+		return 1.0f;
+	}
+	return scale;
+}
 
 // The game's page: the panel the game presents to; in front of it the launch screen until the game is ready to be seen, and the game menu. The launch
 // screen is the game's start screen as the PS5 shows it (its pic1 and pic2), or, when the game has none, a card with its background, name and progress.
@@ -772,10 +808,11 @@ xaml::UIElement CreateEmulatorPage(std::filesystem::path game) {
 		panel.Height(panel_height);
 	});
 	const auto                     report_size = [](xaml::Controls::SwapChainPanel const& panel) {
+		const float output = OutputScale(panel.CompositionScaleX());
         EmulatorHost::Get().SetPanelSize(static_cast<float>(panel.ActualWidth()),
 		                                                     static_cast<float>(panel.ActualHeight()),
-		                                                     panel.CompositionScaleX(),
-		                                                     panel.CompositionScaleY());
+		                                                     panel.CompositionScaleX() * output,
+		                                                     panel.CompositionScaleY() * output);
 	};
 	panel.SizeChanged([report_size](auto const& sender, auto const&) {
 		report_size(sender.template as<xaml::Controls::SwapChainPanel>());
