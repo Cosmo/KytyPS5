@@ -130,6 +130,8 @@ struct ShaderTessellationInputInfo {
 	uint32_t domain                = 0;
 	uint32_t partitioning          = 0;
 	uint32_t output_topology       = 0;
+	// The stages run as the capture draw, compute shader and vertex stage of IR::TessEmulation (HostShaderLimits::tess_compute_emulation).
+	bool     compute_emulation     = false;
 };
 
 // GS user-data slots an indirect draw packet writes its record's base vertex and first instance

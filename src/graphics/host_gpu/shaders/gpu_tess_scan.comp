@@ -1,0 +1,76 @@
+#version 450
+
+// The D3D12 renderer's tessellation emulation (ShaderRecompiler::IR::TessEmulation), between the two passes of gpu_tess_tessellate.comp: one
+// workgroup turns the patches' point and index counts (counts + 2 * patch) into their first point and first index (offsets + 3 * patch, then
+// whether the patch is kept). Patches past the capacity of the points or the indices are dropped; as the offsets only grow, the kept
+// patches are the first ones, so the draw's indices are all written. Then the indirect draw's record at args: the two dwords of
+// spirv_to_dxil's runtime data (first vertex, base instance), then D3D12_DRAW_INDEXED_ARGUMENTS.
+layout(local_size_x = 1024) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Unused { uint data[]; } unused;
+layout(set = 0, binding = 1, std430) buffer Result { uint data[]; } result;
+
+layout(push_constant, std430) uniform Parameters {
+	uint patches;
+	uint counts; // dwords of the result buffer
+	uint offsets;
+	uint args;
+	uint point_capacity;
+	uint index_capacity;
+} params;
+
+shared uint s_points[1024];
+shared uint s_indices[1024];
+shared uint s_kept_indices;
+
+void main() {
+	const uint thread = gl_LocalInvocationID.x;
+	const uint per    = (params.patches + 1023u) / 1024u;
+	const uint first  = min(thread * per, params.patches);
+	const uint last   = min(first + per, params.patches);
+	uint       points  = 0u;
+	uint       indices = 0u;
+	for (uint p = first; p < last; p++) {
+		points += result.data[params.counts + p * 2u];
+		indices += result.data[params.counts + p * 2u + 1u];
+	}
+	s_points[thread]  = points;
+	s_indices[thread] = indices;
+	if (thread == 0u) {
+		s_kept_indices = 0u;
+	}
+	barrier();
+	for (uint step = 1u; step < 1024u; step <<= 1u) {
+		const uint add_points  = thread >= step ? s_points[thread - step] : 0u;
+		const uint add_indices = thread >= step ? s_indices[thread - step] : 0u;
+		barrier();
+		s_points[thread] += add_points;
+		s_indices[thread] += add_indices;
+		barrier();
+	}
+	uint point_offset = s_points[thread] - points;
+	uint index_offset = s_indices[thread] - indices;
+	for (uint p = first; p < last; p++) {
+		const uint patch_points  = result.data[params.counts + p * 2u];
+		const uint patch_indices = result.data[params.counts + p * 2u + 1u];
+		const bool kept = point_offset + patch_points <= params.point_capacity && index_offset + patch_indices <= params.index_capacity;
+		result.data[params.offsets + p * 3u]      = point_offset;
+		result.data[params.offsets + p * 3u + 1u] = index_offset;
+		result.data[params.offsets + p * 3u + 2u] = kept ? 1u : 0u;
+		if (kept) {
+			atomicMax(s_kept_indices, index_offset + patch_indices);
+		}
+		point_offset += patch_points;
+		index_offset += patch_indices;
+	}
+	barrier();
+	if (thread == 0u) {
+		result.data[params.args]      = 0u; // first vertex
+		result.data[params.args + 1u] = 0u; // base instance
+		result.data[params.args + 2u] = s_kept_indices;
+		result.data[params.args + 3u] = 1u; // instances
+		result.data[params.args + 4u] = 0u; // first index
+		result.data[params.args + 5u] = 0u; // vertex offset
+		result.data[params.args + 6u] = 0u; // first instance
+	}
+}

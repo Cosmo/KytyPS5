@@ -7,6 +7,8 @@
 #include "common/profiler.h"
 #include "gpu_tiler_shaders/gpu_tiler_draw_records_spv.h"
 #include "gpu_tiler_shaders/gpu_tiler_mesh_records_spv.h"
+#include "gpu_blit_shaders/gpu_tess_scan_spv.h"
+#include "gpu_blit_shaders/gpu_tess_tessellate_spv.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/frameResolution.h"
@@ -20,6 +22,7 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/host_gpu/workCounters.h"
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
+#include "graphics/shader/recompiler/ir/TessEmulation.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
@@ -603,6 +606,158 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 	return true;
 }
 
+const char* RenderExecutor::PrepareTessDraw(const DrawCallInfo& draw, const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
+                                            const DrawRenderState& state, TessDraw& tess) {
+	using Emulation  = IR::TessEmulation;
+	const auto& info = state.vertex_info[1].tess;
+	if (!info.compute_emulation) {
+		return "tessellation is not supported";
+	}
+	if (info.domain != 1u && info.domain != 2u) {
+		return "isoline tessellation";
+	}
+	const uint32_t patches = draw.index_count / info.input_control_points;
+	if (patches == 0 || draw.instance_count == 0) {
+		return "a tessellated draw without patches";
+	}
+	// Each control point position's capture slot: its vertex index from the smallest one (the vertex offset adds to both).
+	const uint32_t positions = patches * info.input_control_points;
+	auto           slots     = FanVertices(m_context, draw, index_source);
+	slots.resize(positions);
+	const auto [low, high] = std::ranges::minmax(slots);
+	for (auto& slot: slots) {
+		slot -= low;
+	}
+	tess.patch_total   = patches * draw.instance_count;
+	tess.capture_count = positions;
+	tess.groups_x      = std::min<uint32_t>(tess.patch_total, D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION);
+	tess.groups_y      = (tess.patch_total + tess.groups_x - 1u) / tess.groups_x;
+	tess.record_dwords = Emulation::RecordDwords(info);
+	// What one draw may use for its points and triangles: a patch has at most 65 x 65 points and 64 x 64 x 2 triangles (factor 64);
+	// the patches past the capacity are dropped.
+	constexpr uint32_t PointBudget = (uint32_t {8} << 20u) / (Emulation::PointDwords * sizeof(uint32_t));
+	constexpr uint32_t IndexBudget = (uint32_t {24} << 20u) / sizeof(uint32_t);
+	tess.point_capacity = static_cast<uint32_t>(std::min<uint64_t>(uint64_t {tess.patch_total} * 65u * 65u, PointBudget));
+	tess.index_capacity = static_cast<uint32_t>(std::min<uint64_t>(uint64_t {tess.patch_total} * 64u * 64u * 6u, IndexBudget));
+	tess.counts         = 0;
+	tess.offsets        = tess.counts + tess.patch_total * 2u;
+	tess.args           = (tess.offsets + tess.patch_total * 3u + 3u) & ~3u;
+	tess.point_base     = tess.args + 8u;
+	tess.index_base     = tess.point_base + tess.point_capacity * Emulation::PointDwords;
+	const uint64_t output_bytes = (uint64_t {tess.index_base} + tess.index_capacity) * sizeof(uint32_t);
+	auto& params                       = tess.params;
+	params[Emulation::CaptureBase]     = static_cast<uint32_t>(emit.vertex_offset) + low;
+	params[Emulation::CaptureVertices] = high - low + 1u;
+	params[Emulation::BaseInstance]    = emit.first_instance;
+	params[Emulation::PatchCount]      = patches;
+	params[Emulation::Indexed]         = 1u; // (the slots are always given)
+	params[Emulation::GroupsX]         = tess.groups_x;
+	params[Emulation::PatchTotal]      = tess.patch_total;
+	const uint64_t capture_bytes =
+	    uint64_t {params[Emulation::CaptureVertices]} * draw.instance_count * Emulation::CaptureDwords(info) * sizeof(uint32_t);
+	const uint64_t record_bytes = uint64_t {tess.patch_total} * tess.record_dwords * sizeof(uint32_t);
+	constexpr uint64_t Limit    = uint64_t {256} << 20u;
+	if (tess.groups_y > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION || capture_bytes > Limit || record_bytes > Limit ||
+	    output_bytes > Limit) {
+		return "a tessellated draw too big for the emulation";
+	}
+	const auto ensure = [this](std::unique_ptr<Buffer>& target, uint64_t size, const char* name) {
+		size = std::max<uint64_t>(size, 4096);
+		if (target == nullptr || target->Size() < size) {
+			if (target != nullptr) {
+				// (The list may still use the old one.)
+				m_context.GetCommandScheduler().DeferOperation([old = std::move(target)]() mutable { old.reset(); });
+			}
+			target = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(), MemoryUsage::DeviceLocal, 0,
+			                                  size + size / 2u);
+			target->SetName("{}", name);
+		}
+	};
+	ensure(m_tess_capture, capture_bytes, "tessellation capture");
+	ensure(m_tess_records, record_bytes, "tessellation records");
+	ensure(m_tess_output, output_bytes, "tessellation points and indices");
+	auto& stream        = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
+	tess.params_address = stream.GpuAddress() + stream.Copy(params.data(), sizeof(params), 256);
+	tess.slots_address  = stream.GpuAddress() + stream.Copy(slots.data(), slots.size() * sizeof(uint32_t), 256);
+	return nullptr;
+}
+
+void RenderExecutor::RecordTessPasses(CommandBuffer& buffer, const DrawCallInfo& draw, const DrawEmitInfo& emit,
+                                      const DrawRenderState& state, const TessDraw& tess, const PipelineCache::Pipeline& capture,
+                                      const PipelineCache::Pipeline& hull) {
+	auto* list  = buffer.Handle();
+	auto& trace = D3D12::GetGpuTrace();
+	auto& bindings = m_graphics_bindings;
+
+	// 1. The capture draw: the LS stores its outputs per vertex (points that rasterize nothing).
+	m_tess_capture->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	D3D12::VertexRuntimeData runtime {};
+	runtime.first_vertex    = static_cast<uint32_t>(emit.vertex_offset);
+	runtime.base_instance   = emit.first_instance;
+	runtime.is_indexed_draw = draw.indexed ? 1u : 0u;
+	PreparedBindings* local = &bindings.vertex[0];
+	CommitBindings(buffer, true, capture, {&local, 1}, {reinterpret_cast<const uint8_t*>(&runtime), sizeof(runtime)});
+	const auto capture_parameter = capture.layout.TessScratchParameter();
+	list->SetGraphicsRootShaderResourceView(capture_parameter, tess.params_address);
+	list->SetGraphicsRootUnorderedAccessView(capture_parameter + 1, m_tess_capture->GpuAddress());
+	list->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+	const D3D12_VIEWPORT viewport {0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+	const D3D12_RECT     scissor {0, 0, 1, 1};
+	list->RSSetViewports(1, &viewport);
+	list->RSSetScissorRects(1, &scissor);
+	list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+	auto slot = trace.Begin(list, &capture.trace);
+	list->SetPipelineState(capture.pipeline);
+	if (draw.indexed) {
+		list->DrawIndexedInstanced(tess.capture_count, draw.instance_count, 0, emit.vertex_offset, emit.first_instance);
+	} else {
+		list->DrawInstanced(tess.capture_count, draw.instance_count, static_cast<uint32_t>(emit.vertex_offset), emit.first_instance);
+	}
+	trace.End(list, slot);
+	buffer.GlobalMemoryBarrier();
+
+	// 2. The hull pass: one workgroup per patch writes the patch's record.
+	m_tess_capture->Use(buffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+	m_tess_records->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	const uint32_t    compute_runtime[7] {tess.groups_x, tess.groups_y, 1, 0, 0, 0, 0};
+	PreparedBindings* control = &bindings.vertex[1];
+	CommitBindings(buffer, false, hull, {&control, 1}, {reinterpret_cast<const uint8_t*>(compute_runtime), sizeof(compute_runtime)});
+	const auto hull_parameter = hull.layout.TessScratchParameter();
+	list->SetComputeRootShaderResourceView(hull_parameter, tess.params_address);
+	list->SetComputeRootShaderResourceView(hull_parameter + 1, m_tess_capture->GpuAddress());
+	list->SetComputeRootShaderResourceView(hull_parameter + 2, tess.slots_address);
+	list->SetComputeRootUnorderedAccessView(hull_parameter + 3, m_tess_records->GpuAddress());
+	slot = trace.Begin(list, &hull.trace);
+	list->SetPipelineState(hull.pipeline);
+	list->Dispatch(tess.groups_x, tess.groups_y, 1);
+	trace.End(list, slot);
+	m_statistics.dispatches++;
+	buffer.GlobalMemoryBarrier();
+
+	// 3. The tessellator: each patch's point and index counts, their places (the patches past the buffer dropped) and the indirect
+	// record, then the points and triangles.
+	const auto&    info    = state.vertex_info[1].tess;
+	auto&          kernels = m_context.GetComputeKernels();
+	const uint32_t groups  = (tess.patch_total + 63u) / 64u;
+	const auto     pass    = [&](uint32_t mode) {
+		const uint32_t constants[] {tess.patch_total, tess.record_dwords, info.domain == 2u ? 1u : 0u, info.partitioning,
+		                            info.output_topology == 3u ? 1u : 0u, mode, tess.counts, tess.offsets, tess.point_base, tess.index_base};
+		ComputeKernels::Bindings bindings;
+		bindings.input     = m_tess_records.get();
+		bindings.output    = m_tess_output.get();
+		bindings.constants = constants;
+		kernels.Dispatch(buffer, kernels.Get(GPU_TESS_TESSELLATE_SPV), bindings, groups, 1, 1);
+	};
+	pass(0);
+	const uint32_t scan_constants[] {tess.patch_total, tess.counts, tess.offsets, tess.args, tess.point_capacity, tess.index_capacity};
+	ComputeKernels::Bindings scan;
+	scan.input     = m_tess_records.get();
+	scan.output    = m_tess_output.get();
+	scan.constants = scan_constants;
+	kernels.Dispatch(buffer, kernels.Get(GPU_TESS_SCAN_SPV), scan, 1, 1, 1);
+	pass(1);
+}
+
 void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
                                          DrawRenderState& state, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source) {
@@ -619,12 +774,18 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 			FrameDump::LogDraw(fmt::format("{} idx={} inst={} -> {}", draw.Name(), draw.index_count, draw.instance_count, reason), true);
 		}
 	};
-	if (state.VertexStages().size() != 1) {
-		static std::atomic_bool warned = false;
-		WarnOnce(warned, "tessellation is not supported; its draws are skipped");
-		log_skip("tessellation is not supported");
-		CountSkippedDraw("tessellation");
-		return;
+	// A tessellated draw runs as a capture draw, compute passes and a draw of their triangles (IR::TessEmulation). Its indices are
+	// read here, before any resource preparation.
+	const bool tessellation = state.VertexStages().size() == 3;
+	TessDraw   tess;
+	if (tessellation) {
+		if (const char* reason = PrepareTessDraw(draw, emit, index_source, state, tess); reason != nullptr) {
+			static std::atomic_bool warned = false;
+			WarnOnce(warned, "a tessellated draw is skipped (the draw log and the overlay say why)");
+			log_skip(reason);
+			CountSkippedDraw(reason);
+			return;
+		}
 	}
 	const bool mesh = vs_input_info.stage.module->info.stage == ShaderType::Mesh;
 	// A mesh program the device cannot run as a mesh shader runs as a compute shader whose output a
@@ -700,10 +861,17 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		(void)m_context.GetBufferCache().FindBuffer(mesh_index_begin, mesh_index_end - mesh_index_begin);
 	}
 	auto&                            bindings = m_graphics_bindings;
-	std::array<PreparedBindings*, 2> descriptor_stages {};
+	std::array<PreparedBindings*, 4> descriptor_stages {};
 	uint32_t                         stage_count = 0;
 	PrepareBindings(vs_input_info.stage, bindings.vertex[0]);
 	descriptor_stages[stage_count++] = &bindings.vertex[0];
+	if (tessellation) {
+		// The HS and the TES (the LS is vertex[0]).
+		PrepareBindings(state.vertex_info[1].stage, bindings.vertex[1]);
+		PrepareBindings(state.vertex_info[2].stage, bindings.vertex[2]);
+		descriptor_stages[stage_count++] = &bindings.vertex[1];
+		descriptor_stages[stage_count++] = &bindings.vertex[2];
+	}
 	if (state.ps_active) {
 		if (!bindings.pixel) {
 			bindings.pixel.emplace();
@@ -835,6 +1003,18 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 			return;
 		}
 	}
+	const PipelineCache::Pipeline* tess_capture = nullptr;
+	const PipelineCache::Pipeline* tess_hull    = nullptr;
+	if (tessellation) {
+		tess_capture = &m_context.GetPipelineCache().GetTessCapturePipeline(buffer, state);
+		tess_hull    = &m_context.GetPipelineCache().GetTessHullPipeline(state.vertex_info[1]);
+		if (tess_capture->pipeline == nullptr || tess_hull->pipeline == nullptr) {
+			log_skip("a pipeline of the tessellation emulation could not be made");
+			CountSkippedDraw("pipeline failed");
+			m_read_only_depth = {};
+			return;
+		}
+	}
 	const auto targets = AcquireRenderTargets(buffer, m_targets.colors, m_targets.color_count,
 	                                          m_targets.depth, read_only_depth);
 	if (targets.unrenderable) {
@@ -844,7 +1024,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		return;
 	}
 
-	MakeRoomForDescriptors({&pipeline, mesh_compute});
+	MakeRoomForDescriptors({&pipeline, mesh_compute, tess_capture, tess_hull});
 	// Resource preparation above may finish and restart the command list. From here on, every
 	// operation records into the current list and cannot touch guest memory.
 	auto* list = buffer.Handle();
@@ -871,14 +1051,18 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	if (mesh_index_buffer != nullptr) {
 		mesh_index_buffer->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 	}
+	if (tessellation) {
+		RecordTessPasses(buffer, draw, emit, state, tess, *tess_capture, *tess_hull);
+	}
 
 	// spirv_to_dxil's vertex index is SV_VertexID plus first_vertex.
 	D3D12::VertexRuntimeData runtime {};
 	// (The vertex stage of a mesh draw run as a compute shader reads its vertices from the records:
 	// its draw has no vertex offset or first instance.)
-	runtime.first_vertex = emulated_mesh ? 0u : static_cast<uint32_t>(vertex_offset);
-	runtime.base_instance   = emulated_mesh ? 0u : emit.first_instance;
-	runtime.is_indexed_draw = (draw.indexed || emulated_mesh) ? 1u : 0u;
+	// (Nor has the domain draw of a tessellated draw: its vertices are the tessellator's domain points.)
+	runtime.first_vertex = emulated_mesh || tessellation ? 0u : static_cast<uint32_t>(vertex_offset);
+	runtime.base_instance   = emulated_mesh || tessellation ? 0u : emit.first_instance;
+	runtime.is_indexed_draw = (draw.indexed || emulated_mesh || tessellation) ? 1u : 0u;
 	if (emulated_mesh) {
 		// The compute shader is the mesh program's own stage: its bindings go to the compute root
 		// signature; the pixel stage's go to the graphics one below.
@@ -887,14 +1071,19 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		CommitBindings(buffer, false, *mesh_compute, {&vertex_stage, 1},
 		               {reinterpret_cast<const uint8_t*>(compute_runtime), sizeof(compute_runtime)});
 	}
-	SetViewports(buffer, list, vs_input_info, targets.width, targets.height, runtime);
+	// (The last vertex stage's clip space: the TES's in a tessellated draw.)
+	SetViewports(buffer, list, tessellation ? state.vertex_info[2] : vs_input_info, targets.width, targets.height, runtime);
 	// The scene's size for the overlay: draws with color targets and a depth target, within the targets.
 	if (targets.color_count > 0 && targets.has_depth) {
 		FrameResolution::NoteRender(static_cast<uint32_t>(std::clamp(runtime.viewport_width, 0.0f, static_cast<float>(targets.width))),
 		                            static_cast<uint32_t>(std::clamp(runtime.viewport_height, 0.0f, static_cast<float>(targets.height))));
 	}
-	CommitBindings(buffer, true, pipeline, emulated_mesh ? stages.subspan(1) : stages,
-	               {reinterpret_cast<const uint8_t*>(&runtime), sizeof(runtime)});
+	// A tessellated draw's domain draw: the TES and the pixel stage.
+	std::array<PreparedBindings*, 2> domain_stages {&bindings.vertex[2], state.ps_active && bindings.pixel ? &*bindings.pixel : nullptr};
+	const auto                       draw_stages = tessellation    ? std::span {domain_stages.data(), domain_stages[1] != nullptr ? 2u : 1u}
+	                                               : emulated_mesh ? stages.subspan(1)
+	                                                               : stages;
+	CommitBindings(buffer, true, pipeline, draw_stages, {reinterpret_cast<const uint8_t*>(&runtime), sizeof(runtime)});
 	// The draw parameters of a mesh program start its push constants, the first root parameter.
 	const uint32_t draw_data[] {
 	    draw.index_count,
@@ -1030,6 +1219,23 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		list->ExecuteIndirect(indirect_signature, emit.indirect.count, indirect_buffer->Resource(), indirect_offset, nullptr, 0);
 	} else if (mesh) {
 		buffer.MeshHandle()->DispatchMesh(mesh_groups, draw.instance_count, 1);
+	} else if (tessellation) {
+		// The domain draw: the TES reads its domain point and its patch's record.
+		m_tess_records->Use(buffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+		m_tess_output->Use(buffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_INDEX_BUFFER |
+		                               D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+		const auto parameter = pipeline.layout.TessScratchParameter();
+		list->SetGraphicsRootShaderResourceView(parameter, tess.params_address);
+		list->SetGraphicsRootShaderResourceView(parameter + 1, m_tess_records->GpuAddress());
+		list->SetGraphicsRootShaderResourceView(parameter + 2, m_tess_output->GpuAddress() + uint64_t {tess.point_base} * sizeof(uint32_t));
+		const D3D12_INDEX_BUFFER_VIEW view {m_tess_output->GpuAddress() + uint64_t {tess.index_base} * sizeof(uint32_t),
+		                                    static_cast<UINT>(uint64_t {tess.index_capacity} * sizeof(uint32_t)), DXGI_FORMAT_R32_UINT};
+		list->IASetIndexBuffer(&view);
+		list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		// The count is the scan kernel's (the record starts with the runtime data, which a pipeline without it skips).
+		constexpr uint32_t RecordBytes = 7u * sizeof(uint32_t);
+		const uint64_t     record      = uint64_t {tess.args} * sizeof(uint32_t) + (pipeline.layout.runtime_data ? 0u : 2u * sizeof(uint32_t));
+		list->ExecuteIndirect(DrawSignature(pipeline, true, RecordBytes), 1, m_tess_output->Resource(), record, nullptr, 0);
 	} else {
 		list->IASetPrimitiveTopology(PrimitiveTopology(topology));
 		const auto record = [&]() {

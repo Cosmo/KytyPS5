@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/shaderCompiler.h"
@@ -26,6 +27,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <xxhash.h>
 
 namespace Libs::Graphics {
 
@@ -389,6 +391,8 @@ struct ShaderProgramCache::Impl {
 
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
 	ProgramKey                                                  lookup_key;
+	// The reflected tessellation interfaces by LS/HS pair and VGT configuration (as upstream's pipeline cache keeps them).
+	std::unordered_map<uint64_t, ShaderTessellationInputInfo>   tess_layouts;
 	uint64_t                                                    next_shader_id = 0;
 	ShaderRecompiler::IR::ImageHeapSource*                      image_heap;
 	const ShaderRecompiler::Spirv::Profile                      profile;
@@ -419,6 +423,18 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
 		vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
+		// Reflection decodes both programs; the key also covers the VGT fields in tess.
+		const uint64_t layout_key[] = {vertex_params[0].hash, vertex_params[1].hash,
+		                               uint64_t {sh.m_vgtLsHsConfig & 0xfff00u} << 32u | sh.m_vgtTfParam};
+		const auto [layout, inserted] =
+		    m_impl->tess_layouts.try_emplace(XXH3_64bits(layout_key, sizeof(layout_key)), vertex_info[0].tess);
+		if (inserted) {
+			ShaderRecompiler::AnalyzeTessellationPrograms(vertex_params[0].code, vertex_params[1].code, layout->second);
+		}
+		for (auto& stage: vertex_info) {
+			stage.tess                   = layout->second;
+			stage.tess.compute_emulation = m_limits.tess_compute_emulation;
+		}
 	} else {
 		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
 	}

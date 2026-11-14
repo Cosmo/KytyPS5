@@ -21,6 +21,7 @@
 #if !defined(KYTY_GPU_BACKEND_D3D12)
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #endif
+#include "graphics/host_gpu/workCounters.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -475,7 +476,15 @@ static bool GetDrawTopology(const HW::UserConfig& ucfg, vk::PrimitiveTopology& t
 			topology = vk::PrimitiveTopology::eTriangleStrip;
 			break;
 		case Prospero::PrimitiveType::kPatch:
-			if (!Config::TessellationEnabled()) return false;
+			if (!Config::TessellationEnabled()) {
+				// The overlay's Skipped row and the log name the games that draw tessellation.
+				static std::atomic_bool logged = false;
+				if (!logged.exchange(true, std::memory_order_relaxed)) {
+					std::printf("Skipping tessellation draws: tessellation is off\n");
+				}
+				CountSkippedDraw("tessellation off");
+				return false;
+			}
 			[[fallthrough]];
 		case Prospero::PrimitiveType::kRectList:
 		case Prospero::PrimitiveType::kRectListLegacy:

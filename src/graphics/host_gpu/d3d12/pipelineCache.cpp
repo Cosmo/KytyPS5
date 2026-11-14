@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
+#include "graphics/shader/recompiler/ir/TessEmulation.h"
 #include "graphics/shader/rectListShader.h"
 #include "kytyGitVersion.h"
 #include "xbox/lazyCounters.h"
@@ -98,6 +99,8 @@ HostShaderLimits ShaderLimits(GraphicContext& graphics, const D3D12::DxilCompile
 	    .mesh_shader_enabled    = graphics.mesh_shaders && compiler.SupportsMeshShaders(),
 	    // Without mesh shaders, merged geometry programs run as compute shaders.
 	    .mesh_compute_emulation = true,
+	    // The Series X's tessellator emits no domain points: tessellation always runs as compute passes (both devices, one path).
+	    .tess_compute_emulation = true,
 	    // D3D12 fixes the mesh shader limits.
 	    .max_mesh_invocations   = 128,
 	    .max_mesh_group_size_x  = 128,
@@ -521,7 +524,8 @@ std::size_t PipelineCache::RootLayoutHash::operator()(const RootLayout& layout) 
 	Mix(hash, (layout.push_constants ? 1u : 0u) | (layout.runtime_data ? 2u : 0u) |
 	              (layout.graphics ? 4u : 0u) | (layout.heap_indexing ? 8u : 0u) |
 	              (layout.guest_table ? 16u : 0u) |
-	              (static_cast<uint32_t>(layout.mesh_scratch) << 5u));
+	              (static_cast<uint32_t>(layout.mesh_scratch) << 5u) |
+	              (static_cast<uint32_t>(layout.tess_scratch) << 7u));
 	return hash;
 }
 
@@ -1479,6 +1483,35 @@ ID3D12RootSignature* PipelineCache::GetRootSignature(const RootLayout& layout) {
 			parameters.push_back(parameter);
 		}
 	}
+	// The buffers of a tessellated draw: root descriptors at the registers the emitter gives them (IR::TessEmulation).
+	if (layout.tess_scratch != RootLayout::TessScratch::None) {
+		using Emulation = IR::TessEmulation;
+		using Scratch   = RootLayout::TessScratch;
+		const auto add  = [&](uint32_t space, bool write) {
+			D3D12_ROOT_PARAMETER1 parameter {};
+			parameter.ParameterType             = write ? D3D12_ROOT_PARAMETER_TYPE_UAV : D3D12_ROOT_PARAMETER_TYPE_SRV;
+			parameter.Descriptor.ShaderRegister = 0;
+			parameter.Descriptor.RegisterSpace  = space;
+			parameter.Descriptor.Flags          = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
+			// (The graphics pipelines' buffers are read or written by their vertex stage only.)
+			parameter.ShaderVisibility = layout.tess_scratch == Scratch::Hull ? D3D12_SHADER_VISIBILITY_ALL : D3D12_SHADER_VISIBILITY_VERTEX;
+			parameters.push_back(parameter);
+		};
+		add(Emulation::ParamSpace, false);
+		switch (layout.tess_scratch) {
+			case Scratch::Capture: add(Emulation::CaptureSpace, true); break;
+			case Scratch::Hull:
+				add(Emulation::CaptureSpace, false);
+				add(Emulation::SlotSpace, false);
+				add(Emulation::RecordSpace, true);
+				break;
+			case Scratch::Domain:
+				add(Emulation::RecordSpace, false);
+				add(Emulation::PointSpace, false);
+				break;
+			case Scratch::None: break;
+		}
+	}
 
 	D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc {};
 	desc.Version                = D3D_ROOT_SIGNATURE_VERSION_1_1;
@@ -1567,6 +1600,42 @@ PipelineCache::Pipeline& PipelineCache::GetMeshComputePipeline(const ShaderVerte
 	pipeline->trace.dxil = {&shader.dxil};
 	pipeline->layout.Add(vertex_info.stage.module->info, shader.dxil.requires_runtime_data);
 	pipeline->layout.mesh_scratch = RootLayout::MeshScratch::Write;
+	pipeline->root_signature      = GetRootSignature(pipeline->layout);
+	if (!shader.dxil.IsValid() || pipeline->root_signature == nullptr) {
+		found->second = std::move(pipeline);
+		return *found->second;
+	}
+
+	ComputePipelineStream stream {};
+	stream.root.value = pipeline->root_signature;
+	stream.cs.value   = Bytecode(shader.dxil);
+	PipelineName name;
+	name.Add(RootLayoutHash {}(pipeline->layout));
+	name.Add(stream.cs.value);
+	const auto loaded_before = m_loaded_pipelines;
+	pipeline->pipeline = LoadOrCreate(name.Get(L'C'), {sizeof(stream), &stream}, {&shader.dxil});
+	CountNewPipeline(loaded_before, shader.from_cache);
+	found->second = std::move(pipeline);
+	return *found->second;
+}
+
+PipelineCache::Pipeline& PipelineCache::GetTessHullPipeline(const ShaderVertexInputInfo& hull_info) {
+	const auto& program = *hull_info.stage.module;
+	// (Translate locks the cache itself. The emitter made the HS a compute shader.)
+	const auto*         shader_ptr = Translate(program, ShaderType::Compute);
+	static const Shader skipped;
+	const auto&         shader = shader_ptr != nullptr ? *shader_ptr : skipped;
+	Common::LockGuard   lock(m_mutex);
+	auto [found, inserted] = m_compute_pipelines.try_emplace(program.id);
+	if (!inserted) {
+		return *found->second;
+	}
+	KYTY_PROFILER_BLOCK("D3D12 create hull compute pipeline");
+	auto pipeline = std::make_unique<Pipeline>();
+	NameNewPipeline(*pipeline, fmt::format("hs as cs {:x}", program.id));
+	pipeline->trace.dxil = {&shader.dxil};
+	pipeline->layout.Add(program.info, shader.dxil.requires_runtime_data);
+	pipeline->layout.tess_scratch = RootLayout::TessScratch::Hull;
 	pipeline->root_signature      = GetRootSignature(pipeline->layout);
 	if (!shader.dxil.IsValid() || pipeline->root_signature == nullptr) {
 		found->second = std::move(pipeline);
@@ -1684,24 +1753,24 @@ const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms&
 std::unique_ptr<PipelineCache::Pipeline>
 PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertexInputInfo& vs_input_info,
                                       const ShaderPixelInputInfo* ps_input_info,
-                                      const GraphicsPrograms&     programs) {
+                                      const GraphicsPrograms& programs, TessRole role) {
 	const auto& params    = key.state.static_params;
 	const bool  mesh      = vs_input_info.stage.module->info.stage == ShaderType::Mesh;
 	// A mesh program run as a compute shader is drawn like any vertex stage (the one that reads its
 	// records), from a pipeline of its own.
 	const bool  emulated  = mesh && vs_input_info.mesh.compute_emulation;
 	const bool  native_mesh = mesh && !emulated;
-	// Mesh programs expand rect lists themselves.
-	const bool  rect_list = !mesh && params.topology == vk::PrimitiveTopology::ePatchList;
+	// Mesh programs expand rect lists themselves. (A tessellated draw's topology is a patch list too.)
+	const bool  rect_list = !mesh && role == TessRole::None && params.topology == vk::PrimitiveTopology::ePatchList;
 	const auto& linked = Link(programs, rect_list, params.sample_shading_enable,
 	                          params.negative_one_to_one, vs_input_info, ps_input_info);
 
 	auto pipeline             = std::make_unique<Pipeline>();
 	pipeline->layout.graphics = true;
+	const char* vertex_name = mesh ? "ms" : role == TessRole::Capture ? "ls" : role == TessRole::Domain ? "ds" : "vs";
 	NameNewPipeline(*pipeline, ps_input_info != nullptr
-	                               ? fmt::format("{} {:x} ps {:x}", mesh ? "ms" : "vs",
-	                                             programs.vertex[0].id, programs.pixel.id)
-	                               : fmt::format("{} {:x}", mesh ? "ms" : "vs", programs.vertex[0].id));
+	                               ? fmt::format("{} {:x} ps {:x}", vertex_name, programs.vertex[0].id, programs.pixel.id)
+	                               : fmt::format("{} {:x}", vertex_name, programs.vertex[0].id));
 	pipeline->trace.dxil  = {&linked.vertex};
 	pipeline->trace.spirv = {emulated ? programs.vertex[0].mesh_fetch : programs.vertex[0].spirv};
 	if (linked.watched) {
@@ -1744,6 +1813,9 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 	if (ps_input_info != nullptr) {
 		pipeline->layout.Add(ps_input_info->stage.module->info, linked.pixel.requires_runtime_data);
 	}
+	pipeline->layout.tess_scratch = role == TessRole::Capture  ? RootLayout::TessScratch::Capture
+	                                : role == TessRole::Domain ? RootLayout::TessScratch::Domain
+	                                                           : RootLayout::TessScratch::None;
 	// The vertex stage reads the user clip planes from the push constants (PushData::UserClipPlaneDword).
 	pipeline->layout.push_constants = pipeline->layout.push_constants || vs_input_info.user_clip_planes != 0;
 	pipeline->root_signature = GetRootSignature(pipeline->layout);
@@ -1751,10 +1823,11 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 		return pipeline; // reported where it failed; the draws that need it are skipped
 	}
 
-	// Vertex attributes: spirv_to_dxil names the input at location N TEXCOORD<N>.
+	// Vertex attributes: spirv_to_dxil names the input at location N TEXCOORD<N>. (A domain draw has none: the TES reads its
+	// domain point and its patch's record.)
 	const auto&                           vertex_input = key.state.vertex_input;
-	std::vector<D3D12_INPUT_ELEMENT_DESC> elements(vertex_input.attribute_count);
-	for (uint32_t index = 0; index < vertex_input.attribute_count; index++) {
+	std::vector<D3D12_INPUT_ELEMENT_DESC> elements(role == TessRole::Domain ? 0u : vertex_input.attribute_count);
+	for (uint32_t index = 0; index < elements.size(); index++) {
 		const auto& attribute = vertex_input.attributes[index];
 		const auto  registers = vs_input_info.resources_dst[index].registers_num;
 		const auto  compiled  = vs_input_info.stage.module->info.info.vertex_fetch_components[index];
@@ -1805,7 +1878,9 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 	SetOutputState(stream, key);
 	stream.input_layout.value = {elements.data(), static_cast<UINT>(elements.size())};
 	stream.strip_cut.value    = static_cast<D3D12_INDEX_BUFFER_STRIP_CUT_VALUE>(key.strip_cut);
-	stream.topology.value     = TopologyType(params.topology);
+	stream.topology.value     = role == TessRole::Capture  ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT
+	                            : role == TessRole::Domain ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE
+	                                                       : TopologyType(params.topology);
 
 	const auto loaded_before = m_loaded_pipelines;
 	pipeline->pipeline = LoadOrCreate(GraphicsPipelineName(stream, elements, root_layout_hash),
@@ -1931,7 +2006,39 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(CommandBuffer& comma
 	if (auto found = m_graphics_pipelines.find(key); found != m_graphics_pipelines.end()) {
 		return *found->second;
 	}
-	auto pipeline = CreateGraphicsPipeline(key, vs_input_info, ps_input_info, programs);
+	// A tessellated draw's own draw is its domain draw: the TES is its vertex stage (IR::TessEmulation).
+	const bool tessellation = vertex_info.size() == 3;
+	auto       stage_programs = programs;
+	if (tessellation) {
+		stage_programs.vertex[0] = programs.vertex[2];
+	}
+	auto pipeline = CreateGraphicsPipeline(key, tessellation ? vertex_info[2] : vs_input_info, ps_input_info, stage_programs,
+	                                       tessellation ? TessRole::Domain : TessRole::None);
+	auto [found, inserted] = m_graphics_pipelines.emplace(key, std::move(pipeline));
+	EXIT_IF(!inserted);
+	return *found->second;
+}
+
+PipelineCache::Pipeline& PipelineCache::GetTessCapturePipeline(CommandBuffer& command, const DrawRenderState& state) {
+	KYTY_PROFILER_BLOCK("PipelineCache::GetTessCapturePipeline");
+	const auto& local = state.vertex_info[0];
+	EXIT_IF(local.stage.module == nullptr);
+	GraphicsPrograms programs;
+	programs.vertex[0] = *local.stage.module;
+	const std::array<uint64_t, 3> vertex_ids {programs.vertex[0].id, 0, 0};
+	// Points without targets: they rasterize nothing.
+	const RenderDepthInfo no_depth {};
+	GraphicsKey           key;
+	key.state         = MakeGraphicsPipelineKey(m_graphics, {}, no_depth, std::span {&local, 1}, command, nullptr,
+	                                            vk::PrimitiveTopology::ePointList, false, vertex_ids, 0);
+	key.depth_stencil = DepthStencilDesc(no_depth, key.state.rendering);
+	key.strip_cut     = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+
+	Common::LockGuard lock(m_mutex);
+	if (auto found = m_graphics_pipelines.find(key); found != m_graphics_pipelines.end()) {
+		return *found->second;
+	}
+	auto pipeline = CreateGraphicsPipeline(key, local, nullptr, programs, TessRole::Capture);
 	auto [found, inserted] = m_graphics_pipelines.emplace(key, std::move(pipeline));
 	EXIT_IF(!inserted);
 	return *found->second;

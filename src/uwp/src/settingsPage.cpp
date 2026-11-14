@@ -1035,6 +1035,13 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    {L"Counts on the GPU what games ask to check for visibility, so hidden lights and objects stay hidden.",
 	     L"When off, games are told that everything is visible. On costs some performance."});
 	AddSwitch(
+	    testing, explanation, L"Tessellation", settings.tessellation,
+	    [state, save](bool on) {
+		    state->settings.tessellation = on;
+		    save();
+	    },
+	    {L"Draws the surfaces games refine on the GPU, such as water and terrain.", L"When off, those surfaces are not drawn."});
+	AddSwitch(
 	    testing, explanation, L"Relaxed shader float math", settings.relaxed_shader_float,
 	    [state, save](bool on) {
 		    state->settings.relaxed_shader_float = on;

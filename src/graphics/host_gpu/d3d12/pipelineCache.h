@@ -64,6 +64,11 @@ struct RootLayout {
 	// the other tables.
 	bool               guest_table    = false;
 	MeshScratch        mesh_scratch   = MeshScratch::None;
+	// The buffers of a tessellated draw (ShaderRecompiler::IR::TessEmulation), root descriptors after the tables: the capture draw's
+	// (parameters, the capture written), the hull pass's (parameters, the capture and the slots read, the records written) and the
+	// domain draw's (parameters, the records and the domain points read).
+	enum class TessScratch : uint8_t { None, Capture, Hull, Domain };
+	TessScratch        tess_scratch   = TessScratch::None;
 
 	bool operator==(const RootLayout&) const = default;
 
@@ -78,6 +83,8 @@ struct RootLayout {
 	[[nodiscard]] uint32_t MeshScratchParameter() const noexcept {
 		return GuestTableParameter() + (guest_table ? 1u : 0u);
 	}
+	// The root parameter of the first tessellation buffer (a layout has mesh or tessellation buffers, not both).
+	[[nodiscard]] uint32_t TessScratchParameter() const noexcept { return MeshScratchParameter(); }
 
 	void Add(const ShaderRecompiler::IR::CompiledShaderInfo& program, bool program_runtime_data);
 };
@@ -149,6 +156,10 @@ public:
 	Pipeline& GetGraphicsPipeline(CommandBuffer& command, const DrawRenderState& state,
 	                             std::span<const RenderColorInfo> colors, const RenderDepthInfo& depth,
 	                              uint32_t strip_cut, FacePass faces = FacePass::Guest);
+	// A tessellated draw (ShaderRecompiler::IR::TessEmulation): the capture draw's pipeline (the LS as its vertex stage, points, no
+	// targets) and the hull pass's (the HS as a compute shader). Its domain draw's is GetGraphicsPipeline's, the TES its vertex stage.
+	Pipeline& GetTessCapturePipeline(CommandBuffer& command, const DrawRenderState& state);
+	Pipeline& GetTessHullPipeline(const ShaderVertexInputInfo& hull_info);
 
 	struct Statistics {
 		uint64_t shaders            = 0;
@@ -212,10 +223,13 @@ private:
 	                           const ShaderVertexInputInfo& vertex_info,
 	                           const ShaderPixelInputInfo*  ps_input_info);
 	ID3D12RootSignature*  GetRootSignature(const RootLayout& layout);
+	// The part of a tessellated draw a graphics pipeline draws: none (an ordinary draw), its capture draw or its domain draw.
+	enum class TessRole : uint8_t { None, Capture, Domain };
 	std::unique_ptr<Pipeline> CreateGraphicsPipeline(const GraphicsKey& key,
 	                                                 const ShaderVertexInputInfo& vs_input_info,
 	                                                 const ShaderPixelInputInfo* ps_input_info,
-	                                                 const GraphicsPrograms&     programs);
+	                                                 const GraphicsPrograms&     programs,
+	                                                 TessRole                    role = TessRole::None);
 	// Sets the state of a graphics pipeline stream after its shaders: blending, rasterization,
 	// depth-stencil and the attachment formats.
 	template <typename Stream>
