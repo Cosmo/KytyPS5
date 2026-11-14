@@ -323,6 +323,14 @@ void EmulatorHost::RunOnUiThread(Task&& task) {
 }
 
 void EmulatorHost::AttachSwapChain(IDXGISwapChain1* swapchain) {
+	ScaleSwapChain(swapchain);
+	RunOnUiThread([&] {
+		auto native = m_panel.get().as<ISwapChainPanelNative>();
+		winrt::check_hresult(native->SetSwapChain(swapchain));
+	});
+}
+
+void EmulatorHost::ScaleSwapChain(IDXGISwapChain1* swapchain) {
 	// The swap chain is sized in physical pixels; the panel lays it out in view pixels.
 	float scale_x = 1.0f;
 	float scale_y = 1.0f;
@@ -338,10 +346,6 @@ void EmulatorHost::AttachSwapChain(IDXGISwapChain1* swapchain) {
 		inverse_scale._22 = 1.0f / scale_y;
 		(void)swapchain2->SetMatrixTransform(&inverse_scale);
 	}
-	RunOnUiThread([&] {
-		auto native = m_panel.get().as<ISwapChainPanelNative>();
-		winrt::check_hresult(native->SetSwapChain(swapchain));
-	});
 }
 
 std::pair<uint32_t, uint32_t> EmulatorHost::PanelPixelSize() const {
