@@ -31,7 +31,9 @@ public:
 	[[nodiscard]] SamplerHandle GetSampler(const ShaderSamplerResource& r, bool integer_border, Use use = Use::Guest);
 
 private:
-	using SamplerKey = std::array<uint32_t, 5>; // the guest descriptor, the integer-border flag and the use
+	// The guest descriptor, the integer-border flag, and the texture filtering settings (Config::TextureLodBias and AnisotropicFiltering,
+	// which can change during a game: a change makes new samplers).
+	using SamplerKey = std::array<uint32_t, 6>;
 
 	struct SamplerKeyHash {
 		std::size_t operator()(const SamplerKey& key) const {

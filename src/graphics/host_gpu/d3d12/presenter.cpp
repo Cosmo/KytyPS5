@@ -228,6 +228,10 @@ public:
 		ReleaseBuffers();
 		D3D12::Check(m_swapchain->ResizeBuffers(BufferCount, width, height, Format, 0), "resize the swap chain");
 		AcquireBuffers(width, height);
+		// (A new size can come with a new pixel scale, e.g. the game menu's Output resolution: the host's transform follows it.)
+		if (m_window.swapchain_resized) {
+			m_window.swapchain_resized(m_swapchain.Get());
+		}
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::SwapchainRecreations);
 	}
 
@@ -806,6 +810,8 @@ struct Presenter::Impl {
 #ifdef KYTY_HAS_FSR
 	uint64_t guest_sequence = 0;
 	bool real_frame_pending = false;
+	// Whether the last frame prepared with FidelityFX had frame generation on (it can be turned off and on again during a game).
+	bool generation_on = false;
 #endif
 };
 
@@ -852,9 +858,16 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	frame->hdr    = hdr;
 	frame->linear = frame_format == vk::Format::eR16G16B16A16Sfloat;
 #ifdef KYTY_HAS_FSR
-	if (fx && Config::FsrFrameGenerationEnabled()) {
-		frame->generated_valid = fx->Interpolate(buffer, frame->image.Get(), frame->format.view,
-		                                         hdr || frame->linear, frame->generated);
+	if (fx) {
+		const bool generation = Config::FsrFrameGenerationEnabled();
+		if (generation && !m_impl->generation_on) {
+			// Turned on (again): its history starts over with this frame.
+			fx->SkipFlip();
+		} else if (generation) {
+			frame->generated_valid = fx->Interpolate(buffer, frame->image.Get(), frame->format.view,
+			                                         hdr || frame->linear, frame->generated);
+		}
+		m_impl->generation_on = generation;
 	}
 #endif
 	return *frame;
