@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
+#include "graphics/shader/recompiler/ir/TessEmulation.h"
 
 #include <array>
 #include <cstdint>
@@ -219,6 +220,35 @@ private:
 	                            std::span<const uint32_t> draw_data, uint32_t groups,
 	                            uint32_t instances);
 
+	// A tessellated draw (ShaderRecompiler::IR::TessEmulation) as the CPU works it out before its passes are recorded.
+	struct TessDraw {
+		std::array<uint32_t, ShaderRecompiler::IR::TessEmulation::ParamCount> params {};
+		uint32_t patch_total   = 0;
+		uint32_t groups_x      = 0; // the hull dispatch
+		uint32_t groups_y      = 0;
+		uint32_t record_dwords = 0;
+		uint32_t capture_count = 0; // the capture draw's vertices: whole patches
+		// m_tess_output, in dwords: the patches' counts and offsets (gpu_tess_tessellate.comp, gpu_tess_scan.comp), the domain draw's
+		// indirect record, then the points and the indices, as many as fit.
+		uint32_t counts         = 0;
+		uint32_t offsets        = 0;
+		uint32_t args           = 0;
+		uint32_t point_base     = 0;
+		uint32_t index_base     = 0;
+		uint32_t point_capacity = 0;
+		uint32_t index_capacity = 0;
+		uint64_t params_address = 0; // uploaded
+		uint64_t slots_address  = 0;
+	};
+	// Reads an indexed draw's indices (which can finish GPU work: before any resource preparation), uploads the parameters and the
+	// slots and makes the buffers big enough. Returns why the draw is skipped, or nullptr.
+	[[nodiscard]] const char* PrepareTessDraw(const DrawCallInfo& draw, const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
+	                                          const DrawRenderState& state, TessDraw& tess);
+	// Records the capture draw, the hull pass and the tessellator into the current list (the guest's vertex and index buffers bound);
+	// the domain draw follows as the draw's own.
+	void RecordTessPasses(CommandBuffer& buffer, const DrawCallInfo& draw, const DrawEmitInfo& emit, const DrawRenderState& state,
+	                      const TessDraw& tess, const PipelineCache::Pipeline& capture, const PipelineCache::Pipeline& hull);
+
 	// GET_LOD_STATS counters since their last reset. With --lod-stats a bound T# with counting
 	// enabled counts as sampled at its BASE_LEVEL, clamped when its MIN_LOD lies above that level.
 	struct MipStatsCounter {
@@ -253,6 +283,11 @@ private:
 	// made when the first one is drawn.
 	std::unique_ptr<Buffer> m_mesh_records;
 	std::unique_ptr<Buffer> m_mesh_indices;
+	// The buffers of the tessellated draw being recorded (see TessDraw): the LS outputs, the patch records, and the tessellator's domain
+	// points followed by its indices. Made when the first one is drawn, grown as needed.
+	std::unique_ptr<Buffer> m_tess_capture;
+	std::unique_ptr<Buffer> m_tess_records;
+	std::unique_ptr<Buffer> m_tess_output;
 	// By root signature; null for pipelines without runtime data.
 	std::unordered_map<ID3D12RootSignature*, D3D12::ComPtr<ID3D12CommandSignature>>
 	    m_dispatch_signatures;

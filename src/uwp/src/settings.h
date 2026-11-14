@@ -129,6 +129,8 @@ struct AppSettings {
 	bool guest_tsc = false;
 	// The settings page, Testing: upstream's --occlusion-queries (Config::occlusion_queries_enabled). Off.
 	bool occlusion_queries = false;
+	// The settings page, Testing: upstream's --tessellation (Config::tessellation_enabled). Off, as upstream: patch draws are skipped.
+	bool tessellation = false;
 	// The settings page, Testing: upstream's --relaxed-shader-float, the GPU's own float operations in shaders (Config::relaxed_shader_float). Off.
 	bool relaxed_shader_float = false;
 	// The settings page, Display: upstream's --pssr-upscaler, how PS5 Pro mode upscales PSSR: "Linear" (upstream's default) or "FSR" (AMD
