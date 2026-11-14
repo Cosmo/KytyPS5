@@ -292,6 +292,15 @@ uint32_t TextureMipSkipMinSize();
 bool     TextureMipSkipUncompressed();
 uint32_t TextureLodBias();
 bool     AnisotropicFiltering();
+// The game menu's Graphics page changes these while a game runs; the getters above read them each time. Frame generation can only be
+// turned on again where it was on when the game started (FsrFrameGenerationAvailable): its resources are made then.
+void SetPresentMode(PresentMode mode);
+void SetFsr1Upscaling(uint32_t mode);
+void SetFsrFrameGeneration(bool enabled);
+bool FsrFrameGenerationAvailable();
+void SetFlushDraws(uint32_t draws);
+void SetTextureMipSkip(uint32_t skip, uint32_t min_size, bool uncompressed);
+void SetTextureFiltering(uint32_t lod_bias, bool anisotropic);
 bool GpuMemorySavings();
 uint32_t SwapPoolMb();
 bool GpuMemoryLog();
