@@ -201,6 +201,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.playgo_hack_enabled       = settings.playgo_fallback;
 		config.vr_enabled                = settings.virtual_vr_headset;
 		config.occlusion_queries_enabled = settings.occlusion_queries;
+		config.tessellation_enabled      = settings.tessellation;
 		config.relaxed_shader_float      = settings.relaxed_shader_float;
 		config.flush_draws               = settings.flush_draws;
 		config.vulkan_validation_enabled = settings.debug_layer; // the D3D12 debug layer

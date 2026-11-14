@@ -1,0 +1,916 @@
+#version 450
+
+// The D3D12 renderer's tessellation emulation (ShaderRecompiler::IR::TessEmulation): the converted-function tessellator, one invocation per
+// patch. A port of the hardware part (CHWTessellator) of Microsoft's D3D11 reference tessellator, as Mesa carries it
+// (src/gallium/auxiliary/tessellator/tessellator.cpp), for triangle and quad domains, integer, pow2, fractional odd and fractional even
+// spacing, and clockwise or counterclockwise triangles. Same converted point arithmetic, so the same points and triangles.
+//
+// The reference's notice:
+//   Copyright (c) Microsoft Corporation
+//
+//   Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the
+//   "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish,
+//   distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to
+//   the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+//   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR
+//   ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH
+//   THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+// Two passes over the same code: count (mode 0) writes each patch's point and index counts at counts + 2 * patch; emit (mode 1) writes the
+// points (u, v, the patch, a spare dword) and the indices of each kept patch where gpu_tess_scan.comp put them (offsets + 3 * patch: first
+// point, first index, kept).
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Records { uint data[]; } records;
+layout(set = 0, binding = 1, std430) buffer Result { uint data[]; } result;
+
+layout(push_constant, std430) uniform Parameters {
+	uint patches;
+	uint record_dwords; // a patch record's size; its first dwords are the factors as the HS wrote them (outer, then inner)
+	uint quad;          // nonzero: quad domain, else triangles
+	uint partitioning;  // VGT_TF_PARAM.PARTITIONING: 0 integer, 1 pow2, 2 fractional odd, 3 fractional even
+	uint ccw;           // nonzero: counterclockwise triangles
+	uint mode;          // 0 count, 1 emit
+	uint counts;        // dwords of the result buffer
+	uint offsets;
+	uint point_base;
+	uint index_base;
+} params;
+
+const uint PARTITIONING_INTEGER         = 0u;
+const uint PARTITIONING_POW2            = 1u;
+const uint PARTITIONING_FRACTIONAL_ODD  = 2u;
+const uint PARTITIONING_FRACTIONAL_EVEN = 3u;
+
+const int PARITY_EVEN = 0;
+const int PARITY_ODD  = 1;
+
+const uint FXP_FRACTION_BITS = 16u;
+const uint FXP_FRACTION_MASK = 0x0000ffffu;
+const uint FXP_INTEGER_MASK  = 0x7fff0000u;
+const uint FXP_ONE           = 1u << 16u;
+const uint FXP_ONE_THIRD     = 0x00005555u;
+const uint FXP_TWO_THIRDS    = 0x0000aaaau;
+const uint FXP_ONE_HALF      = 0x00008000u;
+
+const float MIN_ODD_FACTOR  = 1.0;
+const float MAX_ODD_FACTOR  = 63.0;
+const float MIN_EVEN_FACTOR = 2.0;
+const float MAX_EVEN_FACTOR = 64.0;
+const float EPSILON         = 0.0000152587890625; // 2^-16
+const float MIN_ODD_FACTOR_PLUS_HALF_EPSILON = MIN_ODD_FACTOR + EPSILON / 2.0;
+
+const uint FIXED_RECIPROCAL[65] = uint[65](
+    0xffffffffu,
+    0x10000u, 0x8000u, 0x5555u, 0x4000u, 0x3333u, 0x2aabu, 0x2492u, 0x2000u,
+    0x1c72u, 0x199au, 0x1746u, 0x1555u, 0x13b1u, 0x1249u, 0x1111u, 0x1000u,
+    0xf0fu, 0xe39u, 0xd79u, 0xccdu, 0xc31u, 0xba3u, 0xb21u, 0xaabu,
+    0xa3du, 0x9d9u, 0x97bu, 0x925u, 0x8d4u, 0x889u, 0x842u, 0x800u,
+    0x7c2u, 0x788u, 0x750u, 0x71cu, 0x6ebu, 0x6bdu, 0x690u, 0x666u,
+    0x63eu, 0x618u, 0x5f4u, 0x5d1u, 0x5b0u, 0x591u, 0x572u, 0x555u,
+    0x539u, 0x51fu, 0x505u, 0x4ecu, 0x4d5u, 0x4beu, 0x4a8u, 0x492u,
+    0x47eu, 0x46au, 0x457u, 0x444u, 0x432u, 0x421u, 0x410u, 0x400u);
+
+const int FINAL_POINT_POSITION[33] = int[33](0, 32, 16, 8, 17, 4, 18, 9, 19, 2, 20, 10, 21, 5, 22, 11, 23,
+                                             1, 24, 12, 25, 6, 26, 13, 27, 3, 28, 14, 29, 7, 30, 15, 31);
+const int LOOP_START[33] = int[33](1, 1, 17, 9, 9, 5, 5, 5, 5, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2);
+const int LOOP_END[33]   = int[33](0, 0, 17, 17, 25, 25, 25, 25, 29, 29, 29, 29, 29, 29, 29, 29, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31,
+                                   31, 31, 31, 31, 31, 32);
+
+struct FactorContext {
+	uint fxp_inv_floor; // fxpInvNumSegmentsOnFloorTessFactor
+	uint fxp_inv_ceil;  // fxpInvNumSegmentsOnCeilTessFactor
+	uint fxp_half_fraction;
+	int  half_points;   // numHalfTessFactorPoints
+	int  split_point;   // splitPointOnFloorHalfTessFactor
+};
+
+// The tessellator's state (CHWTessellator's members).
+int  g_parity;
+int  g_original_parity;
+int  g_num_points;
+int  g_num_indices;
+bool g_emit;
+uint g_point_first; // the patch's first point among all
+uint g_point_dword;
+uint g_index_dword;
+uint g_patch;
+
+bool g_patched;  // m_bUsingPatchedIndices and m_IndexPatchContext
+int  g_inside_delta, g_inside_bad, g_inside_replacement, g_outside_patch_base, g_outside_delta, g_outside_bad, g_outside_replacement;
+bool g_patched2; // m_bUsingPatchedIndices2 and m_IndexPatchContext2
+int  g_invert_base, g_inversion_end, g_corner_bad, g_corner_replacement;
+
+bool Odd() { return g_parity == PARITY_ODD; }
+bool HWIntegerPartitioning() { return params.partitioning == PARTITIONING_INTEGER || params.partitioning == PARTITIONING_POW2; }
+
+// --- D3D float rules (flushing denormals, IEEE 754R min and max) ---
+bool TessIsNaN(float a) {
+	const uint bits = floatBitsToUint(a);
+	return (bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0u;
+}
+float TessFlush(float a) {
+	const uint bits = floatBitsToUint(a);
+	if ((bits & 0x7fffffffu) < 0x00800000u) {
+		return uintBitsToFloat(bits & 0x80000000u);
+	}
+	return a;
+}
+float TessMin(float a, float b) {
+	const float fa = TessFlush(a);
+	const float fb = TessFlush(b);
+	if (TessIsNaN(fb)) {
+		return a;
+	}
+	if (fa == 0.0 && fb == 0.0) {
+		return (floatBitsToUint(fa) & 0x80000000u) != 0u ? a : b;
+	}
+	return fa < fb ? a : b;
+}
+float TessMax(float a, float b) {
+	const float fa = TessFlush(a);
+	const float fb = TessFlush(b);
+	if (TessIsNaN(fb)) {
+		return a;
+	}
+	if (fa == 0.0 && fb == 0.0) {
+		return (floatBitsToUint(fb) & 0x80000000u) != 0u ? a : b;
+	}
+	return fa >= fb ? a : b;
+}
+
+// floatToIDotF<15, 16, unsigned> (the factors are clamped to [1, 64] before, so only the in-range path and NaN matter).
+uint FloatToFixed(float value) {
+	const int bits     = floatBitsToInt(value);
+	const int exponent = ((bits & 0x7f800000) >> 23) - 127;
+	if (exponent == 128 && (bits & 0x007fffff) != 0) {
+		return 0u;
+	}
+	if ((bits & int(0x80000000u)) != 0) {
+		return 0u;
+	}
+	const int max_positive = (127 + 15) << 23;
+	if (bits >= max_positive) {
+		return 0xffffffffu;
+	}
+	if (exponent < -16 - 1) {
+		return 0u;
+	}
+	int       converted = (bits & 0x007fffff) | 0x00800000;
+	const int extra  = 23 - 16 - exponent;
+	if (extra >= 0) {
+		const int lsb  = 1 << extra;
+		const int mask = lsb - 1;
+		const int half_lsb = lsb >> 1;
+		if ((converted & lsb) != 0 || (converted & mask) > half_lsb) {
+			converted += half_lsb;
+		}
+		converted >>= extra;
+	} else {
+		converted <<= -extra;
+	}
+	return uint(converted);
+}
+float FixedToFloat(uint value) { return float(value >> FXP_FRACTION_BITS) + float(value & FXP_FRACTION_MASK) / 65536.0; }
+bool  IsEven(float value) { return (int(value) & 1) == 0; }
+uint  FxpCeil(uint value) { return (value & FXP_FRACTION_MASK) != 0u ? (value & FXP_INTEGER_MASK) + FXP_ONE : value; }
+uint  FxpFloor(uint value) { return value & FXP_INTEGER_MASK; }
+
+int RemoveMSB(int value) {
+	int check;
+	if (value <= 0x0000ffff) {
+		check = value <= 0x000000ff ? 0x00000080 : 0x00008000;
+	} else {
+		check = value <= 0x00ffffff ? 0x00800000 : int(0x80000000u);
+	}
+	for (int i = 0; i < 8; i++, check = int(uint(check) >> 1u)) {
+		if ((value & check) != 0) {
+			return value & ~check;
+		}
+	}
+	return 0;
+}
+
+// --- converted ---
+void DefinePoint(uint u, uint v, int offset) {
+	if (!g_emit) {
+		return;
+	}
+	const uint dword        = g_point_dword + uint(offset) * 4u;
+	result.data[dword]      = floatBitsToUint(FixedToFloat(u));
+	result.data[dword + 1u] = floatBitsToUint(FixedToFloat(v));
+	result.data[dword + 2u] = g_patch;
+	result.data[dword + 3u] = 0u;
+}
+
+int PatchIndexValue(int index) {
+	if (g_patched) {
+		if (index >= g_outside_patch_base) {
+			index = index == g_outside_bad ? g_outside_replacement : index + g_outside_delta;
+		} else {
+			index = index == g_inside_bad ? g_inside_replacement : index + g_inside_delta;
+		}
+	} else if (g_patched2) {
+		if (index >= g_invert_base) {
+			index = index == g_corner_bad ? g_corner_replacement : g_inversion_end - index;
+		} else if (index == g_corner_bad) {
+			index = g_corner_replacement;
+		}
+	}
+	return index;
+}
+
+void DefineIndex(int index, int offset) {
+	index = PatchIndexValue(index);
+	if (!g_emit) {
+		return;
+	}
+	result.data[g_index_dword + uint(offset)] = g_point_first + uint(index);
+}
+
+void DefineClockwiseTriangle(int index0, int index1, int index2, int base) {
+	DefineIndex(index0, base);
+	if (params.ccw == 0u) {
+		DefineIndex(index1, base + 1);
+		DefineIndex(index2, base + 2);
+	} else {
+		DefineIndex(index2, base + 1);
+		DefineIndex(index1, base + 2);
+	}
+}
+
+// --- 1D point placement ---
+int NumPointsForTessFactor(uint factor) {
+	if (Odd()) {
+		return int((FxpCeil(FXP_ONE_HALF + (factor + 1u) / 2u) * 2u) >> FXP_FRACTION_BITS);
+	}
+	return int((FxpCeil((factor + 1u) / 2u) * 2u) >> FXP_FRACTION_BITS) + 1;
+}
+
+FactorContext ComputeTessFactorContext(uint factor) {
+	FactorContext context;
+	uint          half_factor = (factor + 1u) / 2u;
+	if (Odd() || half_factor == FXP_ONE_HALF) {
+		half_factor += FXP_ONE_HALF;
+	}
+	const uint floor_half     = FxpFloor(half_factor);
+	const uint ceil_half      = FxpCeil(half_factor);
+	context.fxp_half_fraction = half_factor - floor_half;
+	context.half_points       = int(ceil_half >> FXP_FRACTION_BITS);
+	if (ceil_half == floor_half) {
+		context.split_point = context.half_points + 1;
+	} else if (Odd()) {
+		context.split_point = floor_half == FXP_ONE ? 0 : (RemoveMSB(int(floor_half >> FXP_FRACTION_BITS) - 1) << 1) + 1;
+	} else {
+		context.split_point = (RemoveMSB(int(floor_half >> FXP_FRACTION_BITS)) << 1) + 1;
+	}
+	int floor_segments = int((floor_half * 2u) >> FXP_FRACTION_BITS);
+	int ceil_segments  = int((ceil_half * 2u) >> FXP_FRACTION_BITS);
+	if (Odd()) {
+		floor_segments -= 1;
+		ceil_segments -= 1;
+	}
+	context.fxp_inv_floor = FIXED_RECIPROCAL[clamp(floor_segments, 0, 64)];
+	context.fxp_inv_ceil  = FIXED_RECIPROCAL[clamp(ceil_segments, 0, 64)];
+	return context;
+}
+
+uint PlacePointIn1D(FactorContext context, int point) {
+	bool flip = false;
+	if (point >= context.half_points) {
+		point = (context.half_points << 1) - point;
+		if (Odd()) {
+			point -= 1;
+		}
+		flip = true;
+	}
+	if (point == context.half_points) {
+		return FXP_ONE_HALF;
+	}
+	const uint on_ceil  = uint(point);
+	uint       on_floor = on_ceil;
+	if (point > context.split_point) {
+		on_floor -= 1u;
+	}
+	const uint location_floor = on_floor * context.fxp_inv_floor;
+	const uint location_ceil  = on_ceil * context.fxp_inv_ceil;
+	uint location = location_floor * (FXP_ONE - context.fxp_half_fraction) + location_ceil * context.fxp_half_fraction;
+	location      = (location + FXP_ONE_HALF) >> FXP_FRACTION_BITS;
+	return flip ? FXP_ONE - location : location;
+}
+
+// --- stitching ---
+const int DIAGONALS_INSIDE_TO_OUTSIDE             = 0;
+const int DIAGONALS_INSIDE_TO_OUTSIDE_EXCEPT_MIDDLE = 1;
+const int DIAGONALS_MIRRORED                      = 2;
+
+void StitchRegular(bool trapezoid, int diagonals, int base, int inside_points, int inside_base, int outside_base) {
+	int inside  = inside_base;
+	int outside = outside_base;
+	if (trapezoid) {
+		DefineClockwiseTriangle(outside, outside + 1, inside, base);
+		base += 3;
+		outside++;
+	}
+	int p;
+	if (diagonals == DIAGONALS_INSIDE_TO_OUTSIDE) {
+		for (p = 0; p < inside_points - 1; p++) {
+			DefineClockwiseTriangle(inside, outside, outside + 1, base);
+			base += 3;
+			DefineClockwiseTriangle(inside, outside + 1, inside + 1, base);
+			base += 3;
+			inside++;
+			outside++;
+		}
+	} else if (diagonals == DIAGONALS_INSIDE_TO_OUTSIDE_EXCEPT_MIDDLE) {
+		for (p = 0; p < inside_points / 2 - 1; p++) {
+			DefineClockwiseTriangle(outside, outside + 1, inside, base);
+			base += 3;
+			DefineClockwiseTriangle(inside, outside + 1, inside + 1, base);
+			base += 3;
+			inside++;
+			outside++;
+		}
+		DefineClockwiseTriangle(outside, inside + 1, inside, base);
+		base += 3;
+		DefineClockwiseTriangle(outside, outside + 1, inside + 1, base);
+		base += 3;
+		inside++;
+		outside++;
+		p += 2;
+		for (; p < inside_points; p++) {
+			DefineClockwiseTriangle(outside, outside + 1, inside, base);
+			base += 3;
+			DefineClockwiseTriangle(inside, outside + 1, inside + 1, base);
+			base += 3;
+			inside++;
+			outside++;
+		}
+	} else {
+		for (p = 0; p < inside_points / 2; p++) {
+			DefineClockwiseTriangle(outside, inside + 1, inside, base);
+			base += 3;
+			DefineClockwiseTriangle(outside, outside + 1, inside + 1, base);
+			base += 3;
+			inside++;
+			outside++;
+		}
+		for (; p < inside_points - 1; p++) {
+			DefineClockwiseTriangle(inside, outside, outside + 1, base);
+			base += 3;
+			DefineClockwiseTriangle(inside, outside + 1, inside + 1, base);
+			base += 3;
+			inside++;
+			outside++;
+		}
+	}
+	if (trapezoid) {
+		DefineClockwiseTriangle(outside, outside + 1, inside, base);
+	}
+}
+
+void StitchTransition(int base, int inside_base, int inside_half_points, int inside_parity, int outside_base, int outside_half_points,
+                      int outside_parity) {
+	if (inside_parity == PARITY_ODD) {
+		inside_half_points -= 1;
+	}
+	if (outside_parity == PARITY_ODD) {
+		outside_half_points -= 1;
+	}
+	int       outside = outside_base;
+	int       inside  = inside_base;
+	const int first   = min(LOOP_START[inside_half_points], LOOP_START[outside_half_points]);
+	const int last    = max(LOOP_END[inside_half_points], LOOP_END[outside_half_points]);
+	if (FINAL_POINT_POSITION[0] < outside_half_points) {
+		DefineClockwiseTriangle(outside, outside + 1, inside, base);
+		base += 3;
+		outside++;
+	}
+	for (int i = first; i <= last; i++) {
+		if (FINAL_POINT_POSITION[i] < inside_half_points) {
+			DefineClockwiseTriangle(inside, outside, inside + 1, base);
+			base += 3;
+			inside++;
+		}
+		if (FINAL_POINT_POSITION[i] < outside_half_points) {
+			DefineClockwiseTriangle(outside, outside + 1, inside, base);
+			base += 3;
+			outside++;
+		}
+	}
+	if (inside_parity != outside_parity || inside_parity == PARITY_ODD) {
+		if (inside_parity == outside_parity) {
+			DefineClockwiseTriangle(inside, outside, inside + 1, base);
+			base += 3;
+			DefineClockwiseTriangle(inside + 1, outside, outside + 1, base);
+			base += 3;
+			inside++;
+			outside++;
+		} else if (inside_parity == PARITY_EVEN) {
+			DefineClockwiseTriangle(inside, outside, outside + 1, base);
+			base += 3;
+			outside++;
+		} else {
+			DefineClockwiseTriangle(inside, outside, inside + 1, base);
+			base += 3;
+			inside++;
+		}
+	}
+	for (int i = last; i >= first; i--) {
+		if (FINAL_POINT_POSITION[i] < outside_half_points) {
+			DefineClockwiseTriangle(outside, outside + 1, inside, base);
+			base += 3;
+			outside++;
+		}
+		if (FINAL_POINT_POSITION[i] < inside_half_points) {
+			DefineClockwiseTriangle(inside, outside, inside + 1, base);
+			base += 3;
+			inside++;
+		}
+	}
+	if (FINAL_POINT_POSITION[0] < outside_half_points) {
+		DefineClockwiseTriangle(outside, outside + 1, inside, base);
+	}
+}
+
+// The factor bounds of the spacing, and the inside factors' lower bound (fractional odd forces a picture frame).
+void FactorBounds(out float lower, out float upper) {
+	if (HWIntegerPartitioning()) {
+		lower = MIN_ODD_FACTOR;
+		upper = MAX_EVEN_FACTOR;
+	} else if (params.partitioning == PARTITIONING_FRACTIONAL_EVEN) {
+		lower = MIN_EVEN_FACTOR;
+		upper = MAX_EVEN_FACTOR;
+	} else {
+		lower = MIN_ODD_FACTOR;
+		upper = MAX_ODD_FACTOR;
+	}
+}
+
+// --- triangles ---
+void TessellateTri(float outside0, float outside1, float outside2, float inside_factor) {
+	g_num_points  = 0;
+	g_num_indices = 0;
+	if (!(outside0 > 0.0) || !(outside1 > 0.0) || !(outside2 > 0.0)) {
+		return; // culled
+	}
+	float lower, upper;
+	FactorBounds(lower, upper);
+	float outside[3] = float[3](TessMin(upper, TessMax(lower, outside0)), TessMin(upper, TessMax(lower, outside1)),
+	                            TessMin(upper, TessMax(lower, outside2)));
+	if (HWIntegerPartitioning()) {
+		for (int e = 0; e < 3; e++) {
+			outside[e] = ceil(outside[e]);
+		}
+	}
+	if (params.partitioning == PARTITIONING_FRACTIONAL_ODD &&
+	    (outside[0] > MIN_ODD_FACTOR_PLUS_HALF_EPSILON || outside[1] > MIN_ODD_FACTOR_PLUS_HALF_EPSILON ||
+	     outside[2] > MIN_ODD_FACTOR_PLUS_HALF_EPSILON)) {
+		lower = MIN_ODD_FACTOR + EPSILON;
+	}
+	float inside = TessMin(upper, TessMax(lower, inside_factor));
+	if (HWIntegerPartitioning()) {
+		inside = ceil(inside);
+	}
+
+	int outside_parity[3];
+	int inside_parity;
+	if (HWIntegerPartitioning()) {
+		for (int e = 0; e < 3; e++) {
+			outside_parity[e] = IsEven(outside[e]) ? PARITY_EVEN : PARITY_ODD;
+		}
+		inside_parity = (IsEven(inside) || inside == 1.0) ? PARITY_EVEN : PARITY_ODD;
+	} else {
+		for (int e = 0; e < 3; e++) {
+			outside_parity[e] = g_original_parity;
+		}
+		inside_parity = g_original_parity;
+	}
+	uint fxp_outside[3];
+	for (int e = 0; e < 3; e++) {
+		fxp_outside[e] = FloatToFixed(outside[e]);
+	}
+	const uint fxp_inside = FloatToFixed(inside);
+
+	if (HWIntegerPartitioning() || g_original_parity == PARITY_ODD) {
+		if (fxp_inside == FXP_ONE && fxp_outside[0] == FXP_ONE && fxp_outside[1] == FXP_ONE && fxp_outside[2] == FXP_ONE) {
+			// The minimum: one triangle.
+			DefinePoint(0u, FXP_ONE, 0);
+			DefinePoint(0u, 0u, 1);
+			DefinePoint(FXP_ONE, 0u, 2);
+			g_num_points = 3;
+			DefineClockwiseTriangle(0, 1, 2, 0);
+			g_num_indices = 3;
+			return;
+		}
+	}
+
+	FactorContext outside_context[3];
+	for (int e = 0; e < 3; e++) {
+		g_parity           = outside_parity[e];
+		outside_context[e] = ComputeTessFactorContext(fxp_outside[e]);
+	}
+	g_parity                           = inside_parity;
+	const FactorContext inside_context = ComputeTessFactorContext(fxp_inside);
+
+	int outside_points[3];
+	for (int e = 0; e < 3; e++) {
+		g_parity          = outside_parity[e];
+		outside_points[e] = NumPointsForTessFactor(fxp_outside[e]);
+		g_num_points += outside_points[e];
+	}
+	g_num_points -= 3;
+	g_parity          = inside_parity;
+	int inside_points = max(Odd() ? 4 : 3, NumPointsForTessFactor(fxp_inside));
+	const int inside_point_base = g_num_points;
+	{
+		const int rings = (inside_points >> 1) - 1;
+		g_num_points += Odd() ? 3 * (rings * (rings + 1) - rings) : 3 * (rings * (rings + 1)) + 1;
+	}
+
+	// Points: the outside ring clockwise from V (the U == 0 edge), then the inside rings spiralling in.
+	int point_offset = 0;
+	for (int e = 0; e < 3; e++) {
+		const int parity = e & 1;
+		const int end    = outside_points[e] - 1;
+		g_parity         = outside_parity[e];
+		for (int p = 0; p < end; p++, point_offset++) {
+			const int  q     = parity != 0 ? p : end - p;
+			const uint param = PlacePointIn1D(outside_context[e], q);
+			if (e == 0) {
+				DefinePoint(0u, param, point_offset);
+			} else {
+				DefinePoint(param, e == 2 ? FXP_ONE - param : 0u, point_offset);
+			}
+		}
+	}
+	g_parity        = inside_parity;
+	const int rings = inside_points >> 1;
+	for (int ring = 1; ring < rings; ring++) {
+		const int start = ring;
+		const int end   = inside_points - 1 - start;
+		for (int e = 0; e < 3; e++) {
+			const int parity = e & 1;
+			uint      perp   = PlacePointIn1D(inside_context, start);
+			perp             = (perp * FXP_TWO_THIRDS + FXP_ONE_HALF) >> FXP_FRACTION_BITS;
+			for (int p = start; p < end; p++, point_offset++) {
+				const int  q     = parity != 0 ? p : end - (p - start);
+				const uint param = PlacePointIn1D(inside_context, q);
+				const uint along = param - (perp + 1u) / 2u;
+				if (e == 0) {
+					DefinePoint(perp, along, point_offset);
+				} else if (e == 1) {
+					DefinePoint(along, perp, point_offset);
+				} else {
+					DefinePoint(along, FXP_ONE - along - perp, point_offset);
+				}
+			}
+		}
+	}
+	if (!Odd()) {
+		DefinePoint(FXP_ONE_THIRD, FXP_ONE_THIRD, point_offset);
+	}
+
+	// Triangles: the concentric rings, one side at a time.
+	const int     ring_count = (inside_points + 1) >> 1;
+	FactorContext ring_context[3] = outside_context;
+	int           ring_parity[3]  = outside_parity;
+	int           ring_points[3]  = outside_points;
+	int           inside_base     = inside_point_base;
+	int           outside_base    = 0;
+	for (int ring = 1; ring < ring_count; ring++) {
+		const int inside_edge_points = inside_points - 2 * ring;
+		const int edge0_inside_base  = inside_base;
+		const int edge0_outside_base = outside_base;
+		for (int e = 0; e < 3; e++) {
+			const int triangles = inside_edge_points + ring_points[e] - 2;
+			int       stitch_inside;
+			int       stitch_outside;
+			if (e == 2) {
+				g_inside_delta        = inside_base;
+				g_inside_bad          = inside_edge_points - 1;
+				g_inside_replacement  = edge0_inside_base;
+				g_outside_patch_base  = g_inside_bad + 1;
+				g_outside_delta       = outside_base - g_outside_patch_base;
+				g_outside_bad         = g_outside_patch_base + ring_points[e] - 1;
+				g_outside_replacement = edge0_outside_base;
+				g_patched             = true;
+				stitch_inside         = 0;
+				stitch_outside        = g_outside_patch_base;
+			} else {
+				stitch_inside  = inside_base;
+				stitch_outside = outside_base;
+			}
+			if (ring == 1) {
+				StitchTransition(g_num_indices, stitch_inside, inside_context.half_points, inside_parity, stitch_outside,
+				                 ring_context[e].half_points, ring_parity[e]);
+			} else {
+				StitchRegular(true, DIAGONALS_MIRRORED, g_num_indices, inside_edge_points, stitch_inside, stitch_outside);
+			}
+			if (e == 2) {
+				g_patched = false;
+			}
+			g_num_indices += triangles * 3;
+			outside_base += ring_points[e] - 1;
+			inside_base += inside_edge_points - 1;
+			ring_points[e] = inside_edge_points;
+		}
+		if (ring == 1) {
+			for (int e = 0; e < 3; e++) {
+				ring_context[e] = inside_context;
+				ring_parity[e]  = inside_parity;
+			}
+		}
+	}
+	if (Odd()) {
+		DefineClockwiseTriangle(outside_base, outside_base + 1, outside_base + 2, g_num_indices);
+		g_num_indices += 3;
+	}
+}
+
+// --- quads ---
+void TessellateQuad(float outside0, float outside1, float outside2, float outside3, float inside_u, float inside_v) {
+	g_num_points  = 0;
+	g_num_indices = 0;
+	if (!(outside0 > 0.0) || !(outside1 > 0.0) || !(outside2 > 0.0) || !(outside3 > 0.0)) {
+		return; // culled
+	}
+	float lower, upper;
+	FactorBounds(lower, upper);
+	float outside[4] = float[4](TessMin(upper, TessMax(lower, outside0)), TessMin(upper, TessMax(lower, outside1)),
+	                            TessMin(upper, TessMax(lower, outside2)), TessMin(upper, TessMax(lower, outside3)));
+	if (HWIntegerPartitioning()) {
+		for (int e = 0; e < 4; e++) {
+			outside[e] = ceil(outside[e]);
+		}
+	}
+	if (params.partitioning == PARTITIONING_FRACTIONAL_ODD &&
+	    (outside[0] > MIN_ODD_FACTOR_PLUS_HALF_EPSILON || outside[1] > MIN_ODD_FACTOR_PLUS_HALF_EPSILON ||
+	     outside[2] > MIN_ODD_FACTOR_PLUS_HALF_EPSILON || outside[3] > MIN_ODD_FACTOR_PLUS_HALF_EPSILON ||
+	     inside_u > MIN_ODD_FACTOR_PLUS_HALF_EPSILON || inside_v > MIN_ODD_FACTOR_PLUS_HALF_EPSILON)) {
+		lower = MIN_ODD_FACTOR + EPSILON;
+	}
+	float inside[2] = float[2](TessMin(upper, TessMax(lower, inside_u)), TessMin(upper, TessMax(lower, inside_v)));
+	if (HWIntegerPartitioning()) {
+		inside[0] = ceil(inside[0]);
+		inside[1] = ceil(inside[1]);
+	}
+
+	int outside_parity[4];
+	int inside_parity[2];
+	if (HWIntegerPartitioning()) {
+		for (int e = 0; e < 4; e++) {
+			outside_parity[e] = IsEven(outside[e]) ? PARITY_EVEN : PARITY_ODD;
+		}
+		for (int a = 0; a < 2; a++) {
+			inside_parity[a] = (IsEven(inside[a]) || inside[a] == 1.0) ? PARITY_EVEN : PARITY_ODD;
+		}
+	} else {
+		for (int e = 0; e < 4; e++) {
+			outside_parity[e] = g_original_parity;
+		}
+		inside_parity[0] = inside_parity[1] = g_original_parity;
+	}
+	uint fxp_outside[4];
+	for (int e = 0; e < 4; e++) {
+		fxp_outside[e] = FloatToFixed(outside[e]);
+	}
+	uint fxp_inside[2] = uint[2](FloatToFixed(inside[0]), FloatToFixed(inside[1]));
+
+	if (HWIntegerPartitioning() || g_original_parity == PARITY_ODD) {
+		if (fxp_inside[0] == FXP_ONE && fxp_inside[1] == FXP_ONE && fxp_outside[0] == FXP_ONE && fxp_outside[1] == FXP_ONE &&
+		    fxp_outside[2] == FXP_ONE && fxp_outside[3] == FXP_ONE) {
+			// The minimum: two triangles.
+			DefinePoint(0u, 0u, 0);
+			DefinePoint(FXP_ONE, 0u, 1);
+			DefinePoint(FXP_ONE, FXP_ONE, 2);
+			DefinePoint(0u, FXP_ONE, 3);
+			g_num_points = 4;
+			DefineClockwiseTriangle(0, 1, 3, 0);
+			DefineClockwiseTriangle(1, 2, 3, 3);
+			g_num_indices = 6;
+			return;
+		}
+	}
+
+	FactorContext outside_context[4];
+	for (int e = 0; e < 4; e++) {
+		g_parity           = outside_parity[e];
+		outside_context[e] = ComputeTessFactorContext(fxp_outside[e]);
+	}
+	FactorContext inside_context[2];
+	for (int a = 0; a < 2; a++) {
+		g_parity          = inside_parity[a];
+		inside_context[a] = ComputeTessFactorContext(fxp_inside[a]);
+	}
+
+	int outside_points[4];
+	for (int e = 0; e < 4; e++) {
+		g_parity          = outside_parity[e];
+		outside_points[e] = NumPointsForTessFactor(fxp_outside[e]);
+		g_num_points += outside_points[e];
+	}
+	g_num_points -= 4;
+	int inside_points[2];
+	for (int a = 0; a < 2; a++) {
+		g_parity         = inside_parity[a];
+		inside_points[a] = max(inside_parity[a] == PARITY_ODD ? 4 : 3, NumPointsForTessFactor(fxp_inside[a]));
+	}
+	const int inside_point_base = g_num_points;
+	g_num_points += (inside_points[0] - 2) * (inside_points[1] - 2);
+
+	// Points: the outside ring clockwise from the top left, then the inside rings spiralling in from the bottom left.
+	int point_offset = 0;
+	for (int e = 0; e < 4; e++) {
+		const int parity = e & 1;
+		const int end    = outside_points[e] - 1;
+		for (int p = 0; p < end; p++, point_offset++) {
+			const int q = (e == 1 || e == 2) ? p : end - p;
+			g_parity    = outside_parity[e];
+			const uint param = PlacePointIn1D(outside_context[e], q);
+			if (parity != 0) {
+				DefinePoint(param, e == 3 ? FXP_ONE : 0u, point_offset);
+			} else {
+				DefinePoint(e == 2 ? FXP_ONE : 0u, param, point_offset);
+			}
+		}
+	}
+	const int rings = min(inside_points[0], inside_points[1]) >> 1;
+	for (int ring = 1; ring < rings; ring++) {
+		const int start  = ring;
+		const int end[2] = int[2](inside_points[0] - 1 - start, inside_points[1] - 1 - start);
+		for (int e = 0; e < 4; e++) {
+			const int parity0 = e & 1;
+			const int parity1 = (e + 1) & 1;
+			const int perpendicular_point = e < 2 ? start : end[parity0];
+			g_parity          = inside_parity[parity0];
+			const uint perp   = PlacePointIn1D(inside_context[parity0], perpendicular_point);
+			g_parity          = inside_parity[parity1];
+			for (int p = start; p < end[parity1]; p++, point_offset++) {
+				const int  q     = (e == 1 || e == 2) ? p : end[parity1] - (p - start);
+				const uint param = PlacePointIn1D(inside_context[parity1], q);
+				if (parity1 != 0) {
+					DefinePoint(perp, param, point_offset);
+				} else {
+					DefinePoint(param, perp, point_offset);
+				}
+			}
+		}
+	}
+	// With even spacing the inner ring is a row of points.
+	if (inside_points[0] > inside_points[1] && inside_parity[1] == PARITY_EVEN) {
+		const int start = rings;
+		const int end   = inside_points[0] - 1 - start;
+		g_parity        = inside_parity[0];
+		for (int p = start; p <= end; p++, point_offset++) {
+			DefinePoint(PlacePointIn1D(inside_context[0], p), FXP_ONE_HALF, point_offset);
+		}
+	} else if (inside_points[1] >= inside_points[0] && inside_parity[0] == PARITY_EVEN) {
+		const int start = rings;
+		const int end   = inside_points[1] - 1 - start;
+		g_parity        = inside_parity[1];
+		for (int p = end; p >= start; p--, point_offset++) {
+			DefinePoint(FXP_ONE_HALF, PlacePointIn1D(inside_context[1], p), point_offset);
+		}
+	}
+
+	// Triangles: the concentric rings, one side at a time.
+	const int rows_to_center[2] = int[2]((inside_points[0] + 1) >> 1, (inside_points[1] + 1) >> 1);
+	const int ring_count        = min(rows_to_center[0], rows_to_center[1]);
+	const int degenerate_ring[2] = int[2](inside_parity[1] == PARITY_EVEN ? rows_to_center[1] - 1 : -1,
+	                                      inside_parity[0] == PARITY_EVEN ? rows_to_center[0] - 1 : -1);
+	FactorContext ring_context[4] = outside_context;
+	int           ring_parity[4]  = outside_parity;
+	int           ring_points[4]  = outside_points;
+	int           inside_base     = inside_point_base;
+	int           outside_base    = 0;
+	for (int ring = 1; ring < ring_count; ring++) {
+		const int inside_edge_points[2] = int[2](inside_points[0] - 2 * ring, inside_points[1] - 2 * ring);
+		const int edge0_inside_base     = inside_base;
+		const int edge0_outside_base    = outside_base;
+		for (int e = 0; e < 4; e++) {
+			const int parity    = (e + 1) & 1;
+			const int triangles = inside_edge_points[parity] + ring_points[e] - 2;
+			int       stitch_inside;
+			int       stitch_outside;
+			if (e == 3) {
+				if (ring == degenerate_ring[parity]) {
+					g_invert_base        = inside_base + 1;
+					g_corner_bad         = outside_base + ring_points[e] - 1;
+					g_corner_replacement = edge0_outside_base;
+					g_inversion_end      = (g_invert_base << 1) - 1;
+					stitch_inside        = g_invert_base;
+					stitch_outside       = outside_base;
+					g_patched2           = true;
+				} else {
+					g_inside_delta        = inside_base;
+					g_inside_bad          = inside_edge_points[parity] - 1;
+					g_inside_replacement  = edge0_inside_base;
+					g_outside_patch_base  = g_inside_bad + 1;
+					g_outside_delta       = outside_base - g_outside_patch_base;
+					g_outside_bad         = g_outside_patch_base + ring_points[e] - 1;
+					g_outside_replacement = edge0_outside_base;
+					stitch_inside         = 0;
+					stitch_outside        = g_outside_patch_base;
+					g_patched             = true;
+				}
+			} else if (e == 2 && ring == degenerate_ring[parity]) {
+				g_invert_base        = inside_base;
+				g_corner_bad         = -1;
+				g_corner_replacement = -1;
+				g_inversion_end      = g_invert_base << 1;
+				stitch_inside        = g_invert_base;
+				stitch_outside       = outside_base;
+				g_patched2           = true;
+			} else {
+				stitch_inside  = inside_base;
+				stitch_outside = outside_base;
+			}
+			if (ring == 1) {
+				StitchTransition(g_num_indices, stitch_inside, inside_context[parity].half_points, inside_parity[parity], stitch_outside,
+				                 ring_context[e].half_points, ring_parity[e]);
+			} else {
+				StitchRegular(true, DIAGONALS_MIRRORED, g_num_indices, inside_edge_points[parity], stitch_inside, stitch_outside);
+			}
+			g_patched  = false;
+			g_patched2 = false;
+			g_num_indices += triangles * 3;
+			outside_base += ring_points[e] - 1;
+			if (e == 2 && ring == degenerate_ring[parity]) {
+				inside_base -= inside_edge_points[parity] - 1;
+			} else {
+				inside_base += inside_edge_points[parity] - 1;
+			}
+			ring_points[e] = inside_edge_points[parity];
+		}
+		if (ring == 1) {
+			for (int e = 0; e < 4; e++) {
+				ring_context[e] = inside_context[e & 1];
+				ring_parity[e]  = inside_parity[e & 1];
+			}
+		}
+	}
+	// The center: a row of quads when odd.
+	if (inside_points[0] > inside_points[1] && inside_parity[1] == PARITY_ODD) {
+		g_patched2 = true;
+		const int quads = (((inside_points[0] >> 1) - (inside_points[1] >> 1)) << 1) + (inside_parity[0] == PARITY_EVEN ? 2 : 1);
+		g_invert_base        = outside_base + quads + 2;
+		g_corner_bad         = g_invert_base;
+		g_corner_replacement = outside_base;
+		g_inversion_end      = g_invert_base + g_invert_base + quads;
+		StitchRegular(false, DIAGONALS_INSIDE_TO_OUTSIDE, g_num_indices, quads + 1, g_invert_base, outside_base + 1);
+		g_patched2 = false;
+		g_num_indices += quads * 6;
+	} else if (inside_points[1] >= inside_points[0] && inside_parity[0] == PARITY_ODD) {
+		g_patched2 = true;
+		const int quads = (((inside_points[1] >> 1) - (inside_points[0] >> 1)) << 1) + (inside_parity[1] == PARITY_EVEN ? 2 : 1);
+		g_invert_base   = outside_base + quads + 1;
+		g_corner_bad    = -1;
+		g_inversion_end = g_invert_base + g_invert_base + quads;
+		const int diagonals = inside_parity[1] == PARITY_EVEN ? DIAGONALS_INSIDE_TO_OUTSIDE : DIAGONALS_INSIDE_TO_OUTSIDE_EXCEPT_MIDDLE;
+		StitchRegular(false, diagonals, g_num_indices, quads + 1, g_invert_base, outside_base);
+		g_patched2 = false;
+		g_num_indices += quads * 6;
+	}
+}
+
+void main() {
+	const uint p = gl_GlobalInvocationID.x;
+	if (p >= params.patches) {
+		return;
+	}
+	g_original_parity = params.partitioning == PARTITIONING_FRACTIONAL_ODD ? PARITY_ODD : PARITY_EVEN;
+	g_parity          = g_original_parity;
+	g_patched         = false;
+	g_patched2        = false;
+	g_corner_bad      = -1;
+	g_patch           = p;
+	if (params.mode == 0u) {
+		g_emit = false;
+	} else {
+		if (result.data[params.offsets + p * 3u + 2u] == 0u) {
+			return; // dropped: past the buffer
+		}
+		g_emit        = true;
+		g_point_first = result.data[params.offsets + p * 3u];
+		g_point_dword = params.point_base + g_point_first * 4u;
+		g_index_dword = params.index_base + result.data[params.offsets + p * 3u + 1u];
+	}
+	const uint record = p * params.record_dwords;
+	if (params.quad != 0u) {
+		TessellateQuad(uintBitsToFloat(records.data[record]), uintBitsToFloat(records.data[record + 1u]), uintBitsToFloat(records.data[record + 2u]),
+		               uintBitsToFloat(records.data[record + 3u]), uintBitsToFloat(records.data[record + 4u]),
+		               uintBitsToFloat(records.data[record + 5u]));
+	} else {
+		TessellateTri(uintBitsToFloat(records.data[record]), uintBitsToFloat(records.data[record + 1u]), uintBitsToFloat(records.data[record + 2u]),
+		              uintBitsToFloat(records.data[record + 3u]));
+	}
+	if (params.mode == 0u) {
+		result.data[params.counts + p * 2u]      = uint(g_num_points);
+		result.data[params.counts + p * 2u + 1u] = uint(g_num_indices);
+	}
+}
