@@ -45,9 +45,12 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	        : 1u;
 	DefineModule(state);
 	EmitProgram(state);
-	state.builder.AddEntryPoint(state.mesh_compute ? spv::ExecutionModelGLCompute
-	                                               : ExecutionModelForStage(state.program.stage),
-	                            state.main_func, "main", state.interface_variables);
+	// IR::TessEmulation runs the HS as a compute shader and the TES as a vertex stage (the LS stays one).
+	const auto model = state.mesh_compute || (state.tess_compute && state.program.stage == ShaderType::TessellationControl)
+	                       ? spv::ExecutionModelGLCompute
+	                   : state.tess_compute ? spv::ExecutionModelVertex
+	                                        : ExecutionModelForStage(state.program.stage);
+	state.builder.AddEntryPoint(model, state.main_func, "main", state.interface_variables);
 
 	return state.builder.Build();
 }

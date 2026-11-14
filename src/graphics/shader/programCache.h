@@ -39,6 +39,9 @@ struct HostShaderLimits {
 	// Without mesh shaders, the backend can run a mesh program as a compute shader (see
 	// IR::MeshEmulation); otherwise draws with a mesh program are skipped.
 	bool     mesh_compute_emulation = false;
+	// The host's tessellator is not used: tessellation runs as a capture draw, compute passes and a draw of what they wrote (see
+	// IR::TessEmulation; the Series X's tessellator emits no domain points).
+	bool     tess_compute_emulation = false;
 	uint32_t max_mesh_invocations   = 0;
 	uint32_t max_mesh_group_size_x  = 0;
 	uint32_t max_mesh_vertices      = 0;

@@ -9,6 +9,7 @@
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/recompiler/ir/TessEmulation.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include <algorithm>
@@ -90,6 +91,9 @@ struct EmitterState {
 		}
 		mesh_compute = program.stage == ShaderType::Mesh && input_info.vertex != nullptr &&
 		               input_info.vertex->mesh.compute_emulation;
+		tess_compute = (program.stage == ShaderType::Local || program.stage == ShaderType::TessellationControl ||
+		                program.stage == ShaderType::TessellationEvaluation) &&
+		               input_info.vertex != nullptr && input_info.vertex->tess.compute_emulation;
 	}
 
 	Builder                                          builder;
@@ -164,6 +168,14 @@ struct EmitterState {
 	uint32_t                   mesh_records                          = 0;
 	uint32_t                   mesh_indices                          = 0;
 	uint32_t                   mesh_payload                          = 0;
+	// The tessellation stages run as the capture draw, the hull compute shader and the domain vertex stage (IR::TessEmulation):
+	// the tessellation attributes are buffer dwords, its builtins come from the buffers and the dispatch.
+	bool                       tess_compute                          = false;
+	uint32_t                   tess_params                           = 0;
+	uint32_t                   tess_capture                          = 0;
+	uint32_t                   tess_slots                            = 0;
+	uint32_t                   tess_records                          = 0;
+	uint32_t                   tess_points                           = 0;
 	uint32_t                   entry_label                           = 0;
 	uint32_t                   current_label                         = 0;
 	const IR::Block*           current_block                         = nullptr;
@@ -416,6 +428,8 @@ uint32_t DefineInterfaceVariable(EmitterState& state, uint32_t type, spv::Storag
 void     DefineModule(EmitterState& state);
 void     DefineTessellationInterfaces(EmitterState& state);
 void     DefineTessellationExecutionModes(EmitterState& state);
+// The inputs IR::TessEmulation gives its stages in place of the tessellation builtins (InvocationId, PrimitiveId, TessCoord).
+uint32_t EmitTessEmulationInput(EmitterState& state, IR::StageInputKind kind, uint32_t component);
 void     DefineMeshOutputs(EmitterState& state, uint32_t clip_distance_count,
                            uint32_t cull_distance_count);
 void     EmitMeshEntryPoint(EmitterState& state);
