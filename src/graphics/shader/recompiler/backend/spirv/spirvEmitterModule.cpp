@@ -576,6 +576,19 @@ void DefineInputs(EmitterState& state) {
 		add_builtin(IR::StageInputKind::WorkgroupId, 3, "gl_WorkGroupID");
 		add_builtin(IR::StageInputKind::NumWorkgroups, 3, "gl_NumWorkGroups");
 	}
+	if (state.tess_compute) {
+		// IR::TessEmulation: the hull pass finds its patch and control point from the dispatch, the other two stages their slot or
+		// domain point from the vertex index (EmitTessEmulationInput).
+		if (state.program.stage == ShaderType::TessellationControl) {
+			add_builtin(IR::StageInputKind::WorkgroupId, 3, "gl_WorkGroupID");
+			add_builtin(IR::StageInputKind::LocalInvocationId, 3, "gl_LocalInvocationID");
+		} else {
+			add_builtin(IR::StageInputKind::VertexIndex, 1, "gl_VertexIndex");
+		}
+		if (state.program.stage == ShaderType::Local) {
+			add_builtin(IR::StageInputKind::InstanceIndex, 1, "gl_InstanceIndex");
+		}
+	}
 	if (state.lane_count == 2) {
 		add_builtin(IR::StageInputKind::LocalInvocationIndex, 1, "gl_LocalInvocationIndex");
 		if (std::ranges::any_of(state.inputs, [](const InputBinding& input) {
@@ -585,6 +598,10 @@ void DefineInputs(EmitterState& state) {
 		}
 	}
 	for (auto& input: state.inputs) {
+		if (state.tess_compute && (input.kind == IR::StageInputKind::InvocationId || input.kind == IR::StageInputKind::PrimitiveId ||
+		                           input.kind == IR::StageInputKind::TessCoord)) {
+			continue; // (EmitTessEmulationInput)
+		}
 		if (state.program.stage == ShaderType::Pixel &&
 		    input.kind == IR::StageInputKind::Parameter) {
 			const auto location = PixelParameterLocation(state, input.location);
