@@ -451,7 +451,7 @@ void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t
 		const auto& tess = info.tess;
 		key.insert(key.end(), {tess.output_control_points, tess.ls_stride, tess.hs_stride,
 		                       tess.patch_base, tess.patch_size, tess.domain, tess.partitioning,
-		                       tess.output_topology});
+		                       tess.output_topology, static_cast<uint32_t>(tess.compute_emulation)});
 	}
 
 	for (int i = 0; i < info.resources_num; i++) {
