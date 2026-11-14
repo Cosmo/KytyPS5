@@ -80,6 +80,7 @@ AppSettings LoadSettings() {
 	read("pro_mode", settings.pro_mode);
 	read("guest_tsc", settings.guest_tsc);
 	read("occlusion_queries", settings.occlusion_queries);
+	read("tessellation", settings.tessellation);
 	read("relaxed_shader_float", settings.relaxed_shader_float);
 	read("pssr_upscaler", settings.pssr_upscaler);
 	read("fsr_frame_generation", settings.fsr_frame_generation);
@@ -181,6 +182,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["pro_mode"]               = settings.pro_mode;
 	json["guest_tsc"]              = settings.guest_tsc;
 	json["occlusion_queries"]      = settings.occlusion_queries;
+	json["tessellation"]           = settings.tessellation;
 	json["relaxed_shader_float"]   = settings.relaxed_shader_float;
 	json["pssr_upscaler"] = settings.pssr_upscaler;
 	json["fsr_frame_generation"] = settings.fsr_frame_generation;
