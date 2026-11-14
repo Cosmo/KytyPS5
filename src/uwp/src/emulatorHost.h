@@ -146,6 +146,9 @@ public:
 
 	// Emulator thread.
 	void AttachSwapChain(IDXGISwapChain1* swapchain);
+	// Sets the swap chain's transform to the inverse of the panel's pixel scale, so that its buffers fill the panel (at attaching and after
+	// every resize: the scale changes with the Output resolution).
+	void ScaleSwapChain(IDXGISwapChain1* swapchain);
 	[[nodiscard]] std::pair<uint32_t, uint32_t> PanelPixelSize() const;
 	// Waits up to `milliseconds` for an exit request; true when one came.
 	[[nodiscard]] bool WaitForExit(uint32_t milliseconds);
