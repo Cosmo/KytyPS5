@@ -461,21 +461,28 @@ void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t
 		                       mesh.provoking_vertex, static_cast<uint32_t>(mesh.fast_launch),
 		                       static_cast<uint32_t>(mesh.compute_emulation)});
 	}
-	// Each tessellation stage keys only the layout fields its module depends on.
+	// Each tessellation stage keys only the layout fields its module depends on. The D3D12 renderer's tessellation through compute passes
+	// keys the whole layout, as before.
 	const auto& tess = info.tess;
-	switch (info.logical_stage) {
-		case ShaderType::Local: key.push_back(tess.ls_stride); break;
-		case ShaderType::TessellationControl:
-			key.insert(key.end(), {tess.input_control_points, tess.output_control_points,
-			                       tess.ls_stride, tess.hs_stride, tess.patch_base,
-			                       tess.patch_size, tess.domain});
-			break;
-		case ShaderType::TessellationEvaluation:
-			key.insert(key.end(), {tess.output_control_points, tess.hs_stride, tess.patch_base,
-			                       tess.patch_size, tess.domain, tess.partitioning,
-			                       tess.output_topology});
-			break;
-		default: break;
+	if (tess.compute_emulation) {
+		key.push_back(tess.input_control_points);
+		if (tess.input_control_points != 0) {
+			key.insert(key.end(), {tess.output_control_points, tess.ls_stride, tess.hs_stride, tess.patch_base, tess.patch_size, tess.domain,
+			                       tess.partitioning, tess.output_topology, 1u});
+		}
+	} else {
+		switch (info.logical_stage) {
+			case ShaderType::Local: key.push_back(tess.ls_stride); break;
+			case ShaderType::TessellationControl:
+				key.insert(key.end(), {tess.input_control_points, tess.output_control_points, tess.ls_stride, tess.hs_stride, tess.patch_base,
+				                       tess.patch_size, tess.domain});
+				break;
+			case ShaderType::TessellationEvaluation:
+				key.insert(key.end(), {tess.output_control_points, tess.hs_stride, tess.patch_base, tess.patch_size, tess.domain,
+				                       tess.partitioning, tess.output_topology});
+				break;
+			default: break;
+		}
 	}
 
 	for (int i = 0; i < info.resources_num; i++) {

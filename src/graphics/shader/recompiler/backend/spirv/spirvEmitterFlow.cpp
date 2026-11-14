@@ -27,6 +27,10 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 	if (kind == IR::StageInputKind::LocalInvocationIndex) {
 		return EmitLocalInvocationIndex(state);
 	}
+	if (state.tess_compute && (kind == IR::StageInputKind::InvocationId || kind == IR::StageInputKind::PrimitiveId ||
+	                           kind == IR::StageInputKind::TessCoord)) {
+		return EmitTessEmulationInput(state, kind, component);
+	}
 	if (state.lane_count == 2 && (kind == IR::StageInputKind::LocalInvocationId ||
 	                              kind == IR::StageInputKind::GlobalInvocationId)) {
 		const auto* cs      = ShaderWorkgroupInput(state.program.stage, state.input_info);
@@ -723,6 +727,12 @@ void EmitDataCacheInvalidate(EmitterState& state) {
 }
 
 void EmitBarrier(EmitterState& state) {
+	if (state.tess_compute && state.program.stage == ShaderType::TessellationControl) {
+		// The hull pass: the patch's invocations read each other's control points from its record after S_BARRIER.
+		state.builder.AddFunction(spv::OpControlBarrier, ConstantU32(state, spv::ScopeWorkgroup), ConstantU32(state, spv::ScopeWorkgroup),
+		                          ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask | spv::MemorySemanticsUniformMemoryMask));
+		return;
+	}
 	const auto tessellation = state.program.stage == ShaderType::TessellationControl;
 	if (!tessellation && ShaderWorkgroupInput(state.program.stage, state.input_info) == nullptr) {
 		// Independent graphics invocations have no native workgroup left to synchronize.
