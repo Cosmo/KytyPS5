@@ -41,7 +41,9 @@ SamplerHandle SamplerCache::GetSampler(const ShaderSamplerResource& guest, bool 
 	} else if (use == Use::Comparison && r.DepthCompareFunc() == 0) {
 		r.fields[0] |= 0x3u << 12u; // less or equal: a sampler used for depth comparison with none set
 	}
-	const SamplerKey key {r.fields[0], r.fields[1], r.fields[2], r.fields[3], integer_border ? 1u : 0u};
+	const uint32_t   lod_bias    = Config::TextureLodBias();
+	const bool       anisotropic = Config::AnisotropicFiltering();
+	const SamplerKey key {r.fields[0], r.fields[1], r.fields[2], r.fields[3], integer_border ? 1u : 0u, lod_bias | (anisotropic ? 0x100u : 0u)};
 	if (auto found = m_samplers.find(key); found != m_samplers.end()) {
 		return found->second;
 	}
@@ -62,7 +64,7 @@ SamplerHandle SamplerCache::GetSampler(const ShaderSamplerResource& guest, bool 
 		}
 	}
 	// The settings for speed: no anisotropic filtering, and the mip levels sampled this many coarser (Config::TextureLodBias).
-	if (info.anisotropyEnable != VK_FALSE && Config::AnisotropicFiltering()) {
+	if (info.anisotropyEnable != VK_FALSE && anisotropic) {
 		desc.Filter        = D3D12_ENCODE_ANISOTROPIC_FILTER(reduction);
 		desc.MaxAnisotropy = static_cast<UINT>(info.maxAnisotropy);
 	} else {
@@ -76,7 +78,7 @@ SamplerHandle SamplerCache::GetSampler(const ShaderSamplerResource& guest, bool 
 	desc.AddressU       = AddressMode(info.addressModeU);
 	desc.AddressV       = AddressMode(info.addressModeV);
 	desc.AddressW       = AddressMode(info.addressModeW);
-	desc.MipLODBias     = std::clamp(info.mipLodBias + static_cast<float>(Config::TextureLodBias()), -16.0f, 15.99f);
+	desc.MipLODBias     = std::clamp(info.mipLodBias + static_cast<float>(lod_bias), -16.0f, 15.99f);
 	// vk::CompareOp and D3D12_COMPARISON_FUNC list the same functions, offset by one.
 	desc.ComparisonFunc = info.compareEnable != VK_FALSE
 	                          ? static_cast<D3D12_COMPARISON_FUNC>(static_cast<int>(info.compareOp) + 1)
