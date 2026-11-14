@@ -4,11 +4,25 @@
 #include "common/debugCounters.h"
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 
 namespace Config {
 
 static std::unique_ptr<ConfigOptions> g_config;
+// Whether FSR frame generation was on when the game started (Load).
+static bool g_fsr_frame_generation_available = false;
+
+// The values the game menu changes during a game are read and written through atomic references (SetPresentMode and the others).
+template <typename T>
+static T LoadLive(T& value) {
+	return std::atomic_ref<T>(value).load(std::memory_order_relaxed);
+}
+
+template <typename T>
+static void StoreLive(T& value, T next) {
+	std::atomic_ref<T>(value).store(next, std::memory_order_relaxed);
+}
 
 void Initialize() {
 	EXIT_IF(g_config != nullptr);
@@ -29,6 +43,7 @@ void Load(const ConfigOptions& cfg) {
 	EXIT_IF(cfg.keyboard_player > static_cast<uint32_t>(MAX_PLAYERS));
 
 	*g_config = cfg;
+	g_fsr_frame_generation_available = cfg.fsr_frame_generation;
 	Common::DebugCounters::SetEnabled(cfg.perf_overlay_enabled);
 }
 
@@ -86,7 +101,7 @@ bool IsGuestUserId(int32_t user_id) {
 }
 
 PresentMode GetPresentMode() {
-	return g_config->present_mode;
+	return LoadLive(g_config->present_mode);
 }
 
 int32_t GetGpuIndex() {
@@ -122,11 +137,11 @@ PssrUpscaler GetPssrUpscaler() {
 }
 
 bool FsrFrameGenerationEnabled() {
-	return g_config != nullptr && g_config->fsr_frame_generation;
+	return g_config != nullptr && LoadLive(g_config->fsr_frame_generation);
 }
 
 uint32_t GetFsr1Upscaling() {
-	return g_config->fsr1_upscaling;
+	return LoadLive(g_config->fsr1_upscaling);
 }
 
 const std::filesystem::path& GetDlssFolder() {
@@ -238,7 +253,7 @@ bool SyncRawImageBuffersEnabled() {
 }
 
 uint32_t GetFlushDraws() {
-	return g_config->flush_draws;
+	return LoadLive(g_config->flush_draws);
 }
 
 bool TessellationEnabled() {
@@ -336,23 +351,54 @@ uint32_t GuestCommitLimitMb() {
 }
 
 uint32_t TextureMipSkip() {
-	return g_config != nullptr ? g_config->texture_mip_skip : 0;
+	return g_config != nullptr ? LoadLive(g_config->texture_mip_skip) : 0;
 }
 
 uint32_t TextureMipSkipMinSize() {
-	return g_config != nullptr ? g_config->texture_mip_skip_min_size : 2048;
+	return g_config != nullptr ? LoadLive(g_config->texture_mip_skip_min_size) : 2048;
 }
 
 bool TextureMipSkipUncompressed() {
-	return g_config != nullptr && g_config->texture_mip_skip_uncompressed;
+	return g_config != nullptr && LoadLive(g_config->texture_mip_skip_uncompressed);
 }
 
 uint32_t TextureLodBias() {
-	return g_config != nullptr ? g_config->texture_lod_bias : 0;
+	return g_config != nullptr ? LoadLive(g_config->texture_lod_bias) : 0;
 }
 
 bool AnisotropicFiltering() {
-	return g_config == nullptr || g_config->anisotropic_filtering;
+	return g_config == nullptr || LoadLive(g_config->anisotropic_filtering);
+}
+
+void SetPresentMode(PresentMode mode) {
+	StoreLive(g_config->present_mode, mode);
+}
+
+void SetFsr1Upscaling(uint32_t mode) {
+	StoreLive(g_config->fsr1_upscaling, mode);
+}
+
+void SetFsrFrameGeneration(bool enabled) {
+	StoreLive(g_config->fsr_frame_generation, enabled && g_fsr_frame_generation_available);
+}
+
+bool FsrFrameGenerationAvailable() {
+	return g_fsr_frame_generation_available;
+}
+
+void SetFlushDraws(uint32_t draws) {
+	StoreLive(g_config->flush_draws, draws);
+}
+
+void SetTextureMipSkip(uint32_t skip, uint32_t min_size, bool uncompressed) {
+	StoreLive(g_config->texture_mip_skip, skip);
+	StoreLive(g_config->texture_mip_skip_min_size, min_size);
+	StoreLive(g_config->texture_mip_skip_uncompressed, uncompressed);
+}
+
+void SetTextureFiltering(uint32_t lod_bias, bool anisotropic) {
+	StoreLive(g_config->texture_lod_bias, lod_bias);
+	StoreLive(g_config->anisotropic_filtering, anisotropic);
 }
 
 bool GpuMemorySavings() {
