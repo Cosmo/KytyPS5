@@ -55,6 +55,7 @@ Presenter& WindowInit(uint32_t width, uint32_t height) {
 	window->graphic_ctx.screen_height = height;
 	window->surface_size              = [] { return EmulatorHost::Get().PanelPixelSize(); };
 	window->attach_swapchain          = [](IDXGISwapChain1* swapchain) { EmulatorHost::Get().AttachSwapChain(swapchain); };
+	window->swapchain_resized         = [](IDXGISwapChain1* swapchain) { EmulatorHost::Get().ScaleSwapChain(swapchain); };
 	window->frame_presented           = [] {
         EmulatorHost::Get().FramePresented();
         // The window title shows the progress (`uwp.ps1 run` reads it): the frame count and the frames of the last second.

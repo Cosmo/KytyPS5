@@ -146,7 +146,6 @@ private:
 	uint64_t m_num_instances_addr = 0;
 
 	const int      m_interrupt_event_id;
-	const uint32_t m_flush_draws                 = Config::GetFlushDraws();
 	uint32_t       m_draws                       = 0; // Since the buffer start or CountDraw's flush
 	uint64_t       m_synthetic_occlusion_counter = 0;
 	bool           m_predicate_skip              = false;

@@ -32,6 +32,8 @@ struct WindowContext {
 	std::function<std::pair<uint32_t, uint32_t>()> surface_size;
 	// Gives the host the swap chain to show; called once, from the emulator thread.
 	std::function<void(IDXGISwapChain1*)> attach_swapchain;
+	// Called after the swap chain's buffers got a new size, from the emulator thread: the host fits them into its surface again.
+	std::function<void(IDXGISwapChain1*)> swapchain_resized;
 	// Called after every presented frame.
 	std::function<void()> frame_presented;
 };

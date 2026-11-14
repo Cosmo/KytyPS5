@@ -773,12 +773,14 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 	}
 }
 
-// Submits the recorded work every N draws so the host GPU starts before a long buffer ends.
+// Submits the recorded work every N draws so the host GPU starts before a long buffer ends. N can change during a game (the game
+// menu's Graphics page).
 void CommandProcessor::CountDraw() {
-	if (m_flush_draws == 0) {
+	const auto flush_draws = Config::GetFlushDraws();
+	if (flush_draws == 0) {
 		return;
 	}
-	if (m_draws == m_flush_draws) {
+	if (m_draws >= flush_draws) {
 		GetScheduler().Flush();
 		m_draws = 0;
 	}

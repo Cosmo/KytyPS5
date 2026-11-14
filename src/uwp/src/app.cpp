@@ -4,6 +4,7 @@
 #include "controllerSettings.h"
 #include "emulatorHost.h"
 #include "fileAccess.h"
+#include "gameGraphics.h"
 #include "gameImages.h"
 #include "gameLibrary.h"
 #include "gameSource.h"
@@ -450,15 +451,18 @@ void FocusControl(xaml::DependencyObject const& target) {
 	}
 }
 
-// The game menu's views: its entries, Overlay, Controllers (and its DSU servers) and Trophies.
-enum class MenuView { Entries, Overlay, Controllers, Servers, Trophies };
+// The game menu's views: its entries, Overlay, Graphics, Controllers (and its DSU servers) and Trophies.
+enum class MenuView { Entries, Overlay, Graphics, Controllers, Servers, Trophies };
+
+// The running game's page applies a new Output resolution (the game menu's Graphics page): whether the picture matches the TV's mode.
+std::function<void(bool)> g_output_resolution_changed;
 
 // The game menu's panel is 320 wide; the text of the item with the focus starts 28 beside it, level with the panel's first item.
 constexpr double MENU_PANEL_WIDTH = 320;
 constexpr double MENU_TEXT_GAP    = 28;
 constexpr double MENU_TEXT_TOP    = 100;
 constexpr double MENU_TEXT_WIDTH  = 310;
-// The game is dimmed so that the text reads well; less with Overlay, whose changes show in the overlay.
+// The game is dimmed so that the text reads well; less with Overlay and Graphics, whose changes show in the game.
 constexpr double MENU_DIM         = 0.8;
 constexpr double MENU_OVERLAY_DIM = 0.72;
 
@@ -490,6 +494,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 
 	const auto resume      = MenuEntry(L"Resume");
 	const auto settings    = MenuEntry(L"Overlay", true);
+	const auto graphics    = MenuEntry(L"Graphics", true);
 	const auto controllers = MenuEntry(L"Controllers", true);
 	const auto trophies    = MenuEntry(L"Trophies", true);
 	const auto compile     = MenuEntry(L"Compile pipelines");
@@ -508,7 +513,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		line.IsEnabled(false);
 		line.IsTabStop(false);
 	}
-	for (const auto& entry: {resume, settings, controllers, trophies, line, compile, dump, quit}) {
+	for (const auto& entry: {resume, settings, graphics, controllers, trophies, line, compile, dump, quit}) {
 		items.Items().Append(entry);
 	}
 	// What each entry does, next to the panel while it has the focus.
@@ -520,6 +525,7 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 	const std::vector<EntryText> entry_texts = {
 	    {resume, L"Resume", {L"Closes the menu and goes back to the game.", L"While the menu is open, the game keeps running, but its controls pause."}},
 	    {settings, L"Overlay", {L"Choose what the overlay shows over the game. The game stays in view, so you see each change right away."}},
+	    {graphics, L"Graphics", {L"Change the picture and textures while you play. The game stays in view."}},
 	    {controllers,
 	     L"Controllers",
 	     {LoadSettings().dsu_enabled
@@ -544,13 +550,14 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		}
 	});
 
-	// Overlay's panel goes to the right and its text to the left of it, the game a little less dim: the overlay at the top left stays in view.
+	// Overlay's and Graphics' panel goes to the right and its text to the left of it, the game a little less dim: the overlay at the top left
+	// and the game stay in view.
 	// The tiles go when another view shows (Controllers' follow the controllers while they are there).
 	auto       current_view = std::make_shared<MenuView>(MenuView::Entries);
 	const auto set_view     = [dim, panel, menu_title, title, list, settings_view, trophies_view, tiles, text, current_view](MenuView view) {
 		*current_view       = view;
 		const auto shown_if = [](bool shown) { return shown ? xaml::Visibility::Visible : xaml::Visibility::Collapsed; };
-		const bool overlay_view = view == MenuView::Overlay;
+		const bool overlay_view = view == MenuView::Overlay || view == MenuView::Graphics;
 		panel.HorizontalAlignment(overlay_view ? xaml::HorizontalAlignment::Right : xaml::HorizontalAlignment::Left);
 		text.HorizontalAlignment(overlay_view ? xaml::HorizontalAlignment::Right : xaml::HorizontalAlignment::Left);
 		text.Margin(overlay_view ? xaml::ThicknessHelper::FromLengths(0, MENU_TEXT_TOP, MENU_PANEL_WIDTH + MENU_TEXT_GAP, 0)
@@ -562,7 +569,8 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		trophies_view.Visibility(shown_if(view == MenuView::Trophies));
 		tiles.Children().Clear();
 		text.Children().Clear();
-		menu_title.Text(overlay_view                    ? winrt::hstring(L"Overlay")
+		menu_title.Text(view == MenuView::Overlay        ? winrt::hstring(L"Overlay")
+		                : view == MenuView::Graphics    ? winrt::hstring(L"Graphics")
 		                : view == MenuView::Controllers ? winrt::hstring(L"Controllers")
 		                : view == MenuView::Servers     ? winrt::hstring(L"Remote Controllers")
 		                : view == MenuView::Trophies    ? winrt::hstring(L"Trophies")
@@ -580,6 +588,18 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		});
 		tiles.UpdateLayout();
 		FocusControl(tiles.Children().GetAt(0));
+	};
+	// The graphics settings a running game takes at once (gameGraphics.cpp).
+	const auto open_graphics = [set_view, tiles, text] {
+		set_view(MenuView::Graphics);
+		auto values = std::make_shared<AppSettings>(LoadSettings());
+		AddGameGraphicsSettings(tiles, text, values, [](bool match_tv) {
+			if (g_output_resolution_changed) {
+				g_output_resolution_changed(match_tv);
+			}
+		});
+		tiles.UpdateLayout();
+		FocusFirst(tiles);
 	};
 	// The DSU servers, as on the settings page (Settings › Controller › Remote Controllers); a change applies at once.
 	const auto open_servers = [set_view, tiles, text] {
@@ -609,7 +629,10 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 			FocusFirst(tiles, L"servers");
 			return;
 		}
-		const int32_t from = *current_view == MenuView::Trophies ? 3 : *current_view == MenuView::Controllers ? 2 : 1;
+		const int32_t from = *current_view == MenuView::Trophies      ? 4
+		                     : *current_view == MenuView::Controllers ? 3
+		                     : *current_view == MenuView::Graphics    ? 2
+		                                                              : 1;
 		set_view(MenuView::Entries);
 		items.UpdateLayout();
 		FocusControl(items.ContainerFromIndex(from));
@@ -647,8 +670,8 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		});
 	};
 
-	items.ItemClick([show, open_settings, open_controllers, open_trophies, status, items, resume, settings, controllers, trophies, compile, dump,
-	                 quit](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
+	items.ItemClick([show, open_settings, open_graphics, open_controllers, open_trophies, status, items, resume, settings, graphics, controllers,
+	                 trophies, compile, dump, quit](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
 		// The entry, or its content: an entry is its own container, and the list may report either.
 		const auto clicked = args.ClickedItem();
 		const auto is      = [&clicked](xaml::Controls::ListViewItem const& entry) { return clicked == entry || clicked == entry.Content(); };
@@ -658,6 +681,10 @@ void SetUpGameMenu(xaml::Controls::Grid const& page, GameEntry const& game, winr
 		}
 		if (is(settings)) {
 			open_settings();
+			return;
+		}
+		if (is(graphics)) {
+			open_graphics();
 			return;
 		}
 		if (is(controllers)) {
@@ -815,10 +842,10 @@ xaml::UIElement CreateEmulatorPage(std::filesystem::path game) {
 		panel.Width(panel_width);
 		panel.Height(panel_height);
 	});
-	// The settings page only opens from the library, so the setting is read once for the game.
-	const bool                     match_tv    = LoadSettings().output_resolution != "1080p";
-	const auto                     report_size = [match_tv](xaml::Controls::SwapChainPanel const& panel) {
-		const float output = OutputScale(panel.CompositionScaleX(), match_tv);
+	// Read when the game starts; the game menu's Graphics page can change it during the game (g_output_resolution_changed).
+	const auto match_tv    = std::make_shared<bool>(LoadSettings().output_resolution != "1080p");
+	const auto report_size = [match_tv](xaml::Controls::SwapChainPanel const& panel) {
+		const float output = OutputScale(panel.CompositionScaleX(), *match_tv);
         EmulatorHost::Get().SetPanelSize(static_cast<float>(panel.ActualWidth()),
 		                                                     static_cast<float>(panel.ActualHeight()),
 		                                                     panel.CompositionScaleX() * output,
@@ -829,6 +856,12 @@ xaml::UIElement CreateEmulatorPage(std::filesystem::path game) {
 	});
 	panel.CompositionScaleChanged(
 	    [report_size](xaml::Controls::SwapChainPanel const& sender, auto const&) { report_size(sender); });
+	g_output_resolution_changed = [match_tv, report_size, weak = winrt::make_weak(panel)](bool matches) {
+		*match_tv = matches;
+		if (const auto current = weak.get()) {
+			report_size(current);
+		}
+	};
 	// On Xbox, B navigates back; in a game it is Circle.
 	winrt::Windows::UI::Core::SystemNavigationManager::GetForCurrentView().BackRequested(
 	    [](auto const&, winrt::Windows::UI::Core::BackRequestedEventArgs const& args) {
