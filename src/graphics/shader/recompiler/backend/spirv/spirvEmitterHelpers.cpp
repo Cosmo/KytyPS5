@@ -114,6 +114,27 @@ uint32_t EmitSubgroupLocalInvocationId(EmitterState& state) {
 	return state.lane_half == 0 ? value : EmitAddU32(state, value, ConstantU32(state, 32));
 }
 
+bool Wave32InWiderWaves(const EmitterState& state) {
+	return state.program.wave_size == 32u && state.lane_count == 1 && GetHostShaderFeatures().wave32_in_wider_waves;
+}
+
+uint32_t EmitProgramLaneId(EmitterState& state) {
+	const auto lane = EmitSubgroupLocalInvocationId(state);
+	return Wave32InWiderWaves(state) ? Binary(state, spv::OpBitwiseAnd, TypeU32(state), lane, ConstantU32(state, 31)) : lane;
+}
+
+uint32_t EmitUpperHalf(EmitterState& state) {
+	return Binary(state, spv::OpUGreaterThanEqual, TypeBool(state), EmitSubgroupLocalInvocationId(state), ConstantU32(state, 32));
+}
+
+uint32_t EmitOwnHalfWord(EmitterState& state, uint32_t ballot) {
+	const auto low  = state.builder.AllocateId();
+	const auto high = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low, ballot, 0);
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), high, ballot, 1);
+	return Select(state, TypeU32(state), EmitUpperHalf(state), high, low);
+}
+
 uint32_t InputVariableForKind(const EmitterState& state, IR::StageInputKind kind) {
 	for (const auto& input: state.inputs) {
 		if (input.kind == kind) {
@@ -216,7 +237,8 @@ uint32_t EmitBallotLaneActiveBool(EmitterState& state, uint32_t active_ballot, u
 	const auto low = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low, active_ballot, 0);
 	uint32_t mask = low;
-	if (state.program.wave_size == 64u) {
+	// (The ballot is the host's, the lane a host lane: in a wider wave the lane's word is its half's.)
+	if (state.program.wave_size == 64u || Wave32InWiderWaves(state)) {
 		const auto high     = state.builder.AllocateId();
 		const auto in_high  = state.builder.AllocateId();
 		const auto selected = state.builder.AllocateId();
@@ -242,7 +264,7 @@ uint32_t EmitBallotLaneActiveBool(EmitterState& state, uint32_t active_ballot, u
 	state.builder.AddFunction(spv::OpINotEqual, TypeBool(state), active, hit,
 	                          ConstantU32(state, 0));
 	state.builder.AddFunction(spv::OpULessThan, TypeBool(state), in_range, lane,
-	                          ConstantU32(state, state.program.wave_size));
+	                          ConstantU32(state, Wave32InWiderWaves(state) ? 64u : state.program.wave_size));
 	state.builder.AddFunction(spv::OpLogicalAnd, TypeBool(state), ret, active, in_range);
 	return ret;
 }
