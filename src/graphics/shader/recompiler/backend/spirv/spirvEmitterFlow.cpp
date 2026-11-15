@@ -881,7 +881,7 @@ uint32_t EmitConditionRef(ValueEmitContext& ctx, const IR::Inst& inst) {
 		predicate = Binary(ctx.state, zero ? spv::OpLogicalAnd : spv::OpLogicalOr,
 		                   TypeBool(ctx.state), predicate, ctx.HalfArg(inst, 0, 1));
 	}
-	if (ctx.other_half == nullptr && Wave32InWiderWaves(ctx.state)) {
+	if (ctx.other_half == nullptr && Wave32ControlPerHalf(ctx.state)) {
 		// Any and all over the lanes of the program's wave: its half of the host's.
 		auto&      state = ctx.state;
 		const auto scope = ConstantU32(state, spv::ScopeSubgroup);
@@ -945,16 +945,8 @@ static bool PredicateIsAlwaysTrue(const IR::Value& value, std::set<const IR::Ins
 uint32_t EmitLiveMask(EmitterState& state) {
 	const auto helper =
 	    EmitNative<spv::OpLoad, IR::Type::U1>(state, state.helper_invocation_variable);
-	const auto ballot = EmitNative<spv::OpGroupNonUniformBallot, IR::Type::U32x4>(
+	return EmitNative<spv::OpGroupNonUniformBallot, IR::Type::U32x4>(
 	    state, ConstantU32(state, spv::ScopeSubgroup), EmitLogicalNotBool(state, helper));
-	if (!Wave32InWiderWaves(state)) {
-		return ballot;
-	}
-	// The program's starting EXEC is its own half's word, as for its ballots (EmitBallot).
-	const auto result = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), result, EmitOwnHalfWord(state, ballot),
-	                          ConstantU32(state, 0), ConstantU32(state, 0), ConstantU32(state, 0));
-	return result;
 }
 
 // A program of 32 lanes in a wider host wave: each half reads its own half's lane `lane` (0 to 31; a first lane of each half for
@@ -970,7 +962,7 @@ static uint32_t EmitPerHalfRead(ValueEmitContext& ctx, const IR::Inst& inst, uin
 }
 
 uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
-	if (ctx.other_half == nullptr && Wave32InWiderWaves(ctx.state)) {
+	if (ctx.other_half == nullptr && Wave32ControlPerHalf(ctx.state)) {
 		// The first active lane of each half (lane 0 of a half without one, as V_READFIRSTLANE reads with EXEC zero); a lane whose
 		// half's ballot is empty (a helper lane, which wave operations leave out) takes its own value (see below).
 		auto&      state   = ctx.state;
@@ -1025,7 +1017,7 @@ uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 
 uint32_t EmitReadLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 	// The lane number is a scalar register or a constant: the same in every lane.
-	if (ctx.other_half == nullptr && Wave32InWiderWaves(ctx.state)) {
+	if (ctx.other_half == nullptr && Wave32ControlPerHalf(ctx.state)) {
 		const auto lane = EmitAndConstant(ctx.state, ctx.Arg(inst, 1), 31);
 		return EmitPerHalfRead(ctx, inst, lane, lane);
 	}

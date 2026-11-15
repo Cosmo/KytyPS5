@@ -1393,8 +1393,48 @@ uint32_t LoadGuestPointerDword(EmitterState& state, uint32_t bda, bool coherent,
 	const auto offset = Unary(state, spv::OpUConvert, TypeU32(state), bda);
 	const auto index  = Binary(state, spv::OpShiftRightLogical, TypeU32(state), offset,
 	                           ConstantU32(state, 2));
-	// (In a wider host wave the address is the same only within each half, one of the program's waves: the loop below then.)
-	if (uniform && !Wave32InWiderWaves(state)) {
+	if (uniform && Wave32ControlPerHalf(state)) {
+		// In a wider host wave the address is the same within each half, one of the program's waves: each half's slot is the one of its
+		// first active lane, read with a lane number the same in every lane, and each half loads through its own (two loads whose table
+		// index is the same in every lane, no loop). A half without active lanes takes the other half's slot, a valid one. (The waterfall
+		// loop below hung the Series X's GPU in pixel programs: helper lanes, which wave operations leave out, never got served.)
+		const auto u32    = TypeU32(state);
+		const auto active = EmitNative<spv::OpGroupNonUniformBallot, IR::Type::U32x4>(
+		    state, ConstantU32(state, spv::ScopeSubgroup), ConstantBool(state, true));
+		const auto word = [&](uint32_t which) {
+			const auto bits = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeExtract, u32, bits, active, which);
+			return bits;
+		};
+		const auto first_lane = [&](uint32_t bits) {
+			return EmitGlsl<GLSLstd450SMax, IR::Type::U32>(state, EmitGlsl<GLSLstd450FindILsb, IR::Type::U32>(state, bits),
+			                                               ConstantU32(state, 0));
+		};
+		const auto low_word   = word(0);
+		const auto high_word  = word(1);
+		const auto low_slot   = EmitSubgroupShuffle(state, u32, slot, first_lane(low_word), {.uniform = true});
+		const auto high_slot  = EmitSubgroupShuffle(state, u32, slot,
+		                                            Binary(state, spv::OpBitwiseOr, u32, first_lane(high_word), ConstantU32(state, 32)),
+		                                            {.uniform = true});
+		const auto low_empty  = Binary(state, spv::OpIEqual, TypeBool(state), low_word, ConstantU32(state, 0));
+		const auto high_empty = Binary(state, spv::OpIEqual, TypeBool(state), high_word, ConstantU32(state, 0));
+		const auto load       = [&](uint32_t table_slot) {
+			const auto pointer = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state, 32), pointer,
+			                          state.guest_buffer_table, table_slot, ConstantU32(state, 0), index);
+			const auto value = state.builder.AllocateId();
+			if (coherent) {
+				state.builder.AddFunction(spv::OpLoad, u32, value, pointer, spv::MemoryAccessVolatileMask);
+			} else {
+				state.builder.AddFunction(spv::OpLoad, u32, value, pointer);
+			}
+			return value;
+		};
+		const auto lower = load(Select(state, u32, low_empty, high_slot, low_slot));
+		const auto upper = load(Select(state, u32, high_empty, low_slot, high_slot));
+		return Select(state, u32, EmitUpperHalf(state), upper, lower);
+	}
+	if (uniform) {
 		// Every lane has this address: the first lane's slot is everyone's.
 		const auto first = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpGroupNonUniformBroadcastFirst, TypeU32(state), first,
