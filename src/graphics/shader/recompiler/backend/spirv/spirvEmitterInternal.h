@@ -371,6 +371,16 @@ uint32_t MrtOutputType(EmitterState& state, uint32_t index);
 uint32_t ConstantU32(EmitterState& state, uint32_t value);
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
+// A program of 32 lanes in the host's waves of 64 (HostShaderFeatures::wave32_in_wider_waves; D3D12 on the Series X runs every
+// shader in waves of 64): each half of a host wave is one of the program's waves, so what the program sees of other lanes (lane
+// numbers, lane masks, the first lane, any and all) comes from its own half.
+[[nodiscard]] bool Wave32InWiderWaves(const EmitterState& state);
+// The lane's number in the program's wave: SubgroupLocalInvocationId, within its half in a wider host wave.
+uint32_t EmitProgramLaneId(EmitterState& state);
+// True in the upper half (lanes 32 to 63) of a host wave.
+uint32_t EmitUpperHalf(EmitterState& state);
+// The word of a host ballot that holds the lane's own half: word 1 in the upper half, word 0 in the lower.
+uint32_t EmitOwnHalfWord(EmitterState& state, uint32_t ballot);
 // The value of `value` in the lane `lane` of the subgroup (a shuffle): OpGroupNonUniformShuffle, or where the host needs a wave-uniform lane number
 // (HostShaderFeatures::lane_shuffle_loop) the host's shuffle where every lane reads the same lane, quad operations for a shuffle within
 // quads, and otherwise a loop over the source lanes that `lanes` leaves.

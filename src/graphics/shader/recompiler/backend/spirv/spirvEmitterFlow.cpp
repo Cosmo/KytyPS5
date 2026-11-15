@@ -762,7 +762,7 @@ void EmitBarrier(EmitterState& state) {
 uint32_t EmitLaneId(EmitterState& state) {
 	return state.program.stage == ShaderType::TessellationControl
 	           ? EmitBuiltinU32(state, IR::StageInputKind::InvocationId, 0)
-	           : EmitSubgroupLocalInvocationId(state);
+	           : EmitProgramLaneId(state);
 }
 
 uint32_t EmitMeshDrawParameter(ValueEmitContext& ctx, const IR::Inst& inst) {
@@ -881,6 +881,17 @@ uint32_t EmitConditionRef(ValueEmitContext& ctx, const IR::Inst& inst) {
 		predicate = Binary(ctx.state, zero ? spv::OpLogicalAnd : spv::OpLogicalOr,
 		                   TypeBool(ctx.state), predicate, ctx.HalfArg(inst, 0, 1));
 	}
+	if (ctx.other_half == nullptr && Wave32InWiderWaves(ctx.state)) {
+		// Any and all over the lanes of the program's wave: its half of the host's.
+		auto&      state = ctx.state;
+		const auto scope = ConstantU32(state, spv::ScopeSubgroup);
+		const auto lanes = EmitOwnHalfWord(state, EmitNative<spv::OpGroupNonUniformBallot, IR::Type::U32x4>(state, scope, predicate));
+		if (!zero) {
+			return Binary(state, spv::OpINotEqual, TypeBool(state), lanes, ConstantU32(state, 0));
+		}
+		const auto active = EmitOwnHalfWord(state, EmitNative<spv::OpGroupNonUniformBallot, IR::Type::U32x4>(state, scope, ConstantBool(state, true)));
+		return Binary(state, spv::OpIEqual, TypeBool(state), lanes, active);
+	}
 	const auto result = ctx.state.builder.AllocateId();
 	ctx.state.builder.AddFunction(zero ? spv::OpGroupNonUniformAll : spv::OpGroupNonUniformAny,
 	                              TypeBool(ctx.state), result,
@@ -889,7 +900,17 @@ uint32_t EmitConditionRef(ValueEmitContext& ctx, const IR::Inst& inst) {
 }
 
 uint32_t EmitBallot(ValueEmitContext& ctx, IR::Value predicate) {
-	return ctx.Ballot(predicate);
+	const auto ballot = ctx.Ballot(predicate);
+	if (ctx.other_half != nullptr || !Wave32InWiderWaves(ctx.state)) {
+		return ballot;
+	}
+	// The program's lane mask is its own half's word (bit n: lane n of its wave).
+	auto&      state  = ctx.state;
+	const auto own    = EmitOwnHalfWord(state, ballot);
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), result, own, ConstantU32(state, 0),
+	                          ConstantU32(state, 0), ConstantU32(state, 0));
+	return result;
 }
 
 // Is the predicate true for every lane that can run the instruction that uses it? An immediate true, a phi whose inputs all are (a cycle is
@@ -928,7 +949,34 @@ uint32_t EmitLiveMask(EmitterState& state) {
 	    state, ConstantU32(state, spv::ScopeSubgroup), EmitLogicalNotBool(state, helper));
 }
 
+// A program of 32 lanes in a wider host wave: each half reads its own half's lane `lane` (0 to 31; a first lane of each half for
+// `first`): two shuffles with a lane number the same in every lane, one per half.
+static uint32_t EmitPerHalfRead(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t lower_lane, uint32_t upper_lane) {
+	auto&      state = ctx.state;
+	const auto type  = TypeId(state, inst.Arg(0).GetType());
+	const auto lower = EmitSubgroupShuffle(state, type, ctx.Arg(inst, 0), lower_lane, {.uniform = true});
+	const auto upper = EmitSubgroupShuffle(state, type, ctx.Arg(inst, 0),
+	                                       Binary(state, spv::OpBitwiseOr, TypeU32(state), upper_lane, ConstantU32(state, 32)),
+	                                       {.uniform = true});
+	return Select(state, type, EmitUpperHalf(state), upper, lower);
+}
+
 uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
+	if (ctx.other_half == nullptr && Wave32InWiderWaves(ctx.state)) {
+		// The first active lane of each half (lane 0 of a half without one, as V_READFIRSTLANE reads with EXEC zero); a lane whose
+		// half's ballot is empty (a helper lane, which wave operations leave out) takes its own value (see below).
+		auto&      state   = ctx.state;
+		const auto ballot  = ctx.Ballot(inst.Arg(1));
+		const auto first   = [&](uint32_t word) {
+			const auto bits = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), bits, ballot, word);
+			return EmitGlsl<GLSLstd450SMax, IR::Type::U32>(state, EmitGlsl<GLSLstd450FindILsb, IR::Type::U32>(state, bits),
+			                                               ConstantU32(state, 0));
+		};
+		const auto read  = EmitPerHalfRead(ctx, inst, first(0), first(1));
+		const auto empty = Binary(state, spv::OpIEqual, TypeBool(state), EmitOwnHalfWord(state, ballot), ConstantU32(state, 0));
+		return Select(state, TypeId(state, inst.Arg(0).GetType()), empty, ctx.Arg(inst, 0), read);
+	}
 	if (!GetHostShaderFeatures().wave_ops_without_helper_lanes) {
 		const auto ballot = ctx.Ballot(inst.Arg(1));
 		const auto lane   = ctx.FirstLane(ballot);
@@ -969,6 +1017,10 @@ uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 
 uint32_t EmitReadLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 	// The lane number is a scalar register or a constant: the same in every lane.
+	if (ctx.other_half == nullptr && Wave32InWiderWaves(ctx.state)) {
+		const auto lane = EmitAndConstant(ctx.state, ctx.Arg(inst, 1), 31);
+		return EmitPerHalfRead(ctx, inst, lane, lane);
+	}
 	return ctx.Shuffle(inst, 0, ctx.Arg(inst, 1), {.uniform = true});
 }
 
@@ -1022,7 +1074,7 @@ uint32_t EmitWriteLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state = ctx.state;
 	const auto hit   = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), hit,
-	                          EmitSubgroupLocalInvocationId(state), ctx.Arg(inst, 2));
+	                          EmitProgramLaneId(state), ctx.Arg(inst, 2));
 	return EmitNative<spv::OpSelect, IR::Type::U32>(ctx.state, hit, ctx.Arg(inst, 1),
 	                                                ctx.Arg(inst, 0));
 }
