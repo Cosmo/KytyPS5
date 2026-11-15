@@ -132,7 +132,7 @@ BufferAddress CalculateBufferAddress(EmitterState& state, uint32_t index, uint32
 
 uint32_t BufferLane(EmitterState& state) {
 	return Binary(state, spv::OpBitwiseAnd, TypeU32(state), EmitSubgroupLocalInvocationId(state),
-	              ConstantU32(state, 63));
+	              ConstantU32(state, Wave32InWiderWaves(state) ? 31 : 63));
 }
 
 uint32_t BufferByteAddress(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem) {
@@ -1392,7 +1392,8 @@ uint32_t LoadGuestPointerDword(EmitterState& state, uint32_t bda, bool coherent,
 	const auto offset = Unary(state, spv::OpUConvert, TypeU32(state), bda);
 	const auto index  = Binary(state, spv::OpShiftRightLogical, TypeU32(state), offset,
 	                           ConstantU32(state, 2));
-	if (uniform) {
+	// (In a wider host wave the address is the same only within each half, one of the program's waves: the loop below then.)
+	if (uniform && !Wave32InWiderWaves(state)) {
 		// Every lane has this address: the first lane's slot is everyone's.
 		const auto first = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpGroupNonUniformBroadcastFirst, TypeU32(state), first,
@@ -1919,7 +1920,7 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 	        ? Binary(state, spv::OpBitwiseAnd, TypeU32(state), first, ConstantU32(state, 31))
 	        : first;
 	const auto is_first       = Binary(state, spv::OpIEqual, TypeBool(state),
-	                                   EmitSubgroupLocalInvocationId(state), source_lane);
+	                                   EmitProgramLaneId(state), source_lane);
 	auto bounds = EmitMemoryElementInBounds(state, access, index);
 	if (mem.kind == IR::ResourceKind::Gds) {
 		bounds = AndCondition(state, bounds, region_bounds);
