@@ -456,8 +456,9 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 			    state->settings.vblank_frequency = rates[index];
 			    save();
 		    },
-		    IsXbox() ? Paragraphs {L"Most games are made for 60 Hz. If a game has a 120 Hz mode, choose 120 Hz to let it run at up to 120 frames per second. "
-		                           L"Your TV needs to be set to 120 Hz, and V-Sync needs to be off."}
+		    IsXbox() ? Paragraphs {L"The refresh rate the console reports to games. Most games are made for 60 Hz.",
+		                           L"At 120 Hz, games with a 120 Hz mode switch to it, but the Xbox in Dev Mode shows at most 60 pictures a second, whatever your "
+		                           L"TV is set to."}
 		             : Paragraphs {L"The refresh rate the console reports to games. Most games are designed for 60 Hz.",
 		                           L"At 120 Hz, games that offer a 120 Hz mode can run at up to 120 frames per second on a display that supports 120 Hz.",
 		                           L"A lower rate limits games to that frame rate."});

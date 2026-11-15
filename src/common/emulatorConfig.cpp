@@ -176,6 +176,11 @@ uint32_t GetVblankFrequency() {
 	return std::clamp(g_config->vblank_frequency, 30u, 360u);
 }
 
+double GetVblankRateScale() {
+	const double scale = g_config->vblank_rate_scale;
+	return scale >= 0.99 && scale <= 1.01 ? scale : 1.0;
+}
+
 uint32_t GetConsoleLanguage() {
 	return g_config->console_language;
 }
