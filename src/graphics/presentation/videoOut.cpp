@@ -804,7 +804,9 @@ void VideoOutDriver::Impl::VblankEnd() {
 void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 	Common::Thread::SetCurrentName("Present");
 	using Clock       = std::chrono::steady_clock;
-	const auto period = Clock::duration(std::chrono::seconds(1)) / Config::GetVblankFrequency();
+	// At the TV's pace when the host gives its refresh (Config::GetVblankRateScale: 59.94 instead of 60), else at the whole number.
+	const auto period = std::chrono::duration_cast<Clock::duration>(
+	    std::chrono::duration<double>(1.0 / (static_cast<double>(Config::GetVblankFrequency()) * Config::GetVblankRateScale())));
 
 	std::chrono::nanoseconds total_wait {};
 	while (!token.stop_requested()) {
