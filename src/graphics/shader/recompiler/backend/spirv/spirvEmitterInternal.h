@@ -373,6 +373,8 @@ uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
 // shader in waves of 64): each half of a host wave is one of the program's waves, so what the program sees of other lanes (lane
 // numbers, lane masks, the first lane, any and all) comes from its own half.
 [[nodiscard]] bool Wave32InWiderWaves(const EmitterState& state);
+// The branch votes, lane reads and guest buffer table loads of such a program per half too (not in pixel programs).
+[[nodiscard]] bool Wave32ControlPerHalf(const EmitterState& state);
 // The lane's number in the program's wave: SubgroupLocalInvocationId, within its half in a wider host wave.
 uint32_t EmitProgramLaneId(EmitterState& state);
 // True in the upper half (lanes 32 to 63) of a host wave.
