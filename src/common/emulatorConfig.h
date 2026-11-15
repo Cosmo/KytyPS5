@@ -83,6 +83,9 @@ struct ConfigOptions {
 	bool                   network_connected           = false;
 	bool                   psn_emulation_enabled       = false;
 	uint32_t               vblank_frequency            = 60;
+	// The TV's refresh over its whole number (59.94 / 60 = 0.999): the vblank clock runs at the vblank frequency times this, so that it keeps
+	// the TV's pace. 1 runs it at the whole number, as upstream; the UWP app sets it on the Xbox.
+	double                 vblank_rate_scale           = 1.0;
 	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;
@@ -235,6 +238,7 @@ bool     GuestTscEnabled();
 bool     IsNetworkConnected();
 bool     PsnEmulationEnabled();
 uint32_t GetVblankFrequency();
+double   GetVblankRateScale();
 uint32_t GetConsoleLanguage();
 bool     VulkanValidationEnabled();
 
