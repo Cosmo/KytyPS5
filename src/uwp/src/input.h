@@ -83,6 +83,8 @@ struct ControllerOptions {
 	bool headset_speaker = true;
 	// The microphone of that headset is the DualSense's microphone.
 	bool headset_mic = false;
+	// With View held, pushing the right stick up tips the emulated controller forward (its top away from you) instead of back.
+	bool stick_up_tips_forward = false;
 };
 void SetControllerOptions(const ControllerOptions& options);
 
