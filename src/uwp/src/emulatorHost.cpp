@@ -194,7 +194,8 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		auto& config         = options.config;
 		config.screen_width  = settings.screen_width;
 		config.screen_height = settings.screen_height;
-		config.present_mode  = settings.vsync ? Config::PresentMode::Fifo : Config::PresentMode::Mailbox;
+		// (no V-Sync on the Xbox: the games' clock keeps the TV's pace, vblank_rate_scale)
+		config.present_mode  = settings.vsync && !IsXbox() ? Config::PresentMode::Fifo : Config::PresentMode::Mailbox;
 		config.vblank_frequency  = std::clamp<uint32_t>(settings.vblank_frequency, 30, 360);
 		config.vblank_rate_scale = vblank_rate_scale;
 		config.stretch_enabled   = settings.stretch;
