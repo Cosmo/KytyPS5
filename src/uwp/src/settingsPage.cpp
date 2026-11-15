@@ -507,16 +507,25 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    },
 		    {L"Sharpens and upscales games that render below the output resolution. This is experimental and doesn't work with HDR."});
 	}
-	heading(picture, L"Frame rate");
-	AddSwitch(
-	    picture, explanation, L"V-Sync", settings.vsync,
-	    [state, save](bool on) {
-		    state->settings.vsync = on;
-		    save();
-	    },
-	    IsXbox() ? Paragraphs {L"Syncs each frame to your TV's refresh for smooth motion. Turn it off to let games run above 60 frames per second."}
-	             : Paragraphs {L"Syncs each frame to the display's refresh for smooth, even motion, at the cost of slightly higher input latency.",
-	                           L"When off, frames are shown as soon as they're ready, with lower latency."});
+#ifdef KYTY_HAS_FSR
+	constexpr bool frame_generation = true;
+#else
+	constexpr bool frame_generation = false;
+#endif
+	if (!IsXbox() || frame_generation) {
+		heading(picture, L"Frame rate");
+	}
+	// V-Sync is the PC's: on the Xbox the games' clock keeps the TV's pace (EmulatorHost::Start), and frames are shown as soon as they're ready.
+	if (!IsXbox()) {
+		AddSwitch(
+		    picture, explanation, L"V-Sync", settings.vsync,
+		    [state, save](bool on) {
+			    state->settings.vsync = on;
+			    save();
+		    },
+		    {L"Syncs each frame to the display's refresh for smooth, even motion, at the cost of slightly higher input latency.",
+		     L"When off, frames are shown as soon as they're ready, with lower latency."});
+	}
 #ifdef KYTY_HAS_FSR
 	AddSwitch(
 	    picture, explanation, L"FSR frame generation", settings.fsr_frame_generation,
