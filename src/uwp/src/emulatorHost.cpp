@@ -22,6 +22,7 @@
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Display.Core.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.ViewManagement.h>
@@ -154,11 +155,31 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		RequestMicrophoneAccess();
 	}
 
+	// The TV's refresh over its whole number (59.94 / 60), read here on the UI thread, for the games' vblank clock on the Xbox (1 when not
+	// reported).
+	double vblank_rate_scale = 1.0;
+	if (IsXbox()) {
+		try {
+			const auto hdmi = winrt::Windows::Graphics::Display::Core::HdmiDisplayInformation::GetForCurrentView();
+			const auto mode = hdmi != nullptr ? hdmi.GetCurrentDisplayMode() : nullptr;
+			if (mode != nullptr) {
+				const double hz    = mode.RefreshRate();
+				const double whole = std::round(hz);
+				if (whole > 0.0 && std::abs(hz - whole) < 0.2) {
+					vblank_rate_scale = hz / whole;
+				}
+				Log("screen: the TV refreshes at %.3f Hz: the games' clock runs at %.4f times its rate\n", hz, vblank_rate_scale);
+			}
+		} catch (winrt::hresult_error const& error) {
+			Log("screen: the TV's refresh could not be read (0x%08x)\n", static_cast<uint32_t>(error.code()));
+		}
+	}
+
 	m_game_dir = game_dir;
 	Libs::LibKernel::Memory::SetAddressCollisionHandler(
 	    [](uint64_t start, uint64_t size) { EmulatorHost::Get().RestartForAddressCollision(start, size); });
 
-	m_thread = std::thread([this, game_dir = std::move(game_dir), game_patch, settings, user_data] {
+	m_thread = std::thread([this, game_dir = std::move(game_dir), game_patch, settings, user_data, vblank_rate_scale] {
 		// The emulator's main thread: the window logic runs here, not on the UI thread.
 		Common::InitializeThreads();
 
@@ -174,8 +195,9 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.screen_width  = settings.screen_width;
 		config.screen_height = settings.screen_height;
 		config.present_mode  = settings.vsync ? Config::PresentMode::Fifo : Config::PresentMode::Mailbox;
-		config.vblank_frequency = std::clamp<uint32_t>(settings.vblank_frequency, 30, 360);
-		config.stretch_enabled  = settings.stretch;
+		config.vblank_frequency  = std::clamp<uint32_t>(settings.vblank_frequency, 30, 360);
+		config.vblank_rate_scale = vblank_rate_scale;
+		config.stretch_enabled   = settings.stretch;
 		if (!settings.user_name.empty() && settings.user_name.size() <= Config::MAX_USER_NAME_LENGTH) {
 			config.user_name = settings.user_name;
 		}
