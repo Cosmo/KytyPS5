@@ -59,6 +59,8 @@ struct AppSettings {
 	bool impulse_triggers = true;
 	// The settings page, Controller: the DualSense's haptic feedback as gentle rumble. On.
 	bool haptic_rumble = true;
+	// The settings page, Controller › Motion sensors: with View held, the right stick up tips the controller forward instead of back.
+	bool motion_stick_up_forward = false;
 	// The settings page, Controller: the DualSense's speaker on a headset plugged into the controller. On.
 	bool headset_speaker = true;
 	// The settings page, Controller: the microphone of that headset as the DualSense's microphone. Off (Windows asks for the microphone when it
