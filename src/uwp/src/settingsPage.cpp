@@ -250,7 +250,7 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
 </Grid>)xaml";
 
 // Settings › Controller's pages.
-enum class ControllerPage { Players, Servers, Feedback };
+enum class ControllerPage { Players, Servers, Feedback, Motion };
 
 struct SettingsState {
 	AppSettings settings = LoadSettings();
@@ -568,9 +568,11 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	constexpr wchar_t WIFI_SYMBOL[]   = {0xE701, 0};
 	constexpr wchar_t VOLUME_SYMBOL[] = {0xE767, 0};
 	constexpr wchar_t GAME_SYMBOL[]   = {0xE7FC, 0};
+	constexpr wchar_t ROTATE_SYMBOL[] = {0xE7AD, 0};
 	const auto        players_entry   = MakeEntry(PEOPLE_SYMBOL, L"Players", [open_page] { open_page(ControllerPage::Players); });
 	const auto        servers_entry   = MakeEntry(WIFI_SYMBOL, L"Remote Controllers", [open_page] { open_page(ControllerPage::Servers); });
 	const auto        feedback_entry  = MakeEntry(VOLUME_SYMBOL, L"Feedback and audio", [open_page] { open_page(ControllerPage::Feedback); });
+	const auto        motion_entry    = MakeEntry(ROTATE_SYMBOL, L"Motion sensors", [open_page] { open_page(ControllerPage::Motion); });
 	// The controls page, and back here with the focus on its entry.
 	auto layout_entry = MakeEntry(GAME_SYMBOL, L"Button layout", [] {});
 	layout_entry.Click([state, weak_page = winrt::make_weak(page)](winrt::Windows::Foundation::IInspectable const& sender, auto const&) {
@@ -581,17 +583,18 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		state->return_focus = winrt::make_weak(sender.as<xaml::Controls::Control>());
 		xaml::Window::Current().Content(CreateControlsPage([shown] { xaml::Window::Current().Content(shown); }, L"Controller"));
 	});
-	for (const auto& entry: {players_entry, servers_entry, feedback_entry, layout_entry}) {
+	for (const auto& entry: {players_entry, servers_entry, feedback_entry, motion_entry, layout_entry}) {
 		add_entry(entry);
 	}
 	// Remote Controllers (the DSU servers) shows only with Developer › Remote Controllers on; the others close up, two in a row.
-	const auto place_entries = [players_entry, servers_entry, feedback_entry, layout_entry](bool dsu) {
+	const auto place_entries = [players_entry, servers_entry, feedback_entry, motion_entry, layout_entry](bool dsu) {
 		servers_entry.Visibility(dsu ? xaml::Visibility::Visible : xaml::Visibility::Collapsed);
 		std::vector<xaml::Controls::Button> shown = {players_entry};
 		if (dsu) {
 			shown.push_back(servers_entry);
 		}
 		shown.push_back(feedback_entry);
+		shown.push_back(motion_entry);
 		shown.push_back(layout_entry);
 		for (size_t index = 0; index < shown.size(); index++) {
 			xaml::Controls::Grid::SetRow(shown[index], static_cast<int>(index / 2));
@@ -608,13 +611,28 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		page_title.Visibility(xaml::Visibility::Collapsed);
 		detail.Visibility(xaml::Visibility::Visible);
 		SetPageTitle(detail_title, L"Controller",
-		             which == ControllerPage::Players ? L"Players" : which == ControllerPage::Servers ? L"Remote Controllers" : L"Feedback and audio");
+		             which == ControllerPage::Players   ? L"Players"
+		             : which == ControllerPage::Servers ? L"Remote Controllers"
+		             : which == ControllerPage::Motion  ? L"Motion sensors"
+		                                                : L"Feedback and audio");
 
 		const auto settings = std::shared_ptr<AppSettings>(state, &state->settings);
 		if (which == ControllerPage::Players) {
 			AddPlayersColumns(columns, detail_text, hints, settings, save, [open_page] { open_page(ControllerPage::Servers); });
 		} else if (which == ControllerPage::Servers) {
 			AddServerColumns(columns, settings, save);
+		} else if (which == ControllerPage::Motion) {
+			const auto stick = AddColumn(columns, L"Right stick");
+			AddChoice(
+			    stick, detail_text, L"Right stick up", std::vector<std::wstring> {L"Tips back", L"Tips forward"},
+			    state->settings.motion_stick_up_forward ? 1 : 0,
+			    [state, save](size_t index) {
+				    state->settings.motion_stick_up_forward = index == 1;
+				    save();
+			    },
+			    {L"With View held, the right stick moves the motion sensors, as if you tilted a DualSense.",
+			     L"Back suits games that aim up when you tilt the controller toward you. Forward suits games you steer by tipping it, such "
+			     L"as rolling a ball. Applies when a game starts."});
 		} else {
 			const auto vibration = AddColumn(columns, L"Vibration");
 			const auto audio     = AddColumn(columns, L"Speaker and microphone");
@@ -685,7 +703,8 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		FocusFirst(columns);
 	};
 	// Back from a page: to the page under it (the focus on the tile that opened this one), or to the categories' entries.
-	const auto close_page = [state, show_page, main_view, page_title, detail, columns, detail_text, players_entry, servers_entry, feedback_entry] {
+	const auto close_page = [state, show_page, main_view, page_title, detail, columns, detail_text, players_entry, servers_entry, feedback_entry,
+	                         motion_entry] {
 		const auto closed = state->pages.back();
 		state->pages.pop_back();
 		if (!state->pages.empty()) {
@@ -699,7 +718,10 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		main_view.Visibility(xaml::Visibility::Visible);
 		page_title.Visibility(xaml::Visibility::Visible);
 		main_view.UpdateLayout();
-		(closed == ControllerPage::Players ? players_entry : closed == ControllerPage::Servers ? servers_entry : feedback_entry)
+		(closed == ControllerPage::Players   ? players_entry
+		 : closed == ControllerPage::Servers ? servers_entry
+		 : closed == ControllerPage::Motion  ? motion_entry
+		                                     : feedback_entry)
 		    .Focus(xaml::FocusState::Keyboard);
 	};
 
