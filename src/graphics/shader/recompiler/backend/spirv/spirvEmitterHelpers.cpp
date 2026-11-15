@@ -118,6 +118,13 @@ bool Wave32InWiderWaves(const EmitterState& state) {
 	return state.program.wave_size == 32u && state.lane_count == 1 && GetHostShaderFeatures().wave32_in_wider_waves;
 }
 
+// In a pixel program the branch votes and lane reads stay the host wave's. On the Series X, per-half votes drew a refracting glass
+// as if opaque, and per-half reads under the host wave's votes hung the GPU in the same program; the host wave's votes and reads
+// with the half's lane numbers and lane masks draw it as on the PC (measured 2026-11-15, each part switched on its own).
+bool Wave32ControlPerHalf(const EmitterState& state) {
+	return Wave32InWiderWaves(state) && state.program.stage != ShaderType::Pixel;
+}
+
 uint32_t EmitProgramLaneId(EmitterState& state) {
 	const auto lane = EmitSubgroupLocalInvocationId(state);
 	return Wave32InWiderWaves(state) ? Binary(state, spv::OpBitwiseAnd, TypeU32(state), lane, ConstantU32(state, 31)) : lane;
