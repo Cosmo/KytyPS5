@@ -15,6 +15,7 @@
 #include "loader/systemContent.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <deque>
@@ -368,13 +369,35 @@ static bool valid_memory_range(const SaveDataMemoryData& data, size_t size) {
 	       data.buf_size <= size - static_cast<size_t>(data.offset);
 }
 
+// The Xbox's USB drives refuse a UWP app now and then for a moment (sysWindowsFileIO.cpp asks reads again): a save step that
+// fails is tried again for up to two seconds before the game hears that it failed (a game that cannot save starts over the next
+// time), and the log says when that was needed and how it ended.
+template <typename Step>
+static bool retry_save_step(const char* what, const std::filesystem::path& path, Step&& step) {
+	constexpr int      Attempts = 20;
+	constexpr uint32_t PauseUs  = 100'000;
+	for (int attempt = 1; attempt <= Attempts; attempt++) {
+		if (step()) {
+			if (attempt > 1) {
+				::printf("SaveData: %s %s worked when tried again (%d times)\n", what, path.string().c_str(), attempt - 1);
+			}
+			return true;
+		}
+		if (attempt < Attempts) {
+			Common::Thread::SleepMicro(PauseUs);
+		}
+	}
+	::printf("SaveData: %s %s failed, also when tried again\n", what, path.string().c_str());
+	return false;
+}
+
 // Replacing a flushed temporary file protects the
 // previous save if writing fails or the emulator exits partway through an update.
-static int write_save_file(const std::filesystem::path& path, const void* data, uint32_t size) {
+static bool write_save_file_once(const std::filesystem::path& path, const void* data, uint32_t size) {
 	const auto   temporary = std::filesystem::path(path.string() + ".tmp");
 	Common::File file;
 	if (!file.Create(temporary)) {
-		return SAVE_DATA_ERROR_INTERNAL;
+		return false;
 	}
 	uint32_t written = 0;
 	::Libs::LibKernel::Memory::GuestBufferScope buffer_scope(reinterpret_cast<uint64_t>(data), size); // the system reads the buffer (the pager)
@@ -386,11 +409,19 @@ static int write_save_file(const std::filesystem::path& path, const void* data, 
 		// An atomic replace where the C++ library reaches the folder; through the file broker the old file goes first.
 		std::filesystem::rename(temporary, path, error);
 		if (!error || Common::File::RenameFile(temporary, path)) {
-			return OK;
+			return true;
 		}
 	}
 	Common::File::DeleteFile(temporary);
-	return SAVE_DATA_ERROR_INTERNAL;
+	return false;
+}
+
+static int write_save_file(const std::filesystem::path& path, const void* data, uint32_t size) {
+	return retry_save_step("writing", path, [&] { return write_save_file_once(path, data, size); }) ? OK : SAVE_DATA_ERROR_INTERNAL;
+}
+
+static bool create_save_directories(const std::filesystem::path& directory) {
+	return retry_save_step("making the folder", directory, [&] { return Common::File::CreateDirectories(directory); });
 }
 
 static int read_save_blocks(const std::filesystem::path& directory, uint64_t* blocks) {
@@ -456,7 +487,7 @@ static int load_save_param(const std::filesystem::path& directory, SaveDataParam
 }
 
 static int save_memory(const std::filesystem::path& directory, const SaveDataMemory& memory) {
-	if (!Common::File::CreateDirectories(directory)) {
+	if (!create_save_directories(directory)) {
 		return SAVE_DATA_ERROR_INTERNAL;
 	}
 	// Display metadata is a separate host sidecar, leaving memory.dat as raw guest bytes.
@@ -753,7 +784,7 @@ int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResul
 			return SAVE_DATA_ERROR_PARAMETER;
 		}
 		const auto metadata = mount_dir / "sce_sys";
-		if (!Common::File::CreateDirectories(metadata)) {
+		if (!create_save_directories(metadata)) {
 			return SAVE_DATA_ERROR_INTERNAL;
 		}
 		const int status = write_save_file(metadata / "blocks.bin", &mount->blocks,
