@@ -60,16 +60,18 @@ void AddGameGraphicsSettings(winrt::Windows::UI::Xaml::Controls::Panel const& ti
 		    },
 		    {L"Match TV keeps 4K games sharp on a 4K TV. 1080p uses less memory, and your console scales the picture up to your TV."});
 	}
-	AddSwitch(
-	    tiles, explanation, L"V-Sync", settings->vsync,
-	    [settings, save](bool on) {
-		    settings->vsync = on;
-		    Config::SetPresentMode(on ? Config::PresentMode::Fifo : Config::PresentMode::Mailbox);
-		    save();
-	    },
-	    IsXbox() ? Paragraphs {L"Syncs each frame to your TV's refresh for smooth motion. Turn it off to let games run above 60 frames per second."}
-	             : Paragraphs {L"Syncs each frame to the display's refresh for smooth, even motion, at the cost of slightly higher input latency.",
-	                           L"When off, frames are shown as soon as they're ready, with lower latency."});
+	// V-Sync is the PC's (see the settings page).
+	if (!IsXbox()) {
+		AddSwitch(
+		    tiles, explanation, L"V-Sync", settings->vsync,
+		    [settings, save](bool on) {
+			    settings->vsync = on;
+			    Config::SetPresentMode(on ? Config::PresentMode::Fifo : Config::PresentMode::Mailbox);
+			    save();
+		    },
+		    {L"Syncs each frame to the display's refresh for smooth, even motion, at the cost of slightly higher input latency.",
+		     L"When off, frames are shown as soon as they're ready, with lower latency."});
+	}
 
 	AddHeading(tiles, L"Frame rate");
 #ifdef KYTY_HAS_FSR
