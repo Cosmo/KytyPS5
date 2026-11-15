@@ -176,6 +176,7 @@ std::atomic_bool            g_impulse_triggers = true;
 std::atomic_bool            g_haptic_rumble    = true;
 std::atomic_bool            g_headset_speaker  = true;
 std::atomic_bool            g_headset_mic      = false;
+std::atomic_bool            g_stick_up_forward = false;
 // The audio devices of a headset plugged into player 1's controller (empty: none); guarded by g_shared_mutex.
 std::wstring                g_headset_render;
 std::wstring                g_headset_capture;
@@ -478,7 +479,8 @@ Controller::HostPadState MapReading(XboxController& controller, const gaming::Ga
 	const bool turning = is_held(gaming::GamepadButtons::RightThumbstick);
 	state.buttons &= ~Controller::PAD_BUTTON_R3;
 	(turning ? state.turn : state.tilt_x) = Tilt(reading.RightThumbstickX);
-	state.tilt_y = Tilt(-reading.RightThumbstickY);
+	// (Up tips it back, its top toward you, or forward: Controller › Motion sensors.)
+	state.tilt_y = Tilt(g_stick_up_forward ? reading.RightThumbstickY : -reading.RightThumbstickY);
 	std::fill_n(state.axes.begin(), 4, uint8_t {128});
 	return state;
 }
@@ -1213,6 +1215,7 @@ void SetControllerOptions(const ControllerOptions& options) {
 	g_haptic_rumble    = options.haptic_rumble;
 	g_headset_speaker  = options.headset_speaker;
 	g_headset_mic      = options.headset_mic;
+	g_stick_up_forward = options.stick_up_tips_forward;
 }
 
 std::wstring ControllerSpeakerDevice() {
