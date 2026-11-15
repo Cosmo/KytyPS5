@@ -150,7 +150,8 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 			Log("patches: %ls\n", patch.c_str());
 		}
 	}
-	SetControllerOptions({settings.impulse_triggers, settings.haptic_rumble, settings.headset_speaker, settings.headset_mic});
+	SetControllerOptions({settings.impulse_triggers, settings.haptic_rumble, settings.headset_speaker, settings.headset_mic,
+	                      settings.motion_stick_up_forward});
 	if (settings.headset_mic) {
 		RequestMicrophoneAccess();
 	}
