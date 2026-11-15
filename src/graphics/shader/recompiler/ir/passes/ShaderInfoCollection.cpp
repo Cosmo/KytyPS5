@@ -612,6 +612,13 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 			Visit(program, input_info, inputs, inst);
 		}
 	}
+	// A program of 32 lanes in wider host waves (D3D12 on the Series X): its ballots, votes, lane reads and reductions work on
+	// its own half of the host wave, which takes the lane number and a ballot (the SPIR-V emitter's Wave32InWiderWaves).
+	if (program.wave_size == 32u && GetHostShaderFeatures().wave32_in_wider_waves &&
+	    (info.subgroup_ballot || info.subgroup_vote || info.subgroup_shuffle || info.subgroup_arithmetic)) {
+		info.subgroup_local_invocation_id = true;
+		info.subgroup_ballot              = true;
+	}
 	for (uint32_t index = 0; index < inputs.user_data.size(); index++) {
 		if (inputs.user_data[index]) info.user_data_registers.push_back(index);
 	}
