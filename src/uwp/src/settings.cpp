@@ -126,6 +126,7 @@ AppSettings LoadSettings() {
 	read("auto_press_ms", settings.auto_press_ms);
 	read("impulse_triggers", settings.impulse_triggers);
 	read("haptic_rumble", settings.haptic_rumble);
+	read("motion_stick_up_forward", settings.motion_stick_up_forward);
 	read("headset_speaker", settings.headset_speaker);
 	read("headset_mic", settings.headset_mic);
 	read("controller_auto", settings.controller_auto);
@@ -213,6 +214,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["shader_cache_any_build"]     = settings.shader_cache_any_build;
 	json["impulse_triggers"]           = settings.impulse_triggers;
 	json["haptic_rumble"]              = settings.haptic_rumble;
+	json["motion_stick_up_forward"]    = settings.motion_stick_up_forward;
 	json["headset_speaker"]            = settings.headset_speaker;
 	json["headset_mic"]                = settings.headset_mic;
 	json["controller_auto"]            = settings.controller_auto;
