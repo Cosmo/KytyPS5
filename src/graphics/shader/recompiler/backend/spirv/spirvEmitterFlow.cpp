@@ -945,8 +945,16 @@ static bool PredicateIsAlwaysTrue(const IR::Value& value, std::set<const IR::Ins
 uint32_t EmitLiveMask(EmitterState& state) {
 	const auto helper =
 	    EmitNative<spv::OpLoad, IR::Type::U1>(state, state.helper_invocation_variable);
-	return EmitNative<spv::OpGroupNonUniformBallot, IR::Type::U32x4>(
+	const auto ballot = EmitNative<spv::OpGroupNonUniformBallot, IR::Type::U32x4>(
 	    state, ConstantU32(state, spv::ScopeSubgroup), EmitLogicalNotBool(state, helper));
+	if (!Wave32InWiderWaves(state)) {
+		return ballot;
+	}
+	// The program's starting EXEC is its own half's word, as for its ballots (EmitBallot).
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), result, EmitOwnHalfWord(state, ballot),
+	                          ConstantU32(state, 0), ConstantU32(state, 0), ConstantU32(state, 0));
+	return result;
 }
 
 // A program of 32 lanes in a wider host wave: each half reads its own half's lane `lane` (0 to 31; a first lane of each half for
