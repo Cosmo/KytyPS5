@@ -46,6 +46,9 @@ AppSettings LoadSettings() {
 	if (const auto path = json.find("user_data_path"); path != json.end() && path->is_string()) {
 		settings.user_data_path = winrt::to_hstring(path->get<std::string>()).c_str();
 	}
+	if (const auto path = json.find("logs_path"); path != json.end() && path->is_string()) {
+		settings.logs_path = winrt::to_hstring(path->get<std::string>()).c_str();
+	}
 	const auto read = [&json](const char* key, auto& value) {
 		const auto it = json.find(key);
 		if (it != json.end() && !it->is_null()) {
@@ -159,6 +162,7 @@ void SaveSettings(const AppSettings& settings) {
 	}
 	json["game_folders"]     = folders;
 	json["user_data_path"]   = winrt::to_string(settings.user_data_path.wstring());
+	json["logs_path"]        = winrt::to_string(settings.logs_path.wstring());
 	json["screen_width"]     = settings.screen_width;
 	json["screen_height"]    = settings.screen_height;
 	json["vsync"]            = settings.vsync;
@@ -223,6 +227,21 @@ void SaveSettings(const AppSettings& settings) {
 	json["dsu_enabled"]                = settings.dsu_enabled;
 	json.erase("dsu_server");
 	std::ofstream(SettingsPath(), std::ios::binary | std::ios::trunc) << json.dump(2);
+}
+
+std::filesystem::path LogsPathSetting() {
+	try {
+		std::ifstream file(SettingsPath(), std::ios::binary);
+		const auto    json = nlohmann::json::parse(file, nullptr, false);
+		if (json.is_object()) {
+			if (const auto path = json.find("logs_path"); path != json.end() && path->is_string()) {
+				return winrt::to_hstring(path->get<std::string>()).c_str();
+			}
+		}
+	} catch (...) {
+		// No package (LocalState), or a broken file: the log stays in LocalState.
+	}
+	return {};
 }
 
 std::filesystem::path UserDataFolder(const AppSettings& settings) {

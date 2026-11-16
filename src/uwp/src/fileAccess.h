@@ -25,6 +25,9 @@ namespace Kyty::Uwp {
 // Why the app may not write in `folder` (a Windows error), or 0 when it may: a test file is made
 // there and deleted again.
 [[nodiscard]] uint32_t WriteError(const std::filesystem::path& folder);
+// The same for the C library and the other plain Windows calls (the logs, the frame dumps), which reach only folders that grant apps
+// access themselves: not the ones the *FromApp functions reach through the file broker, such as the Xbox's USB drives.
+[[nodiscard]] uint32_t DirectWriteError(const std::filesystem::path& folder);
 // Waits (up to 2 seconds) while game folders and the user data folder deny access: the Xbox gives
 // a starting app access to its USB drives a few hundred milliseconds late. The log says when it
 // waits and for how long, and names a folder that still cannot be opened.
