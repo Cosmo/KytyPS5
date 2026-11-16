@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_UWP_GAMELIBRARY_H_
 #define EMULATOR_SRC_UWP_GAMELIBRARY_H_
 
+#include <cstddef>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -22,6 +23,9 @@ struct GameEntry {
 // itself or up to two levels below it, and .zar archives in those folders, described by sce_sys\param.json. Saves the result to
 // LocalState\library.json.
 std::vector<GameEntry> ScanGames();
+
+// How many games a scan finds with `folder` as a game folder (their param.json is not read).
+[[nodiscard]] size_t CountGames(const std::filesystem::path& folder);
 
 // The games of the last scan.
 [[nodiscard]] std::vector<GameEntry> LoadGameLibrary();

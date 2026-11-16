@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <functional>
 #include <nlohmann/json.hpp>
 
 namespace Kyty::Uwp {
@@ -47,15 +48,17 @@ std::string TitleName(const nlohmann::json& param) {
 	return {};
 }
 
-void ScanFolder(const std::filesystem::path& folder, int depth, std::vector<GameEntry>& games) {
+// Calls `found` with each game in `folder`: the folder itself when it has an eboot.bin, else its .zar archives that have one, and the same
+// `depth` folder levels below it.
+void FindGames(const std::filesystem::path& folder, int depth, const std::function<void(const std::filesystem::path&)>& found) {
 	if (IsFile(folder / L"eboot.bin")) {
-		games.push_back(ReadGame(folder));
+		found(folder);
 		return;
 	}
 	// .zar archives: a game dump the emulator reads in place
 	for (const auto& archive: ArchivesIn(folder)) {
 		if (GameFileExists(archive / L"eboot.bin")) {
-			games.push_back(ReadGame(archive));
+			found(archive);
 		} else {
 			Log("archive %ls has no eboot.bin at its root\n", archive.c_str());
 		}
@@ -64,8 +67,12 @@ void ScanFolder(const std::filesystem::path& folder, int depth, std::vector<Game
 		return;
 	}
 	for (const auto& subfolder: Subfolders(folder)) {
-		ScanFolder(subfolder, depth - 1, games);
+		FindGames(subfolder, depth - 1, found);
 	}
+}
+
+void ScanFolder(const std::filesystem::path& folder, int depth, std::vector<GameEntry>& games) {
+	FindGames(folder, depth, [&games](const std::filesystem::path& game) { games.push_back(ReadGame(game)); });
 }
 
 std::filesystem::path LibraryPath() {
@@ -120,6 +127,12 @@ std::vector<GameEntry> ScanGames() {
 	          [](const GameEntry& a, const GameEntry& b) { return a.name < b.name; });
 	SaveLibrary(games);
 	return games;
+}
+
+size_t CountGames(const std::filesystem::path& folder) {
+	size_t count = 0;
+	FindGames(folder, 2, [&count](const std::filesystem::path&) { count++; });
+	return count;
 }
 
 std::vector<GameEntry> LoadGameLibrary() {
