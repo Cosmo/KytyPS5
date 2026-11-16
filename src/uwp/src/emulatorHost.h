@@ -171,8 +171,10 @@ public:
 	[[nodiscard]] std::vector<RecentFrame> FramesSince(double since_ms) const;
 	// Any thread: the frames presented since the start.
 	[[nodiscard]] uint64_t FramesPresented() const;
-	// Any thread: goes up when the emulator's log (LocalState\kyty-emulator.txt) starts anew.
+	// Any thread: goes up when the emulator's log starts anew.
 	[[nodiscard]] uint32_t LogGeneration() const { return m_log_generation.load(); }
+	// Any thread: the emulator's log, kyty-emulator.txt in the logs and dumps folder (LocalState before a game started).
+	[[nodiscard]] std::filesystem::path LogFile() const;
 	// Any thread: how long the game has been running, in milliseconds (0 before it starts).
 	[[nodiscard]] uint64_t RunTimeMs() const;
 	// Emulator thread, after the window loop ended and the pipeline cache is saved: restarts the app
@@ -203,6 +205,7 @@ private:
 	float                   m_scale_y        = 1.0f;
 	std::atomic<uint64_t>   m_last_title_ms  = 0;
 	std::atomic<uint32_t>   m_log_generation = 0;
+	std::filesystem::path   m_log_file; // guarded by m_mutex
 	std::atomic<uint64_t>   m_start_ms       = 0;
 
 	std::function<void()>    m_game_visible;

@@ -207,6 +207,15 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
               <TextBlock x:Name="UserDataStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
             </StackPanel>
             <DropDownButton x:Name="ChooseUserData" Content="Choose folder" />
+            <!-- Where the logs and frame dumps go, as the data folder's row (shown where a folder can be chosen for them). -->
+            <StackPanel x:Name="Logs" Spacing="12" Visibility="Collapsed">
+              <TextBlock Text="Logs and dumps" Style="{StaticResource BodyTextBlockStyle}" Margin="0,24,0,-8" />
+              <StackPanel>
+                <TextBlock x:Name="LogsPath" TextWrapping="Wrap" />
+                <TextBlock x:Name="LogsStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+              </StackPanel>
+              <DropDownButton x:Name="ChooseLogs" Content="Choose folder" />
+            </StackPanel>
           </StackPanel>
 
           <StackPanel x:Name="Memory" Orientation="Horizontal" Spacing="36" Visibility="Collapsed">
@@ -274,6 +283,8 @@ struct SettingsState {
 	// back to the state.
 	xaml::Controls::TextBlock user_data_path {nullptr};
 	xaml::Controls::TextBlock user_data_status {nullptr};
+	xaml::Controls::TextBlock logs_path {nullptr};
+	xaml::Controls::TextBlock logs_status {nullptr};
 };
 
 void ListFolders(const std::shared_ptr<SettingsState>& state);
@@ -283,11 +294,10 @@ const wchar_t* DefaultDataFolderName() {
 	return IsXbox() ? L"Internal storage" : L"Default folder";
 }
 
-// The user data folder, and whether the app may write in it (with the command that allows it where it may not).
-void ShowUserData(const std::shared_ptr<SettingsState>& state) {
-	const auto& path_text = state->user_data_path;
-	const auto& status    = state->user_data_status;
-	auto path = state->settings.user_data_path;
+// A chosen folder the app writes in (the data folder, the logs and dumps folder), and whether it may, as `write_error` tells for the calls
+// that write there (with the command that allows it where it may not). Empty: the default folder.
+void ShowWritableFolder(xaml::Controls::TextBlock const& path_text, xaml::Controls::TextBlock const& status, std::filesystem::path path,
+                        uint32_t (*write_error)(const std::filesystem::path&)) {
 	// No empty line under the path when there is nothing to say.
 	status.Visibility(path.empty() ? xaml::Visibility::Collapsed : xaml::Visibility::Visible);
 	if (path.empty()) {
@@ -298,7 +308,7 @@ void ShowUserData(const std::shared_ptr<SettingsState>& state) {
 	path_text.Text(path.make_preferred().wstring());
 	// Windows' "file not found", "path not found" and "device not ready": the folder or its drive is not there, which no access helps.
 	constexpr std::array<uint32_t, 3> MISSING = {2, 3, 21};
-	const auto                        error   = WriteError(path);
+	const auto                        error   = write_error(path);
 	if (error == 0) {
 		status.Text(L"Writable");
 	} else if (std::find(MISSING.begin(), MISSING.end(), error) != MISSING.end()) {
@@ -312,16 +322,25 @@ void ShowUserData(const std::shared_ptr<SettingsState>& state) {
 	}
 }
 
-winrt::fire_and_forget ChooseUserData(std::shared_ptr<SettingsState> state) {
+// Saves, patches and trophies are written with the *FromApp functions (Common::File).
+void ShowUserData(const std::shared_ptr<SettingsState>& state) {
+	ShowWritableFolder(state->user_data_path, state->user_data_status, state->settings.user_data_path, WriteError);
+}
+
+// The logs and the frame dumps with the C library.
+void ShowLogs(const std::shared_ptr<SettingsState>& state) {
+	ShowWritableFolder(state->logs_path, state->logs_status, state->settings.logs_path, DirectWriteError);
+}
+
+// The system's folder picker: `chosen` gets the folder, unless none was chosen.
+winrt::fire_and_forget PickFolder(std::function<void(const std::filesystem::path&)> chosen) {
 	winrt::Windows::Storage::Pickers::FolderPicker picker;
 	picker.FileTypeFilter().Append(L"*");
 	const auto folder = co_await picker.PickSingleFolderAsync();
 	if (folder == nullptr || folder.Path().empty()) {
 		co_return;
 	}
-	state->settings.user_data_path = std::wstring(folder.Path());
-	SaveSettings(state->settings);
-	ShowUserData(state);
+	chosen(std::filesystem::path(std::wstring(folder.Path())));
 }
 
 void AddGameFolder(const std::shared_ptr<SettingsState>& state, const std::filesystem::path& path) {
@@ -970,6 +989,8 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	// does, as it also goes back to the default folder.
 	ListFolders(state);
 	const bool development_files = IsXbox() && DevelopmentFilesReadable();
+	// Saves need writing, which the Xbox may not allow there.
+	const bool development_files_writable = development_files && DevelopmentFilesWritable();
 	const auto picker_name       = IsXbox() ? L"File Explorer" : L"Browse";
 	const auto menu = [](std::vector<std::pair<std::wstring, std::function<void()>>> items) {
 		xaml::Controls::MenuFlyout flyout;
@@ -1022,23 +1043,18 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	state->user_data_status = page.FindName(L"UserDataStatus").as<xaml::Controls::TextBlock>();
 	ShowUserData(state);
 	auto choose_user_data = page.FindName(L"ChooseUserData").as<xaml::Controls::DropDownButton>();
-	std::vector<std::pair<std::wstring, std::function<void()>>> data_choices = {{picker_name, [state] { ChooseUserData(state); }}};
-	// Saves need writing, which the Xbox may not allow there.
-	if (development_files && DevelopmentFilesWritable()) {
-		const auto button = winrt::make_weak(choose_user_data.as<xaml::Controls::Control>());
-		data_choices.emplace_back(L"Development Files", [show_panel, state, button] {
-			show_panel(button, L"Data folder", false, [state](const std::filesystem::path& folder) {
-				state->settings.user_data_path = folder;
-				SaveSettings(state->settings);
-				ShowUserData(state);
-			});
-		});
-	}
-	data_choices.emplace_back(DefaultDataFolderName(), [state] {
-		state->settings.user_data_path.clear();
+	// From the picker or the panel; empty: the default folder.
+	const auto set_user_data = [state](const std::filesystem::path& folder) {
+		state->settings.user_data_path = folder;
 		SaveSettings(state->settings);
 		ShowUserData(state);
-	});
+	};
+	std::vector<std::pair<std::wstring, std::function<void()>>> data_choices = {{picker_name, [set_user_data] { PickFolder(set_user_data); }}};
+	if (development_files_writable) {
+		const auto button = winrt::make_weak(choose_user_data.as<xaml::Controls::Control>());
+		data_choices.emplace_back(L"Development Files", [show_panel, set_user_data, button] { show_panel(button, L"Data folder", false, set_user_data); });
+	}
+	data_choices.emplace_back(DefaultDataFolderName(), [set_user_data] { set_user_data({}); });
 	choose_user_data.Flyout(menu(std::move(data_choices)));
 	const Paragraphs data_folder_help = {
 	    L"The folder for saves, patches and trophies, for example on a USB drive. KytyPS5 keeps them in the subfolders _SaveData, _Patches and "
@@ -1047,6 +1063,37 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    std::wstring(L"If the folder can't be written when a game starts, for example when the drive is not plugged in, that game uses ") +
 	        (IsXbox() ? L"internal storage." : L"the default folder.")};
 	Explain(choose_user_data, explanation, data_folder_help);
+
+	// Logs and dumps, written with the C library, which reaches only folders that grant apps access themselves: on a PC, the picker's choice
+	// (the row says when it needs that access); on the Xbox, Development Files, as the picker there only reaches USB drives, which it can't.
+	const bool logs_in_development_files = development_files && DevelopmentFilesDirectlyWritable();
+	if (!IsXbox() || logs_in_development_files || !settings.logs_path.empty()) {
+		page.FindName(L"Logs").as<xaml::UIElement>().Visibility(xaml::Visibility::Visible);
+		state->logs_path   = page.FindName(L"LogsPath").as<xaml::Controls::TextBlock>();
+		state->logs_status = page.FindName(L"LogsStatus").as<xaml::Controls::TextBlock>();
+		ShowLogs(state);
+		auto choose_logs = page.FindName(L"ChooseLogs").as<xaml::Controls::DropDownButton>();
+		// From the picker or the panel; empty: the default folder.
+		const auto set_logs = [state](const std::filesystem::path& folder) {
+			state->settings.logs_path = folder;
+			SaveSettings(state->settings);
+			ShowLogs(state);
+		};
+		std::vector<std::pair<std::wstring, std::function<void()>>> logs_choices;
+		if (!IsXbox()) {
+			logs_choices.emplace_back(picker_name, [set_logs] { PickFolder(set_logs); });
+		}
+		if (logs_in_development_files) {
+			const auto button = winrt::make_weak(choose_logs.as<xaml::Controls::Control>());
+			logs_choices.emplace_back(L"Development Files", [show_panel, set_logs, button] { show_panel(button, L"Logs and dumps", false, set_logs); });
+		}
+		logs_choices.emplace_back(DefaultDataFolderName(), [set_logs] { set_logs({}); });
+		choose_logs.Flyout(menu(std::move(logs_choices)));
+		Explain(choose_logs, explanation,
+		        {IsXbox() ? L"The folder for logs and frame dumps. In Development Files, a PC can open them." : L"The folder for logs and frame dumps.",
+		         std::wstring(L"If the folder can't be written when a game starts, that game uses ") +
+		             (IsXbox() ? L"internal storage." : L"the default folder.")});
+	}
 
 	// A heading above the focused row comes into view with it: scrolled down, the page left "Game folders" cut in half at the top even with
 	// the first game folder's Remove in focus.
