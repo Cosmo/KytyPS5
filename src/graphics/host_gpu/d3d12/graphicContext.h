@@ -95,6 +95,9 @@ struct GraphicContext {
 	// D3D12 has no 8 and 8_8 sRGB formats: such textures are sampled through UNorm views and the shaders decode them (upstream's fallback).
 	bool                r8_srgb_views   = false;
 	bool                r8g8_srgb_views = false;
+	// 4_4_4_4 color targets render as B4G4R4A4 (rotated, D3D12::RenderableHostFormat), which D3D12 makes optional; without it they
+	// render as 5_5_5_1 (upstream's fallback, TextureGetRenderTargetFormat).
+	bool                r4g4b4a4_render_targets = false;
 
 	uint32_t screen_width  = 0;
 	uint32_t screen_height = 0;
