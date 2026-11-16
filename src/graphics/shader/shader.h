@@ -91,7 +91,7 @@ struct ShaderMeshInputInfo: ShaderWorkgroupInputInfo {
 	// The host has no mesh shaders: the program runs as a compute shader (IR::MeshEmulation).
 	bool     compute_emulation     = false;
 
-	// The slots a group reserves in the emulation: one per possible vertex, and one per triangle a
+	// The slots a group reserves in the emulation: one per possible vertex, and one per primitive a
 	// thread can make.
 	[[nodiscard]] constexpr uint32_t EmulatedVertexSlots() const { return max_vertices; }
 	[[nodiscard]] constexpr uint32_t EmulatedPrimitiveSlots() const {
