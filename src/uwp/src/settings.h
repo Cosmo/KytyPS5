@@ -27,6 +27,9 @@ struct AppSettings {
 	// The settings page, User Data Path: where saves (_SaveData), patches (_Patches) and trophies (_Trophies) are kept, for one on a USB
 	// drive. Empty: LocalState.
 	std::filesystem::path user_data_path;
+	// The settings page, Storage › Logs and dumps: where the app's and the emulator's logs (kyty-uwp.txt, kyty-emulator.txt) and the frame
+	// dumps (_FrameDump) go. Empty: LocalState.
+	std::filesystem::path logs_path;
 	uint32_t                           screen_width  = 1280; // the TV resolution the games are told: 1080p below 3840 × 2160 (the settings page)
 	uint32_t                           screen_height = 720;
 	bool                               vsync         = false;
@@ -177,6 +180,9 @@ void                      SaveSettings(const AppSettings& settings);
 
 // The DSU servers to ask: the settings' while DSU controllers is on, none otherwise.
 [[nodiscard]] std::vector<std::string> DsuServersInUse(const AppSettings& settings);
+
+// AppSettings::logs_path as the settings file has it, read without logging: the app's log opens with it. Empty when none is set.
+[[nodiscard]] std::filesystem::path LogsPathSetting();
 
 // The folder of the user's data: AppSettings::user_data_path, or LocalState when none is set.
 [[nodiscard]] std::filesystem::path UserDataFolder(const AppSettings& settings);

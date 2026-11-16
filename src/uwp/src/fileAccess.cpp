@@ -115,6 +115,19 @@ uint32_t WriteError(const std::filesystem::path& folder) {
 	return 0;
 }
 
+uint32_t DirectWriteError(const std::filesystem::path& folder) {
+	const auto test = folder / L"kyty-write-test.tmp";
+	HANDLE     file = CreateFile2(test.c_str(), GENERIC_WRITE, 0, CREATE_ALWAYS, nullptr);
+	if (file == INVALID_HANDLE_VALUE) {
+		const auto error = GetLastError();
+		Log("cannot write in %ls with the C library (error %lu)\n", folder.c_str(), error);
+		return error;
+	}
+	CloseHandle(file);
+	DeleteFileW(test.c_str());
+	return 0;
+}
+
 void WaitForGameFolders() {
 	const auto start = GetTickCount64();
 	// The folder's error once it gives access or the 2 seconds are over.
