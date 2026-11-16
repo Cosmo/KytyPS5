@@ -478,9 +478,11 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 	const auto& mesh            = vs_input_info.mesh;
 	const auto  layout          = IR::MeshEmulation::LayoutFor(vs_input_info.stage.module->info.info.outputs);
 	const auto  primitive_slots = mesh.EmulatedPrimitiveSlots();
+	// Points, lines or triangles (1, 2 or 3 indices each), as the program outputs them.
+	const auto  primitive_size  = mesh.output_primitive_size;
 	const uint64_t group_records =
 	    uint64_t {mesh.EmulatedVertexSlots()} * layout.StrideDwords() * sizeof(uint32_t);
-	const uint64_t group_indices = uint64_t {primitive_slots} * 3 * sizeof(uint32_t);
+	const uint64_t group_indices = uint64_t {primitive_slots} * primitive_size * sizeof(uint32_t);
 	if (group_records == 0 || group_indices == 0 || group_records > RecordBytes ||
 	    group_indices > IndexBytes) {
 		static std::atomic_bool warned = false;
@@ -508,7 +510,9 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 	    std::min<uint64_t>({groups, std::max<uint64_t>(1, budget / chunk_instances_max), MaxDispatch}));
 
 	const auto& compute_layout = compute.layout;
-	list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	list->IASetPrimitiveTopology(primitive_size == 1u   ? D3D_PRIMITIVE_TOPOLOGY_POINTLIST
+	                             : primitive_size == 2u ? D3D_PRIMITIVE_TOPOLOGY_LINELIST
+	                                                    : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	uint32_t parameters[IR::MeshEmulation::DrawDwordCount] {};
 	std::ranges::copy(draw_data, parameters);
@@ -545,7 +549,7 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 			m_mesh_records->Use(buffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 			m_mesh_indices->Use(buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
 			list->SetGraphicsRootShaderResourceView(graphics.layout.MeshScratchParameter(), records);
-			const auto                     index_count = chunk_groups * chunk_instances * primitive_slots * 3u;
+			const auto                     index_count = chunk_groups * chunk_instances * primitive_slots * primitive_size;
 			const D3D12_INDEX_BUFFER_VIEW  view {indices, static_cast<UINT>(index_count * sizeof(uint32_t)),
 			                                     DXGI_FORMAT_R32_UINT};
 			list->IASetIndexBuffer(&view);
