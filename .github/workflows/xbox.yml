@@ -183,7 +183,7 @@ jobs:
           1. Unzip on a PC.
           2. Device Portal → **Add** → the ``.msix`` and both files in ``Dependencies``.
           3. Dev Home: set the app's type to **Game**.
-          4. Put your games on a USB drive: [how]($source/src/uwp/README.md#setting-up-your-games-folder).
+          4. Put your games on a USB drive or in Development Files: [how]($source/src/uwp/README.md#setting-up-your-games-folder).
 
           Installs over earlier builds and keeps your data.
           "@
