@@ -458,13 +458,36 @@ function Invoke-XboxLogs {
     $package = Get-XboxPackage $xbox
     $out = "$XboxDir\logs"
     New-Item -ItemType Directory $out -Force | Out-Null
+    # The logs and dumps folder (Settings > Storage) when it is in Development Files, which the Device Portal serves too, then LocalState
+    # (where the logs are when none is chosen or the app couldn't write there).
+    $localState = Get-AppFolderQuery $package '\LocalState'
+    $folders = @($localState)
+    $settingsFile = "$out\kyty-uwp.json"
+    try {
+        Invoke-XboxApi $xbox "/api/filesystem/apps/file?$localState&filename=kyty-uwp.json" $settingsFile
+        $logsPath = "$((Get-Content $settingsFile -Raw | ConvertFrom-Json).logs_path)"
+        if ($logsPath -match '^D:\\DevelopmentFiles(\\.*)?$') {
+            $folder = if ($Matches[1]) { $Matches[1] } else { '\' }
+            $folders = @("knownfolderid=DevelopmentFiles&path=$([Uri]::EscapeDataString($folder))") + $folders
+        }
+    } catch {
+        # No settings file yet: LocalState.
+    }
+    Remove-Item $settingsFile -ErrorAction SilentlyContinue
     foreach ($name in 'kyty-uwp.txt', 'kyty-emulator.txt') {
-        $query = "$(Get-AppFolderQuery $package '\LocalState')&filename=$([Uri]::EscapeDataString($name))"
         Remove-Item "$out\$name" -ErrorAction SilentlyContinue
-        try {
-            Invoke-XboxApi $xbox "/api/filesystem/apps/file?$query" "$out\$name"
-        } catch {
-            Write-Host "${name}: $($_.Exception.Message)" -ForegroundColor Yellow
+        $failure = ''
+        foreach ($folder in $folders) {
+            try {
+                Invoke-XboxApi $xbox "/api/filesystem/apps/file?$folder&filename=$([Uri]::EscapeDataString($name))" "$out\$name"
+                $failure = ''
+                break
+            } catch {
+                $failure = $_.Exception.Message
+            }
+        }
+        if ($failure) {
+            Write-Host "${name}: $failure" -ForegroundColor Yellow
             continue
         }
         Step "$name (the end; the whole file is in $out)"
@@ -488,8 +511,15 @@ function Invoke-Run {
     $package = Get-AppxPackage -Name $packageName
     if (-not $package) { Fail 'the app is not installed; run deploy first' }
     $localState = Get-LocalState
-    $log = "$localState\kyty-uwp.txt"
-    $emulatorLog = "$localState\kyty-emulator.txt"
+    # The logs and dumps folder when the settings name one that exists, else LocalState.
+    $logs = $localState
+    $settingsFile = "$localState\kyty-uwp.json"
+    if (Test-Path $settingsFile) {
+        $logsPath = "$((Get-Content $settingsFile -Raw | ConvertFrom-Json).logs_path)"
+        if ($logsPath -and (Test-Path $logsPath)) { $logs = $logsPath }
+    }
+    $log = "$logs\kyty-uwp.txt"
+    $emulatorLog = "$logs\kyty-emulator.txt"
     Get-Process kyty_uwp -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 500
     Remove-Item $log, $emulatorLog -ErrorAction SilentlyContinue

@@ -3,8 +3,8 @@
 
 namespace Kyty::Uwp {
 
-// Appends a line to LocalState\kyty-uwp.txt (and the debugger output). UWP apps have no console;
-// uwp.ps1 prints this file.
+// Appends a line to kyty-uwp.txt (and the debugger output), in the logs and dumps folder chosen when the app started, else in LocalState.
+// UWP apps have no console; uwp.ps1 prints this file.
 void Log(const char* format, ...);
 
 } // namespace Kyty::Uwp

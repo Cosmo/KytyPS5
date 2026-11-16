@@ -1,5 +1,7 @@
 #include "log.h"
 
+#include "settings.h"
+
 #include <windows.h>
 
 #include <winrt/Windows.Storage.h>
@@ -34,7 +36,18 @@ FILE* OpenLog() {
 		GetTempPathW(MAX_PATH, temp);
 		folder = temp;
 	}
-	return _wfsopen((folder + L"\\kyty-uwp.txt").c_str(), L"w", _SH_DENYWR);
+	// The logs and dumps folder (Settings › Storage), as chosen when the app started.
+	const auto logs = LogsPathSetting();
+	if (!logs.empty()) {
+		if (FILE* file = _wfsopen((logs / L"kyty-uwp.txt").c_str(), L"w", _SH_DENYWR)) {
+			return file;
+		}
+	}
+	FILE* file = _wfsopen((folder + L"\\kyty-uwp.txt").c_str(), L"w", _SH_DENYWR);
+	if (file != nullptr && !logs.empty()) {
+		fprintf(file, "%sthe logs and dumps folder %ls cannot be written: this log is in LocalState\n", ElapsedTime().c_str(), logs.c_str());
+	}
+	return file;
 }
 
 } // namespace
