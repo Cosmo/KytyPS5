@@ -399,8 +399,9 @@ struct ShaderProgramCache::Impl {
 };
 
 ShaderProgramCache::ShaderProgramCache(const HostShaderLimits&                limits,
-                                       ShaderRecompiler::IR::ImageHeapSource* image_heap)
-    : m_limits(limits), m_impl(std::make_unique<Impl>(limits, image_heap)) {}
+                                       ShaderRecompiler::IR::ImageHeapSource* image_heap,
+                                       const GraphicContext&                  graphics)
+    : m_limits(limits), m_graphics(graphics), m_impl(std::make_unique<Impl>(limits, image_heap)) {}
 
 ShaderProgramCache::~ShaderProgramCache() = default;
 
@@ -512,7 +513,7 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 	}
 	ShaderParams pixel_params;
 	if (pixel_active) {
-		const auto target_export_mapping = RenderTargetExportMapping(context);
+		const auto target_export_mapping = RenderTargetExportMapping(m_graphics, context);
 		pixel_params      = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
 		pixel_info.object_primitive_id = object_primitive_id;
 		for (uint32_t export_index = 0; export_index < 8u; export_index++) {
