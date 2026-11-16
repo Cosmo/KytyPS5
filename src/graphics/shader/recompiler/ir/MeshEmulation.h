@@ -11,13 +11,16 @@
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
 // A host without mesh shaders (the Series X) runs a guest merged geometry (NGG) program as a
-// compute shader: one workgroup per mesh group writes the group's vertices (records) and triangles
-// (indices) into fixed slots of two buffers, and a generated vertex stage reads the records back
-// for one indexed draw of all the slots. Triangles a group does not make, or culls, are degenerate.
+// compute shader: one workgroup per mesh group writes the group's vertices (records) and primitives
+// (indices: points, lines or triangles) into fixed slots of two buffers, and a generated vertex stage
+// reads the records back for one indexed draw of all the slots. Triangles a group does not make, or
+// culls, are degenerate; points and lines are NoVertex, which the vertex stage puts behind the eye.
 struct MeshEmulation {
 	// Register spaces of the two buffers (root descriptors), outside the guest resource spaces.
 	static constexpr uint32_t RecordSpace = 1002;
 	static constexpr uint32_t IndexSpace  = 1003;
+	// The index of a point or line a group did not make (list draws take it as a vertex number).
+	static constexpr uint32_t NoVertex    = 0xffffffffu;
 
 	// The draw parameters of a mesh program (PushData::MeshDrawDwordCount of them describe the
 	// draw), then the first group and the first instance of the chunk the dispatch runs, and the
