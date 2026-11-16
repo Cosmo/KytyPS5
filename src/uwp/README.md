@@ -69,6 +69,7 @@ UWP apps may only read folders that allow it. Give apps read access to each game
 
   (`S-1-15-2-1` is ALL APPLICATION PACKAGES on every Windows language.)
 - **Xbox** (Dev Mode): format a USB drive as NTFS, give ALL APPLICATION PACKAGES access to it on a PC as above, plug it into the Xbox and choose **Media** (Dev Mode shows it as drive E:), then put the games in a folder on it. Set the app's type to **Game** in Dev Home for the larger memory budget.
+- **Xbox, Development Files**: put the games in a folder in Development Files (`D:\DevelopmentFiles`, which the Device Portal's File explorer copies files into), then choose it under Settings › Storage › Add folder › Development Files. Apps may read it as it is.
 
 This lets every UWP app read that folder. To grant this app alone, use its package SID instead of `S-1-15-2-1`. The launcher lists the folders it cannot read together with the command that fixes them.
 
