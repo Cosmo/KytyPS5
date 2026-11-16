@@ -73,7 +73,7 @@ UWP apps may only read folders that allow it. Give apps read access to each game
 
 This lets every UWP app read that folder. To grant this app alone, use its package SID instead of `S-1-15-2-1`. The launcher lists the folders it cannot read together with the command that fixes them.
 
-Saves, patches and trophies can live on the USB drive too: choose a folder under **User Data Path** in the settings. The app needs write access to it (`(OI)(CI)M` instead of `RX` in the command above); the settings page says whether it has it. When the folder can't be written as a game starts, that game uses the app's own folder.
+Saves, patches and trophies can live on the USB drive or in Development Files too: choose a folder under Settings › Storage › Data folder › **Choose folder**. The app needs write access to it (on a USB drive, `(OI)(CI)M` instead of `RX` in the command above; Development Files can be written as it is); the settings page says whether it has it. When the folder can't be written as a game starts, that game uses the app's own folder.
 
 A game's cheats are in its options in the library (Menu button › Cheats): the HEN Cheats Collection's files for the game, as the desktop launcher lists them, can be downloaded into the user data folder's `_Patches` and their cheats switched on and off there. They apply when the game starts.
 
