@@ -13,7 +13,7 @@ What the Xbox version adds:
 - **A Direct3D 12 renderer** next to upstream's Vulkan renderer. Shaders are translated with Mesa's `spirv_to_dxil`.
 - **Room for big games on the console.** Game memory is committed as it is used, a swap file keeps games within the Series X's app memory limit, and texture options trade detail for memory.
 - **Up to four players.** The DualSense's touchpad, motion sensors, adaptive triggers, haptic feedback, speaker and microphone are mapped to the Xbox controller and its headset.
-- **Games on a USB drive.** Game folders and `.zar` archives play from a drive, and saves, patches and trophies can live there too.
+- **Games on a USB drive or in Development Files.** Game folders and `.zar` archives play from either, and saves, patches and trophies can live there too.
 
 <p align="center">
   <strong>Library</strong><br>
