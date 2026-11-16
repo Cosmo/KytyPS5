@@ -324,6 +324,11 @@ public:
 
 	// The last lines, after reading what was added.
 	const std::deque<std::string>& Update() {
+		// A new log may be in another folder than the last (Settings › Storage › Logs and dumps): it's opened there.
+		if (m_file != INVALID_HANDLE_VALUE && EmulatorHost::Get().LogGeneration() != m_generation && EmulatorHost::Get().LogFile() != m_path) {
+			CloseHandle(m_file);
+			m_file = INVALID_HANDLE_VALUE;
+		}
 		// The log may not exist yet (the first run, or deleted): tried again until it does.
 		if (m_file == INVALID_HANDLE_VALUE && !Open()) {
 			return m_lines;
@@ -394,7 +399,8 @@ public:
 
 private:
 	bool Open() {
-		m_file = CreateFile2FromAppW((LocalStateFolder() / L"kyty-emulator.txt").c_str(), GENERIC_READ,
+		m_path = EmulatorHost::Get().LogFile();
+		m_file = CreateFile2FromAppW(m_path.c_str(), GENERIC_READ,
 		                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 		                             OPEN_EXISTING, nullptr);
 		if (m_file == INVALID_HANDLE_VALUE) {
@@ -415,6 +421,7 @@ private:
 	enum class Escape { None, Start, Sequence };
 
 	HANDLE                  m_file       = INVALID_HANDLE_VALUE;
+	std::filesystem::path   m_path;
 	uint32_t                m_generation = EmulatorHost::Get().LogGeneration();
 	Escape                  m_escape     = Escape::None;
 	std::deque<std::string> m_lines;
