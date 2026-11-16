@@ -114,20 +114,37 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 	m_dispatcher = core::CoreWindow::GetForCurrentThread().Dispatcher();
 	Log("starting %ls\n", game_dir.c_str());
 
-	// The emulator writes its own data folders (_PipelineCache, ...) relative to the working directory, and its messages to stdout and stderr:
-	// both go to LocalState. The user's data (saves, patches, trophies) goes to the user data folder.
+	// The settings page's choices (LocalState\kyty-uwp.json).
+	const auto settings = LoadSettings();
+
+	// The emulator writes its own data folders (_PipelineCache, ...) relative to the working directory, LocalState. Its messages (stdout and
+	// stderr) and the frame dumps go to the logs and dumps folder, LocalState when none is chosen or the C library, which writes them, can't
+	// write there. The user's data (saves, patches, trophies) goes to the user data folder.
 	const std::wstring local_state(winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path());
 	if (!SetCurrentDirectoryW(local_state.c_str())) {
 		Log("could not change to LocalState: %lu\n", GetLastError());
 	}
-	if (_wfreopen((local_state + L"\\kyty-emulator.txt").c_str(), L"w", stdout) != nullptr) {
+	std::filesystem::path logs = local_state;
+	if (!settings.logs_path.empty()) {
+		if (DirectWriteError(settings.logs_path) != 0) {
+			Log("the logs and dumps folder %ls cannot be written: the emulator's log and frame dumps are in LocalState this time\n",
+			    settings.logs_path.c_str());
+		} else {
+			logs = settings.logs_path;
+			Log("logs and dumps: %ls\n", logs.c_str());
+		}
+	}
+	const auto log_file = logs / L"kyty-emulator.txt";
+	if (_wfreopen(log_file.c_str(), L"w", stdout) != nullptr) {
 		setvbuf(stdout, nullptr, _IONBF, 0);
 		_dup2(_fileno(stdout), _fileno(stderr));
 	}
+	const auto frame_dumps = logs / L"_FrameDump";
+	{
+		std::lock_guard lock(m_mutex);
+		m_log_file = log_file;
+	}
 	m_log_generation++;
-
-	// The settings page's choices (LocalState\kyty-uwp.json).
-	const auto settings = LoadSettings();
 
 	// The user data folder; LocalState when the chosen one cannot be written (a USB drive that is not plugged in, or one that only grants reading):
 	// saves and trophies are written there. The settings page checks the same.
@@ -180,7 +197,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 	Libs::LibKernel::Memory::SetAddressCollisionHandler(
 	    [](uint64_t start, uint64_t size) { EmulatorHost::Get().RestartForAddressCollision(start, size); });
 
-	m_thread = std::thread([this, game_dir = std::move(game_dir), game_patch, settings, user_data, vblank_rate_scale] {
+	m_thread = std::thread([this, game_dir = std::move(game_dir), game_patch, settings, user_data, frame_dumps, vblank_rate_scale] {
 		// The emulator's main thread: the window logic runs here, not on the UI thread.
 		Common::InitializeThreads();
 
@@ -248,7 +265,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 			config.shader_override_folder = LocalStateFolder() / std::filesystem::path(winrt::to_hstring(settings.shader_override).c_str());
 		}
 		config.gpu_hang_exit_seconds       = settings.gpu_hang_exit_seconds;
-		config.frame_dump_folder           = LocalStateFolder() / L"_FrameDump";
+		config.frame_dump_folder           = frame_dumps;
 		config.frame_dump_snapshots        = settings.frame_dump_snapshots != 0;
 		config.mesh_compute_forced         = settings.mesh_compute;
 		config.guest_ram_budget_mb         = settings.guest_ram_budget_mb;
@@ -409,6 +426,11 @@ void EmulatorHost::FramePresented() {
 			(void)m_dispatcher.RunAsync(core::CoreDispatcherPriority::Normal, [handler = m_game_visible] { handler(); });
 		}
 	}
+}
+
+std::filesystem::path EmulatorHost::LogFile() const {
+	std::lock_guard lock(m_mutex);
+	return m_log_file.empty() ? LocalStateFolder() / L"kyty-emulator.txt" : m_log_file;
 }
 
 uint64_t EmulatorHost::RunTimeMs() const {
