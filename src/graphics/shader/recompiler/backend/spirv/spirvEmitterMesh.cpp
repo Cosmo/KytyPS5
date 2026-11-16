@@ -82,9 +82,9 @@ uint32_t MeshCompare(EmitterState& state, spv::Op opcode, uint32_t lhs, uint32_t
 	return result;
 }
 
-// The tail of the compute emulation: the group's vertices and triangles go to the slots of the
-// group in the two buffers (IR::MeshEmulation). A triangle the group did not make, or culled,
-// becomes a degenerate one that the draw rasterizes to nothing.
+// The tail of the compute emulation: the group's vertices and primitives go to the slots of the
+// group in the two buffers (IR::MeshEmulation). A primitive the group did not make, or culled,
+// becomes one that the draw rasterizes to nothing.
 void EmitMeshComputeEpilogue(EmitterState& state, uint32_t vertices, uint32_t primitives) {
 	const auto& mesh   = state.input_info.vertex->mesh;
 	const auto  layout = IR::MeshEmulation::LayoutFor(state.program.info.outputs);
@@ -163,19 +163,20 @@ void EmitMeshComputeEpilogue(EmitterState& state, uint32_t vertices, uint32_t pr
 			state.builder.AddFunction(spv::OpLogicalNot, TypeBool(state), not_culled, culled);
 			const auto made = state.builder.AllocateId();
 			state.builder.AddFunction(spv::OpLogicalAnd, TypeBool(state), made, in_range, not_culled);
-			const auto triangle = EmitBinaryU32(state, spv::OpIMul,
-			                                    EmitAddU32(state, primitive_base, index),
-			                                    ConstantU32(state, 3));
-			for (uint32_t component = 0; component < 3; component++) {
+			// A point, line or triangle: 1, 2 or 3 indices (VGT_GS_OUT_PRIM_TYPE).
+			const auto size  = mesh.output_primitive_size;
+			const auto first = EmitBinaryU32(state, spv::OpIMul, EmitAddU32(state, primitive_base, index),
+			                                 ConstantU32(state, size));
+			for (uint32_t component = 0; component < size; component++) {
 				const auto vertex = state.builder.AllocateId();
 				state.builder.AddFunction(spv::OpBitFieldUExtract, TypeU32(state), vertex, packed,
 				                          ConstantU32(state, component * 10u), ConstantU32(state, 10));
+				// One the group did not make: a degenerate triangle (its vertex 0 three times), or a point or line of
+				// MeshEmulation::NoVertex, which the fetch stage drops (a point or line has no degenerate form).
 				const auto kept = state.builder.AllocateId();
-				state.builder.AddFunction(spv::OpSelect, TypeU32(state), kept, made, vertex,
-				                          ConstantU32(state, 0));
-				MeshStoreDword(state, state.mesh_indices,
-				               EmitAddU32(state, triangle, ConstantU32(state, component)),
-				               EmitAddU32(state, vertex_base, kept));
+				state.builder.AddFunction(spv::OpSelect, TypeU32(state), kept, made, EmitAddU32(state, vertex_base, vertex),
+				                          size == 3u ? vertex_base : ConstantU32(state, IR::MeshEmulation::NoVertex));
+				MeshStoreDword(state, state.mesh_indices, EmitAddU32(state, first, ConstantU32(state, component)), kept);
 			}
 		});
 	}
@@ -533,8 +534,15 @@ std::vector<uint32_t> EmitMeshFetchProgram(std::span<const IR::StageOutput> outp
 	b.AddFunction(spv::OpLoad, type_i32, index_i32, vertex_index);
 	const auto index = b.AllocateId();
 	b.AddFunction(spv::OpBitcast, type_u32, index, index_i32);
+	// IR::MeshEmulation::NoVertex: a point or line the group did not make. It reads record 0 and lies behind the eye
+	// (w -1), where the clipper drops it.
+	const auto type_bool = b.Type(spv::OpTypeBool);
+	const auto no_vertex = b.AllocateId();
+	b.AddFunction(spv::OpIEqual, type_bool, no_vertex, index, constant(IR::MeshEmulation::NoVertex));
+	const auto record_index = b.AllocateId();
+	b.AddFunction(spv::OpSelect, type_u32, record_index, no_vertex, constant(0), index);
 	const auto record = b.AllocateId();
-	b.AddFunction(spv::OpIMul, type_u32, record, index, constant(layout.StrideDwords()));
+	b.AddFunction(spv::OpIMul, type_u32, record, record_index, constant(layout.StrideDwords()));
 
 	const auto load_f32 = [&](uint32_t dword) {
 		const auto at = b.AllocateId();
@@ -557,6 +565,13 @@ std::vector<uint32_t> EmitMeshFetchProgram(std::span<const IR::StageOutput> outp
 				uint32_t scalars[4] {};
 				for (uint32_t component = 0; component < 4; component++) {
 					scalars[component] = load_f32(slot.vec4 * 4u + component);
+					if (output.kind == IR::StageOutputKind::Position) {
+						const auto kept = b.AllocateId();
+						b.AddFunction(spv::OpSelect, type_f32, kept, no_vertex,
+						              b.Constant(spv::OpConstant, type_f32, component == 3u ? 0xbf800000u : 0u),
+						              scalars[component]);
+						scalars[component] = kept;
+					}
 				}
 				const auto value = b.AllocateId();
 				b.AddFunction(spv::OpCompositeConstruct, type_vec4, value, scalars[0], scalars[1],
