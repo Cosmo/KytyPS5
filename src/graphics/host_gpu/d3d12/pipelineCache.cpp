@@ -554,7 +554,7 @@ std::size_t PipelineCache::GraphicsKeyHash::operator()(const GraphicsKey& key) c
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
     : m_graphics(graphics), m_compiler(graphics.device),
-      m_programs(ShaderLimits(graphics, m_compiler), nullptr) {
+      m_programs(ShaderLimits(graphics, m_compiler), nullptr, graphics) {
 	D3D12::Check(graphics.device->QueryInterface(IID_PPV_ARGS(&m_device)),
 	             "query ID3D12Device2");
 	// Shaders can only index the descriptor heap from shader model 6.6 (not on the Series X): below

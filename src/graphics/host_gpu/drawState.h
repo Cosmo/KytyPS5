@@ -10,6 +10,8 @@
 
 namespace Libs::Graphics {
 
+struct GraphicContext;
+
 namespace HW {
 class Context;
 class Shader;
@@ -26,7 +28,7 @@ inline constexpr uint32_t GuestColorTargetCount = 8;
 [[nodiscard]] bool DrawHasActivePixelShader(const HW::Context& registers, const HW::Shader& shaders);
 // Export mapping of each enabled color target's format; unused slots keep the default mapping.
 [[nodiscard]] std::array<Prospero::ColorComponentMapping, GuestColorTargetCount>
-RenderTargetExportMapping(const HW::Context& registers);
+RenderTargetExportMapping(const GraphicContext& graphics, const HW::Context& registers);
 
 } // namespace Libs::Graphics
 

@@ -41,13 +41,13 @@ bool DrawHasActivePixelShader(const HW::Context& registers, const HW::Shader& sh
 }
 
 std::array<Prospero::ColorComponentMapping, GuestColorTargetCount>
-RenderTargetExportMapping(const HW::Context& registers) {
+RenderTargetExportMapping(const GraphicContext& graphics, const HW::Context& registers) {
 	std::array<Prospero::ColorComponentMapping, GuestColorTargetCount> mapping {};
 	const auto output_mask = DrawColorOutputMask(registers);
 	for (uint32_t slot = 0; slot < GuestColorTargetCount; slot++) {
 		const auto& rt = registers.GetRenderTarget(slot);
 		if ((output_mask & (1u << slot)) != 0 && rt.base.addr != 0) {
-			mapping[slot] = TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type,
+			mapping[slot] = TextureGetRenderTargetFormat(graphics, rt.info.format, rt.info.channel_type,
 			                                             rt.info.channel_order)
 			                    .export_mapping;
 		}
