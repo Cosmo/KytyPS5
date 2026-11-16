@@ -352,6 +352,9 @@ void GraphicContext::Create(bool enable_debug_layer) {
 	D3D12_FEATURE_DATA_D3D12_OPTIONS options {};
 	sampler_filter_minmax_enabled = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options))) &&
 	                                options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_2;
+	D3D12_FEATURE_DATA_FORMAT_SUPPORT b4g4r4a4 {DXGI_FORMAT_B4G4R4A4_UNORM};
+	r4g4b4a4_render_targets = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &b4g4r4a4, sizeof(b4g4r4a4))) &&
+	                          (b4g4r4a4.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) != 0;
 
 	D3D12_COMMAND_QUEUE_DESC queue_desc {};
 	queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;

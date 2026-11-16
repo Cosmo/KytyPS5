@@ -15,6 +15,8 @@
 
 namespace Libs::Graphics {
 
+struct GraphicContext;
+
 namespace HW {
 class Context;
 class Shader;
@@ -81,8 +83,9 @@ struct ShaderModule: CompiledProgram {
 // shader, static state and resource specialization. Shared by all host GPU backends.
 class ShaderProgramCache {
 public:
-	// image_heap keeps GPU-indexed image tables resident; nullptr: the backend has none.
-	ShaderProgramCache(const HostShaderLimits& limits, ShaderRecompiler::IR::ImageHeapSource* image_heap);
+	// image_heap keeps GPU-indexed image tables resident; nullptr: the backend has none. graphics: the formats the host renders.
+	ShaderProgramCache(const HostShaderLimits& limits, ShaderRecompiler::IR::ImageHeapSource* image_heap,
+	                   const GraphicContext& graphics);
 	~ShaderProgramCache();
 	KYTY_CLASS_NO_COPY(ShaderProgramCache);
 
@@ -115,6 +118,7 @@ private:
 	struct Impl;
 
 	HostShaderLimits      m_limits;
+	const GraphicContext& m_graphics;
 	std::unique_ptr<Impl> m_impl;
 };
 
