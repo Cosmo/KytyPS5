@@ -422,6 +422,15 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
+		// Guest geometry shaders run as host mesh shaders or their compute emulation, which cannot follow tessellation (as in
+		// the Vulkan renderer's PipelineCache::GetGraphicsPrograms): the draw is skipped.
+		if ((context.GetShaderStages() & 0x20u) != 0) {
+			static std::atomic_bool warned = false;
+			if (!warned.exchange(true, std::memory_order_relaxed)) {
+				Log::WriteToConsoleAndLog("Warning: dropping tessellation draws with a geometry shader.\n");
+			}
+			return {};
+		}
 		vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
 		// Reflection decodes both programs; the key also covers the VGT fields in tess.
 		const uint64_t layout_key[] = {vertex_params[0].hash, vertex_params[1].hash,
