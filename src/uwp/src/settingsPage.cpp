@@ -3,6 +3,7 @@
 #include "controlsPage.h"
 #include "controllerSettings.h"
 #include "fileAccess.h"
+#include "folderPanel.h"
 #include "input.h"
 #include "overlay.h"
 #include "settingTiles.h"
@@ -27,6 +28,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -194,14 +197,16 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
           <StackPanel x:Name="Storage" Width="474" Spacing="12" Visibility="Collapsed">
             <TextBlock Text="Game folders" Style="{StaticResource BodyTextBlockStyle}" Margin="0,0,0,-8" />
             <StackPanel x:Name="Folders" Spacing="8" />
+            <!-- A menu where there is more than one way to choose (the Xbox's Development Files), else the picker at once. -->
             <Button x:Name="AddFolder" Content="Add folder" />
+            <DropDownButton x:Name="AddFolderMenu" Content="Add folder" Visibility="Collapsed" />
             <TextBlock Text="Data folder" Style="{StaticResource BodyTextBlockStyle}" Margin="0,24,0,-8" />
-            <TextBlock x:Name="UserDataPath" TextWrapping="Wrap" />
-            <TextBlock x:Name="UserDataStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-            <StackPanel Orientation="Horizontal" Spacing="8">
-              <Button x:Name="ChooseUserData" Content="Choose folder" />
-              <Button x:Name="ResetUserData" Content="Use the app's folder" />
+            <!-- As a game folder's row: the path, its state under it. -->
+            <StackPanel>
+              <TextBlock x:Name="UserDataPath" TextWrapping="Wrap" />
+              <TextBlock x:Name="UserDataStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
             </StackPanel>
+            <DropDownButton x:Name="ChooseUserData" Content="Choose folder" />
           </StackPanel>
 
           <StackPanel x:Name="Memory" Orientation="Horizontal" Spacing="36" Visibility="Collapsed">
@@ -263,6 +268,8 @@ struct SettingsState {
 	bool left = false;
 	std::function<void(bool)> back;
 	winrt::weak_ref<xaml::Controls::StackPanel> folders;
+	// Back for the Development Files panel while it shows (ShowDevelopmentFilesPanel); false once it went.
+	std::function<bool()> folder_back;
 	// Held, not weak: with weak references these lines stayed empty on the Xbox. They have no handlers, so nothing leads from them
 	// back to the state.
 	xaml::Controls::TextBlock user_data_path {nullptr};
@@ -271,13 +278,20 @@ struct SettingsState {
 
 void ListFolders(const std::shared_ptr<SettingsState>& state);
 
+// The data folder when none is chosen: the app's own folder, which on the Xbox is on the console's internal drive.
+const wchar_t* DefaultDataFolderName() {
+	return IsXbox() ? L"Internal storage" : L"Default folder";
+}
+
 // The user data folder, and whether the app may write in it (with the command that allows it where it may not).
 void ShowUserData(const std::shared_ptr<SettingsState>& state) {
 	const auto& path_text = state->user_data_path;
 	const auto& status    = state->user_data_status;
 	auto path = state->settings.user_data_path;
+	// No empty line under the path when there is nothing to say.
+	status.Visibility(path.empty() ? xaml::Visibility::Collapsed : xaml::Visibility::Visible);
 	if (path.empty()) {
-		path_text.Text(L"The app's own folder");
+		path_text.Text(DefaultDataFolderName());
 		status.Text(L"");
 		return;
 	}
@@ -310,14 +324,7 @@ winrt::fire_and_forget ChooseUserData(std::shared_ptr<SettingsState> state) {
 	ShowUserData(state);
 }
 
-winrt::fire_and_forget AddFolder(std::shared_ptr<SettingsState> state) {
-	winrt::Windows::Storage::Pickers::FolderPicker picker;
-	picker.FileTypeFilter().Append(L"*");
-	const auto folder = co_await picker.PickSingleFolderAsync();
-	if (folder == nullptr || folder.Path().empty()) {
-		co_return;
-	}
-	const std::filesystem::path path(std::wstring(folder.Path()));
+void AddGameFolder(const std::shared_ptr<SettingsState>& state, const std::filesystem::path& path) {
 	auto& folders = state->settings.game_folders;
 	if (std::find(folders.begin(), folders.end(), path) == folders.end()) {
 		folders.push_back(path);
@@ -325,6 +332,17 @@ winrt::fire_and_forget AddFolder(std::shared_ptr<SettingsState> state) {
 		state->folders_changed = true;
 		ListFolders(state);
 	}
+}
+
+// The system's folder picker.
+winrt::fire_and_forget AddFolder(std::shared_ptr<SettingsState> state) {
+	winrt::Windows::Storage::Pickers::FolderPicker picker;
+	picker.FileTypeFilter().Append(L"*");
+	const auto folder = co_await picker.PickSingleFolderAsync();
+	if (folder == nullptr || folder.Path().empty()) {
+		co_return;
+	}
+	AddGameFolder(state, std::filesystem::path(std::wstring(folder.Path())));
 }
 
 // A row per game folder: the path, whether the app may read it, and Remove.
@@ -947,34 +965,97 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	     L"Saved about 300 MB in a test, with no visible difference.",
 	     IsXbox() ? L"Off can crash games when memory runs out." : L"Off can crash games on the Xbox when memory runs out."});
 
-	// Storage: game folders, and the data folder.
+	// Storage: game folders, and the data folder. Where the Xbox's Development Files can be read (the system's folder picker doesn't show it),
+	// Add folder opens a menu: the picker (File Explorer, as the Xbox shows it) or a panel with Development Files' folders. Choose folder always
+	// does, as it also goes back to the default folder.
 	ListFolders(state);
-	auto add_folder = page.FindName(L"AddFolder").as<xaml::Controls::Button>();
+	const bool development_files = IsXbox() && DevelopmentFilesReadable();
+	const auto picker_name       = IsXbox() ? L"File Explorer" : L"Browse";
+	const auto menu = [](std::vector<std::pair<std::wstring, std::function<void()>>> items) {
+		xaml::Controls::MenuFlyout flyout;
+		flyout.Placement(xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+		for (auto& [text, chosen]: items) {
+			xaml::Controls::MenuFlyoutItem item;
+			item.Text(text);
+			item.Click([chosen = std::move(chosen)](auto const&, auto const&) { chosen(); });
+			flyout.Items().Append(item);
+		}
+		return flyout;
+	};
+	// The Development Files panel over the page; the focus returns to `button` when it goes.
+	const auto show_panel = [state, weak_page = winrt::make_weak(page)](winrt::weak_ref<xaml::Controls::Control> const& button, std::wstring caption,
+	                                                                    bool count_games, std::function<void(const std::filesystem::path&)> chosen) {
+		const auto shown = weak_page.get();
+		if (shown == nullptr) {
+			return;
+		}
+		state->folder_back = ShowDevelopmentFilesPanel(shown, {std::move(caption), count_games, std::move(chosen), [button] {
+			                                                       if (const auto control = button.get()) {
+				                                                       control.Focus(xaml::FocusState::Keyboard);
+			                                                       }
+		                                                       }});
+	};
+
+	auto add_folder      = page.FindName(L"AddFolder").as<xaml::Controls::Button>();
+	auto add_folder_menu = page.FindName(L"AddFolderMenu").as<xaml::Controls::DropDownButton>();
 	add_folder.Click([state](auto const&, auto const&) { AddFolder(state); });
-	const Paragraphs game_folders_help = {
+	if (development_files) {
+		add_folder.Visibility(xaml::Visibility::Collapsed);
+		add_folder_menu.Visibility(xaml::Visibility::Visible);
+		const auto button = winrt::make_weak(add_folder_menu.as<xaml::Controls::Control>());
+		add_folder_menu.Flyout(menu({{picker_name, [state] { AddFolder(state); }},
+		                             {L"Development Files", [show_panel, state, button] {
+			                              show_panel(button, L"Add folder", true, [state](const std::filesystem::path& folder) { AddGameFolder(state, folder); });
+		                              }}}));
+	}
+	Paragraphs game_folders_help = {
 	    L"KytyPS5 looks for games in its own Games folder and in the folders listed here, two folder levels deep.",
 	    L"A game is a folder with eboot.bin, or a .zar archive with eboot.bin at its root.",
 	    L"Each folder must allow apps to read it. If one does not, the library shows how to allow it."};
+	if (development_files) {
+		game_folders_help.emplace_back(L"Development Files is the folder the Device Portal's File explorer copies files into.");
+	}
 	Explain(add_folder, explanation, game_folders_help);
+	Explain(add_folder_menu, explanation, game_folders_help);
 
 	state->user_data_path   = page.FindName(L"UserDataPath").as<xaml::Controls::TextBlock>();
 	state->user_data_status = page.FindName(L"UserDataStatus").as<xaml::Controls::TextBlock>();
 	ShowUserData(state);
-	auto choose_user_data = page.FindName(L"ChooseUserData").as<xaml::Controls::Button>();
-	auto reset_user_data  = page.FindName(L"ResetUserData").as<xaml::Controls::Button>();
-	choose_user_data.Click([state](auto const&, auto const&) { ChooseUserData(state); });
-	reset_user_data.Click([state](auto const&, auto const&) {
+	auto choose_user_data = page.FindName(L"ChooseUserData").as<xaml::Controls::DropDownButton>();
+	std::vector<std::pair<std::wstring, std::function<void()>>> data_choices = {{picker_name, [state] { ChooseUserData(state); }}};
+	// Saves need writing, which the Xbox may not allow there.
+	if (development_files && DevelopmentFilesWritable()) {
+		const auto button = winrt::make_weak(choose_user_data.as<xaml::Controls::Control>());
+		data_choices.emplace_back(L"Development Files", [show_panel, state, button] {
+			show_panel(button, L"Data folder", false, [state](const std::filesystem::path& folder) {
+				state->settings.user_data_path = folder;
+				SaveSettings(state->settings);
+				ShowUserData(state);
+			});
+		});
+	}
+	data_choices.emplace_back(DefaultDataFolderName(), [state] {
 		state->settings.user_data_path.clear();
 		SaveSettings(state->settings);
 		ShowUserData(state);
 	});
+	choose_user_data.Flyout(menu(std::move(data_choices)));
 	const Paragraphs data_folder_help = {
 	    L"The folder for saves, patches and trophies, for example on a USB drive. KytyPS5 keeps them in the subfolders _SaveData, _Patches and "
 	    L"_Trophies.",
 	    L"Saves, patches and trophies in the old folder are not moved. To keep them, copy these subfolders to the new folder yourself.",
-	    L"If the folder can't be written when a game starts, for example when the drive is not plugged in, that game uses the app's folder."};
+	    std::wstring(L"If the folder can't be written when a game starts, for example when the drive is not plugged in, that game uses ") +
+	        (IsXbox() ? L"internal storage." : L"the default folder.")};
 	Explain(choose_user_data, explanation, data_folder_help);
-	Explain(reset_user_data, explanation, data_folder_help);
+
+	// A heading above the focused row comes into view with it: scrolled down, the page left "Game folders" cut in half at the top even with
+	// the first game folder's Remove in focus.
+	page.FindName(L"Storage").as<xaml::UIElement>().BringIntoViewRequested([](auto const&, xaml::BringIntoViewRequestedEventArgs const& args) {
+		auto target = args.TargetRect();
+		target.Y -= 48;
+		target.Height += 48;
+		args.TargetRect(target);
+	});
 
 	// Developer: what goes to the log, and what helps testing.
 	const auto developer = panel(L"DiagnosticsGroup");
@@ -1217,6 +1298,13 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 
 	// Back: B, Escape or the window's back button (shown while the page is open).
 	const auto leave = [state, in_panel, categories, close_page] {
+		if (state->folder_back) {
+			const auto back = state->folder_back; // (a copy: going back may end the panel)
+			if (back()) {
+				return;
+			}
+			state->folder_back = nullptr;
+		}
 		if (!state->pages.empty()) {
 			close_page();
 			return;
