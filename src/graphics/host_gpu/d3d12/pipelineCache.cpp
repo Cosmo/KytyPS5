@@ -1878,8 +1878,13 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 	SetOutputState(stream, key);
 	stream.input_layout.value = {elements.data(), static_cast<UINT>(elements.size())};
 	stream.strip_cut.value    = static_cast<D3D12_INDEX_BUFFER_STRIP_CUT_VALUE>(key.strip_cut);
+	// An emulated mesh program's draw takes the primitives it outputs (RecordEmulatedMeshDraw), not the guest's input topology.
+	const auto emulated_topology = vs_input_info.mesh.output_primitive_size == 1u ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT
+	                               : vs_input_info.mesh.output_primitive_size == 2u ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
+	                                                                                : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 	stream.topology.value     = role == TessRole::Capture  ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT
 	                            : role == TessRole::Domain ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE
+	                            : emulated                 ? emulated_topology
 	                                                       : TopologyType(params.topology);
 
 	const auto loaded_before = m_loaded_pipelines;
