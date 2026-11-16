@@ -22,6 +22,8 @@ struct FolderPanelOptions {
 // Whether the app may read Development Files, and write in it (only the Xbox has it).
 [[nodiscard]] bool DevelopmentFilesReadable();
 [[nodiscard]] bool DevelopmentFilesWritable();
+// Whether the C library may write in it, as the logs and the frame dumps need.
+[[nodiscard]] bool DevelopmentFilesDirectlyWritable();
 
 // Shows the panel over `page` (spanning its rows and columns), at Development Files. The result is for the page's Back (B, Escape and the
 // window's back button go to the panel while it has the focus; this is for the rest): it goes up a level or closes the panel, and is false
