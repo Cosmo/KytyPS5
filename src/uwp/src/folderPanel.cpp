@@ -316,6 +316,10 @@ bool DevelopmentFilesWritable() {
 	return WriteError(DEVELOPMENT_FILES) == 0;
 }
 
+bool DevelopmentFilesDirectlyWritable() {
+	return DirectWriteError(DEVELOPMENT_FILES) == 0;
+}
+
 std::function<bool()> ShowDevelopmentFilesPanel(xaml::Controls::Grid const& page, FolderPanelOptions options) {
 	auto panel     = std::make_shared<Panel>();
 	panel->options = std::move(options);
