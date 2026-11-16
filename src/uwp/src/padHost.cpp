@@ -45,7 +45,10 @@ uint64_t NowMicroseconds() {
 	LARGE_INTEGER frequency {};
 	QueryPerformanceCounter(&counter);
 	QueryPerformanceFrequency(&frequency);
-	return static_cast<uint64_t>(counter.QuadPart) * 1000000u / static_cast<uint64_t>(frequency.QuadPart);
+	// Whole seconds and the rest apart: counter * 1000000 overflows 64 bits after 2^64 / 10^6 counts (21 days at 10 MHz).
+	const auto ticks = static_cast<uint64_t>(counter.QuadPart);
+	const auto freq  = static_cast<uint64_t>(frequency.QuadPart);
+	return ticks / freq * 1000000u + ticks % freq * 1000000u / freq;
 }
 
 struct Quat {
