@@ -4,7 +4,11 @@
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/gpu_format.h"
+#if defined(KYTY_GPU_BACKEND_D3D12)
+#include "graphics/host_gpu/d3d12/graphicContext.h"
+#else
 #include "graphics/host_gpu/graphicContext.h"
+#endif
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shader.h"
 
