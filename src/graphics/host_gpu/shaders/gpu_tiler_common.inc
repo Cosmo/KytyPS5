@@ -55,7 +55,7 @@ void copy_element(uint src, uint dst) {
 uint tiled_offset(Mip params, uvec3 p) {
 	uvec3 extent = block_extent();
 	uvec3 block = p / extent;
-	uvec3 swizzle = p + uvec3(params.tail_x, params.tail_y, params.surface_z);
+	uvec3 swizzle = p + uvec3(params.tail_x, params.tail_y, 0u);
 
 	uint block_index = block.y * params.blocks_per_row + block.x;
 	return block.z * params.tiled_slice_bytes + block_index * BLOCK_BYTES +
