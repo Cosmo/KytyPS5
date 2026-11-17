@@ -217,12 +217,14 @@ constexpr wchar_t ProblemMarkup[] = LR"(
 </Grid>)";
 
 // A kyty://run activation: a game folder (?game=<folder>) or a title ID (?title=<ID>, looked
-// up in the game library).
+// up in the game library), and an activity to start in (&activity=<ID>).
 struct RunRequest {
 	std::filesystem::path folder;
 	std::string           title_id;
 	// How many times the app restarted for this game (retry=<n>, see EmulatorHost::RestartForAddressCollision).
 	uint32_t retry = 0;
+	// The activity the game starts in (EmulatorHost::SetLaunchActivity); empty starts normally.
+	std::string activity;
 };
 
 // The arguments as a kyty:// link to `host`, or nothing. The scheme is KYTY_UWP_PROTOCOL of the build ("kyty", or another name for a build
@@ -296,6 +298,8 @@ std::optional<RunRequest> RunRequestFromArguments(winrt::hstring const& argument
 				found            = true;
 			} else if (entry.Name() == L"retry") {
 				request.retry = static_cast<uint32_t>(std::wcstoul(std::wstring(entry.Value()).c_str(), nullptr, 10));
+			} else if (entry.Name() == L"activity") {
+				request.activity = winrt::to_string(entry.Value());
 			}
 		}
 		if (found) {
@@ -1021,8 +1025,9 @@ xaml::UIElement CreateTitlePage(std::string title_id) {
 
 xaml::UIElement CreateLibraryPage(bool scan = false, const std::filesystem::path& select = {}) {
 	LauncherActions actions;
-	actions.play = [](const GameEntry& game) {
+	actions.play = [](const GameEntry& game, const std::string& activity) {
 		SetLastPlayed(game.title_id);
+		EmulatorHost::Get().SetLaunchActivity(activity);
 		xaml::Window::Current().Content(CreateGamePage(game.folder));
 	};
 	actions.open_settings = [] {
@@ -1112,6 +1117,7 @@ void App::Show(winrt::hstring const& activation_arguments) {
 		const auto run_request = RunRequestFromArguments(arguments);
 		if (run_request) {
 			EmulatorHost::Get().SetRestartAttempts(run_request->retry);
+			EmulatorHost::Get().SetLaunchActivity(run_request->activity);
 		}
 		if (trophy_link) {
 			window.Content(open_trophies(*trophy_link));

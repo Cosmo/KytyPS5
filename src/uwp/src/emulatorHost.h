@@ -129,6 +129,9 @@ public:
 	// UI thread, before Start: how many times the app has restarted for this game because of an address collision (see
 	// RestartForAddressCollision).
 	void SetRestartAttempts(uint32_t attempts) { m_restart_attempts = attempts; }
+	// UI thread, before Start: the activity the game starts in (upstream's launchActivity game intent, Config::GetLaunchActivity), for this run;
+	// empty starts normally. An ID that isn't 1-32 printable ASCII characters (upstream's --launch-activity rule) is left out.
+	void SetLaunchActivity(std::string activity);
 	// Emulator thread: the game asked for the fixed range [start, start + size) and host memory (the process heap, at an address chosen at random
 	// when the process started) sits in part of it. A restart gives another layout, so the app restarts with the same game; it comes back only
 	// when that fails or the attempts are used up.
@@ -195,6 +198,7 @@ private:
 	std::filesystem::path                                                m_game_dir;
 	std::atomic<uint32_t>                                                m_restart_attempts = 0;
 	std::atomic_bool                                                     m_restart = false;
+	std::string                                                          m_launch_activity;
 
 	mutable std::mutex      m_mutex;
 	std::condition_variable m_exit_changed;

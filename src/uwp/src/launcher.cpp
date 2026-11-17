@@ -1,6 +1,8 @@
 #include "launcher.h"
 
+#include "common/archive.h"
 #include "common/pipelinePrewarm.h"
+#include "common/trophies.h"
 #include "fileAccess.h"
 #include "gameImages.h"
 #include "gameSource.h"
@@ -208,48 +210,76 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
       <Border x:Name="Hints" Grid.Row="5" Style="{StaticResource HintBarStyle}" Margin="48,16,48,0" />
     </Grid>
 
-  <!-- A game's options (Menu button, right click), in the system's look: its details, play, cheats, hide. -->
+  <!-- A game's options (Menu button, right click), in the system's look: its details, the pipeline mode, play, an activity, cheats, hide. -->
   <Grid x:Name="Options" Visibility="Collapsed">
     <Rectangle Fill="{ThemeResource SystemControlPageBackgroundMediumAltMediumBrush}" />
     <Grid x:Name="OptionsPanel" Width="360" HorizontalAlignment="Right" Padding="24,32,24,32"
           Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
-      <Grid.RowDefinitions>
-        <RowDefinition Height="Auto" />
-        <RowDefinition Height="Auto" />
-        <RowDefinition Height="Auto" />
-        <RowDefinition Height="*" />
-        <RowDefinition Height="Auto" />
-      </Grid.RowDefinitions>
-      <TextBlock Text="Game options" Style="{StaticResource CaptionTextBlockStyle}"
-                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-      <TextBlock x:Name="OptionsTitle" Grid.Row="1" Style="{StaticResource SubtitleTextBlockStyle}"
-                 MaxLines="3" TextTrimming="CharacterEllipsis" Margin="0,4,0,20" />
-      <StackPanel Grid.Row="2" Spacing="12" Margin="0,0,0,24">
-        <StackPanel>
-          <TextBlock Text="Title ID" Style="{StaticResource CaptionTextBlockStyle}"
-                     Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-          <TextBlock x:Name="OptionsTitleId" Style="{StaticResource BodyTextBlockStyle}" />
+      <Grid x:Name="OptionsMain">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TextBlock Text="Game options" Style="{StaticResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock x:Name="OptionsTitle" Grid.Row="1" Style="{StaticResource SubtitleTextBlockStyle}"
+                   MaxLines="3" TextTrimming="CharacterEllipsis" Margin="0,4,0,20" />
+        <StackPanel Grid.Row="2" Spacing="12" Margin="0,0,0,24">
+          <Grid ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+              <TextBlock Text="Title ID" Style="{StaticResource CaptionTextBlockStyle}"
+                         Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+              <TextBlock x:Name="OptionsTitleId" Style="{StaticResource BodyTextBlockStyle}" />
+            </StackPanel>
+            <StackPanel Grid.Column="1">
+              <TextBlock Text="Version" Style="{StaticResource CaptionTextBlockStyle}"
+                         Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+              <TextBlock x:Name="OptionsVersion" Style="{StaticResource BodyTextBlockStyle}" />
+            </StackPanel>
+          </Grid>
+          <StackPanel>
+            <TextBlock Text="Folder" Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+            <TextBlock x:Name="OptionsFolder" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap" />
+          </StackPanel>
         </StackPanel>
-        <StackPanel>
-          <TextBlock Text="Version" Style="{StaticResource CaptionTextBlockStyle}"
-                     Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-          <TextBlock x:Name="OptionsVersion" Style="{StaticResource BodyTextBlockStyle}" />
-        </StackPanel>
-        <StackPanel>
-          <TextBlock Text="Folder" Style="{StaticResource CaptionTextBlockStyle}"
-                     Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
-          <TextBlock x:Name="OptionsFolder" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap" />
-        </StackPanel>
-      </StackPanel>
-      <ListView x:Name="OptionsItems" Grid.Row="3" SelectionMode="None" IsItemClickEnabled="True"
-                Margin="-12,0" VerticalAlignment="Top">
-        <ListView.ItemContainerStyle>
-          <Style TargetType="ListViewItem">
-            <Setter Property="CornerRadius" Value="0" />
-          </Style>
-        </ListView.ItemContainerStyle>
-      </ListView>
-      <Border x:Name="OptionsHints" Grid.Row="4" Style="{StaticResource HintBarStyle}" />
+        <ListView x:Name="OptionsItems" Grid.Row="3" SelectionMode="None" IsItemClickEnabled="True"
+                  Margin="-12,0" VerticalAlignment="Top">
+          <ListView.ItemContainerStyle>
+            <Style TargetType="ListViewItem">
+              <Setter Property="CornerRadius" Value="0" />
+              <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            </Style>
+          </ListView.ItemContainerStyle>
+        </ListView>
+        <Border x:Name="OptionsHints" Grid.Row="4" Style="{StaticResource HintBarStyle}" />
+      </Grid>
+      <!-- A level below the options (Pipelines, Launch activity): its title and its list, without the game's details. -->
+      <Grid x:Name="OptionsLevel" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TextBlock x:Name="OptionsLevelTitle" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,0,0,20" />
+        <ListView x:Name="OptionsLevelItems" Grid.Row="1" SelectionMode="None" IsItemClickEnabled="True"
+                  Margin="-12,0" VerticalAlignment="Top">
+          <ListView.ItemContainerStyle>
+            <Style TargetType="ListViewItem">
+              <Setter Property="CornerRadius" Value="0" />
+              <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            </Style>
+          </ListView.ItemContainerStyle>
+        </ListView>
+        <Border x:Name="OptionsLevelHints" Grid.Row="2" Style="{StaticResource HintBarStyle}" />
+      </Grid>
     </Grid>
     <Grid x:Name="Details" Visibility="Collapsed" Padding="48,40,48,32"
           Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
@@ -292,22 +322,71 @@ struct Launcher {
 	// The options of the game at options_index, while open.
 	xaml::FrameworkElement       options {nullptr};
 	xaml::FrameworkElement       options_panel {nullptr};
+	xaml::FrameworkElement       options_main {nullptr};
 	xaml::Controls::ListView     options_items {nullptr};
+	xaml::Controls::TextBlock    pipelines_value {nullptr};
+	// The activities of the game whose options are open (Launch activity...), once read: nothing when the game doesn't take the intent.
+	std::optional<std::vector<std::string>> activities;
+	bool                                    activities_read = false;
+	// A level below the options (Pipelines, Launch activity) and the entry that opened it.
+	xaml::FrameworkElement       level {nullptr};
+	xaml::Controls::TextBlock    level_title {nullptr};
+	xaml::Controls::ListView     level_items {nullptr};
+	xaml::Controls::Border       level_hints {nullptr};
+	const wchar_t*               level_from = nullptr;
 	xaml::FrameworkElement       details {nullptr};
 	xaml::Controls::ScrollViewer details_scroll {nullptr};
 	xaml::Controls::StackPanel   details_rows {nullptr};
 	xaml::Controls::TextBlock    details_game {nullptr};
 	size_t                       options_index = 0;
-	uint32_t                     details_item_index = 0;
+	uint32_t                     options_request = 0;
 	uint32_t                     details_request = 0;
 };
 
-constexpr wchar_t OPTION_PLAY[]       = L"Play";
-constexpr wchar_t OPTION_PLAY_BUILD[] = L"Play and build known pipelines";
-constexpr wchar_t OPTION_BUILD_PLAY[] = L"Build known pipelines, then play";
-constexpr wchar_t OPTION_DETAILS[]    = L"Details";
-constexpr wchar_t OPTION_CHEATS[]     = L"Cheats";
-constexpr wchar_t OPTION_HIDE[]       = L"Hide game";
+// The options' entries, by their text (an entry's Tag).
+constexpr wchar_t OPTION_PIPELINES[] = L"Pipelines";
+constexpr wchar_t OPTION_PLAY[]      = L"Play";
+constexpr wchar_t OPTION_ACTIVITY[]  = L"Launch activity...";
+constexpr wchar_t OPTION_DETAILS[]   = L"Details";
+constexpr wchar_t OPTION_CHEATS[]    = L"Cheats";
+constexpr wchar_t OPTION_HIDE[]      = L"Hide game";
+
+struct PipelineChoice {
+	PipelineMode   mode;
+	const wchar_t* name;
+	const wchar_t* text;
+};
+constexpr PipelineChoice PIPELINE_CHOICES[] = {
+    {PipelineMode::WhenNeeded, L"Build when needed", L"The game starts at once."},
+    {PipelineMode::Alongside, L"Build known ones alongside", L"Starts at once, builds the pipelines of earlier runs meanwhile."},
+    {PipelineMode::First, L"Build known ones first", L"Builds the pipelines of earlier runs, then starts the game."},
+};
+
+const wchar_t* PipelineModeName(PipelineMode mode) {
+	for (const auto& choice: PIPELINE_CHOICES) {
+		if (choice.mode == mode) {
+			return choice.name;
+		}
+	}
+	return PIPELINE_CHOICES[0].name;
+}
+
+// Starts `game` in the pipeline mode of the game options (A on a cover, Play, an activity).
+void Play(const Launcher& launcher, const GameEntry& game, const std::string& activity = {}) {
+	switch (LibraryPipelineMode()) {
+	case PipelineMode::Alongside:
+		// The pipeline cache takes the request at the game's first frame and builds in the background.
+		Common::PipelinePrewarm::Request();
+		break;
+	case PipelineMode::First:
+		// The game's code starts once the pipeline cache built them (Emulator::Run); the launch screen shows how far it is.
+		Common::PipelinePrewarm::RequestBeforeStart();
+		break;
+	case PipelineMode::WhenNeeded:
+		break;
+	}
+	launcher.actions.play(game, activity);
+}
 
 bool OptionsOpen(const Launcher& launcher) {
 	return launcher.options.Visibility() == xaml::Visibility::Visible;
@@ -487,17 +566,212 @@ void OpenDetails(const std::shared_ptr<Launcher>& launcher, const GameEntry& gam
 	LoadDetails(launcher, game, ++launcher->details_request);
 }
 
+// An entry's Tag: the option it is (its text), the pipeline mode (as a number) or the activity.
+winrt::Windows::Foundation::IInspectable EntryTag(winrt::Windows::Foundation::IInspectable const& entry) {
+	const auto element = entry.try_as<xaml::FrameworkElement>();
+	return element != nullptr ? element.Tag() : nullptr;
+}
+
+// Focuses the entry of `list` whose Tag is `tag`.
+void FocusEntry(const xaml::Controls::ListView& list, winrt::hstring const& tag) {
+	for (const auto& entry: list.Items()) {
+		if (winrt::unbox_value_or<winrt::hstring>(EntryTag(entry), L"") == tag) {
+			if (auto item = list.ContainerFromItem(entry).try_as<xaml::Controls::Control>()) {
+				item.Focus(xaml::FocusState::Keyboard);
+			}
+			return;
+		}
+	}
+}
+
+// An entry of the options: its text, and on the right what it is set to (`value`, for Pipelines).
+xaml::Controls::Grid OptionEntry(const wchar_t* option, xaml::Controls::TextBlock* value = nullptr) {
+	xaml::Controls::Grid entry;
+	entry.Tag(winrt::box_value(winrt::hstring(option)));
+	entry.ColumnSpacing(12);
+	for (const auto width: {xaml::GridLengthHelper::FromValueAndType(1.0, xaml::GridUnitType::Star), xaml::GridLengthHelper::Auto()}) {
+		xaml::Controls::ColumnDefinition column;
+		column.Width(width);
+		entry.ColumnDefinitions().Append(column);
+	}
+	xaml::Controls::TextBlock text;
+	text.Text(option);
+	text.TextTrimming(xaml::TextTrimming::CharacterEllipsis);
+	entry.Children().Append(text);
+	if (value != nullptr) {
+		xaml::Controls::TextBlock shown;
+		shown.Foreground(xaml::Application::Current().Resources().Lookup(winrt::box_value(L"SystemControlForegroundBaseMediumBrush")).as<xaml::Media::Brush>());
+		xaml::Controls::Grid::SetColumn(shown, 1);
+		entry.Children().Append(shown);
+		*value = shown;
+	}
+	return entry;
+}
+
+// The line between Play's entries and the others: not an entry, focus passes over it.
+xaml::Controls::ListViewItem OptionsLine() {
+	xaml::Controls::ListViewItem item;
+	item.IsEnabled(false);
+	item.IsTabStop(false);
+	item.MinHeight(0);
+	item.Height(13);
+	item.HorizontalContentAlignment(xaml::HorizontalAlignment::Stretch);
+	xaml::Shapes::Rectangle line;
+	line.Height(1);
+	line.Fill(xaml::Application::Current().Resources().Lookup(winrt::box_value(L"SystemControlForegroundBaseLowBrush")).as<xaml::Media::Brush>());
+	line.VerticalAlignment(xaml::VerticalAlignment::Center);
+	item.Content(line);
+	return item;
+}
+
+// The activities a game can start in, as upstream's launcher finds them: its param.json permits the launchActivity game intent, and the IDs
+// come from the activity enums of its UDS package. Nothing when the game doesn't take that intent.
+std::optional<std::vector<std::string>> ReadActivities(const GameEntry& game) {
+	const auto text     = ReadGameText(game.folder / L"sce_sys" / L"param.json");
+	const auto manifest = text ? GameManifest::parse(*text, nullptr, false) : GameManifest {};
+	const auto intent   = manifest.is_object() ? manifest.find("gameIntent") : manifest.end();
+	if (intent == manifest.end() || !intent->is_object()) {
+		return std::nullopt;
+	}
+	const auto permitted = intent->find("permittedIntents");
+	if (permitted == intent->end() || !permitted->is_array() ||
+	    !std::any_of(permitted->begin(), permitted->end(), [](const GameManifest& entry) {
+		    const auto type = entry.is_object() ? entry.find("intentType") : entry.end();
+		    return type != entry.end() && type->is_string() && type->get_ref<const std::string&>() == "launchActivity";
+	    })) {
+		return std::nullopt;
+	}
+	const auto inner = Common::Trophies::UdsPackagePath(0);
+	const auto ids   = Common::Trophies::LoadActivityIds(IsArchivePath(game.folder) ? Common::MakeArchivePath(game.folder, inner) : game.folder / inner);
+	return std::vector<std::string>(ids.begin(), ids.end());
+}
+
+// Launch activity...'s level: the game's activities, or a line saying why there are none (not an activity: no Tag, selecting it does
+// nothing).
+void FillActivities(const std::shared_ptr<Launcher>& launcher) {
+	auto items = launcher->level_items.Items();
+	items.Clear();
+	const auto line = [&](const wchar_t* text) {
+		xaml::Controls::TextBlock entry;
+		entry.Text(text);
+		entry.TextWrapping(xaml::TextWrapping::Wrap);
+		items.Append(entry);
+	};
+	if (!launcher->activities_read) {
+		line(L"Reading the game's activities…");
+	} else if (!launcher->activities) {
+		line(L"The game can't be started in an activity.");
+	} else if (launcher->activities->empty()) {
+		line(L"The game lists no activities.");
+	} else {
+		for (const auto& id: *launcher->activities) {
+			xaml::Controls::TextBlock entry;
+			entry.Text(winrt::to_hstring(id));
+			entry.Tag(winrt::box_value(winrt::to_hstring(id)));
+			items.Append(entry);
+		}
+		SetHints(launcher->level_hints, {{XboxButton::A, L"Play"}, {XboxButton::B, L"Back"}});
+		return;
+	}
+	SetHints(launcher->level_hints, {{XboxButton::B, L"Back"}});
+}
+
+// Reads the game's activities for Launch activity...; shows them at once when its level is open.
+winrt::fire_and_forget LoadActivities(std::shared_ptr<Launcher> launcher, GameEntry game, uint32_t request) {
+	co_await winrt::resume_background();
+	auto activities = ReadActivities(game);
+	co_await winrt::resume_foreground(launcher->dispatcher);
+	if (request != launcher->options_request) {
+		co_return;
+	}
+	launcher->activities      = std::move(activities);
+	launcher->activities_read = true;
+	if (launcher->level.Visibility() == xaml::Visibility::Visible && launcher->level_from == OPTION_ACTIVITY) {
+		FillActivities(launcher);
+		launcher->level.UpdateLayout();
+		if (auto item = launcher->level_items.ContainerFromIndex(0).try_as<xaml::Controls::Control>()) {
+			item.Focus(xaml::FocusState::Keyboard);
+		}
+	}
+}
+
 void CloseDetails(const std::shared_ptr<Launcher>& launcher) {
 	++launcher->details_request;
 	launcher->details.Visibility(xaml::Visibility::Collapsed);
 	launcher->options_panel.Visibility(xaml::Visibility::Visible);
 	launcher->options_panel.UpdateLayout();
-	if (auto item = launcher->options_items.ContainerFromIndex(launcher->details_item_index).try_as<xaml::Controls::Control>()) {
+	FocusEntry(launcher->options_items, OPTION_DETAILS);
+}
+
+// Shows the level below the options with `title` and the entries and hints already set; focuses the entry at `focus`.
+void OpenLevel(const std::shared_ptr<Launcher>& launcher, const wchar_t* from, const wchar_t* title, uint32_t focus) {
+	launcher->level_from = from;
+	launcher->level_title.Text(title);
+	launcher->options_main.Visibility(xaml::Visibility::Collapsed);
+	launcher->level.Visibility(xaml::Visibility::Visible);
+	launcher->level.UpdateLayout();
+	if (auto item = launcher->level_items.ContainerFromIndex(focus).try_as<xaml::Controls::Control>()) {
 		item.Focus(xaml::FocusState::Keyboard);
 	}
 }
 
+// Back to the options, at the entry with `focus`.
+void CloseLevel(const std::shared_ptr<Launcher>& launcher, const wchar_t* focus) {
+	launcher->level.Visibility(xaml::Visibility::Collapsed);
+	launcher->options_main.Visibility(xaml::Visibility::Visible);
+	launcher->options_main.UpdateLayout();
+	FocusEntry(launcher->options_items, focus);
+}
+
+// The pipeline modes, each with what it does; a tick at the current one.
+void OpenPipelines(const std::shared_ptr<Launcher>& launcher) {
+	const auto resources = xaml::Application::Current().Resources();
+	const auto current   = LibraryPipelineMode();
+	auto       items     = launcher->level_items.Items();
+	items.Clear();
+	uint32_t focus = 0;
+	for (const auto& choice: PIPELINE_CHOICES) {
+		xaml::Controls::Grid entry;
+		entry.Tag(winrt::box_value(static_cast<int32_t>(choice.mode)));
+		entry.ColumnSpacing(12);
+		entry.Padding({0, 6, 0, 6});
+		for (const auto width: {xaml::GridLengthHelper::FromValueAndType(1.0, xaml::GridUnitType::Star), xaml::GridLengthHelper::Auto()}) {
+			xaml::Controls::ColumnDefinition column;
+			column.Width(width);
+			entry.ColumnDefinitions().Append(column);
+		}
+		xaml::Controls::StackPanel texts;
+		xaml::Controls::TextBlock  name;
+		name.Text(choice.name);
+		xaml::Controls::TextBlock text;
+		text.Text(choice.text);
+		text.Style(resources.Lookup(winrt::box_value(L"CaptionTextBlockStyle")).as<xaml::Style>());
+		text.Foreground(resources.Lookup(winrt::box_value(L"SystemControlForegroundBaseMediumBrush")).as<xaml::Media::Brush>());
+		text.TextWrapping(xaml::TextWrapping::Wrap);
+		texts.Children().Append(name);
+		texts.Children().Append(text);
+		entry.Children().Append(texts);
+		if (choice.mode == current) {
+			xaml::Controls::SymbolIcon tick(xaml::Controls::Symbol::Accept);
+			tick.VerticalAlignment(xaml::VerticalAlignment::Center);
+			xaml::Controls::Grid::SetColumn(tick, 1);
+			entry.Children().Append(tick);
+			focus = items.Size();
+		}
+		items.Append(entry);
+	}
+	SetHints(launcher->level_hints, {{XboxButton::A, L"Select"}, {XboxButton::B, L"Back"}});
+	OpenLevel(launcher, OPTION_PIPELINES, OPTION_PIPELINES, focus);
+}
+
+// The game's activities; selecting one starts the game in it.
+void OpenActivities(const std::shared_ptr<Launcher>& launcher) {
+	FillActivities(launcher);
+	OpenLevel(launcher, OPTION_ACTIVITY, L"Launch activity", 0);
+}
+
 void CloseOptions(const std::shared_ptr<Launcher>& launcher) {
+	++launcher->options_request;
 	launcher->options.Visibility(xaml::Visibility::Collapsed);
 	launcher->covers.Children()
 	    .GetAt(static_cast<uint32_t>(launcher->options_index))
@@ -519,11 +793,15 @@ void OpenOptions(const std::shared_ptr<Launcher>& launcher, size_t index) {
 	find(L"OptionsVersion").Text(or_unknown(game.version));
 	auto folder = game.folder;
 	find(L"OptionsFolder").Text(folder.make_preferred().wstring());
+	launcher->pipelines_value.Text(PipelineModeName(LibraryPipelineMode()));
+	launcher->activities.reset();
+	launcher->activities_read = false;
+	LoadActivities(launcher, game, ++launcher->options_request);
+	launcher->level.Visibility(xaml::Visibility::Collapsed);
+	launcher->options_main.Visibility(xaml::Visibility::Visible);
 	launcher->options.Visibility(xaml::Visibility::Visible);
 	launcher->options.UpdateLayout();
-	if (auto first = launcher->options_items.ContainerFromIndex(0).try_as<xaml::Controls::Control>()) {
-		first.Focus(xaml::FocusState::Keyboard);
-	}
+	FocusEntry(launcher->options_items, OPTION_PLAY);
 }
 
 xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<size_t> select, const std::filesystem::path& select_game = {});
@@ -605,7 +883,7 @@ xaml::Controls::Button CreateCover(const std::shared_ptr<Launcher>& launcher, si
 		}
 	});
 	button.Click([launcher, index](auto const&, auto const&) {
-		launcher->actions.play(launcher->games[index]);
+		Play(*launcher, launcher->games[index]);
 	});
 
 	// The game's options, from the Menu button, a right click or the context menu key.
@@ -778,7 +1056,12 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	launcher->title        = find(L"Title").as<xaml::Controls::TextBlock>();
 	launcher->options      = find(L"Options").as<xaml::FrameworkElement>();
 	launcher->options_panel = find(L"OptionsPanel").as<xaml::FrameworkElement>();
+	launcher->options_main  = find(L"OptionsMain").as<xaml::FrameworkElement>();
 	launcher->options_items = find(L"OptionsItems").as<xaml::Controls::ListView>();
+	launcher->level         = find(L"OptionsLevel").as<xaml::FrameworkElement>();
+	launcher->level_title   = find(L"OptionsLevelTitle").as<xaml::Controls::TextBlock>();
+	launcher->level_items   = find(L"OptionsLevelItems").as<xaml::Controls::ListView>();
+	launcher->level_hints   = find(L"OptionsLevelHints").as<xaml::Controls::Border>();
 	launcher->details       = find(L"Details").as<xaml::FrameworkElement>();
 	launcher->details_scroll = find(L"DetailsScroll").as<xaml::Controls::ScrollViewer>();
 	launcher->details_rows   = find(L"DetailsRows").as<xaml::Controls::StackPanel>();
@@ -786,42 +1069,53 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	SetHints(find(L"Hints").as<xaml::Controls::Border>(),
 	         {{XboxButton::A, L"Play"}, {XboxButton::Y, L"Scan again"}, {XboxButton::Menu, L"Options"}});
 	SetHints(find(L"OptionsHints").as<xaml::Controls::Border>(), {{XboxButton::A, L"Select"}, {XboxButton::B, L"Back"}});
-	launcher->options_items.Items().Append(winrt::box_value(OPTION_PLAY));
-	launcher->options_items.Items().Append(winrt::box_value(OPTION_PLAY_BUILD));
-	launcher->options_items.Items().Append(winrt::box_value(OPTION_BUILD_PLAY));
 	SetHints(find(L"DetailsHints").as<xaml::Controls::Border>(), {{XboxButton::B, L"Back"}});
-	launcher->details_item_index = launcher->options_items.Items().Size();
-	launcher->options_items.Items().Append(winrt::box_value(OPTION_DETAILS));
-	launcher->options_items.Items().Append(winrt::box_value(OPTION_CHEATS));
-	launcher->options_items.Items().Append(winrt::box_value(OPTION_HIDE));
+	auto options = launcher->options_items.Items();
+	options.Append(OptionEntry(OPTION_PIPELINES, &launcher->pipelines_value));
+	options.Append(OptionEntry(OPTION_PLAY));
+	options.Append(OptionEntry(OPTION_ACTIVITY));
+	options.Append(OptionsLine());
+	options.Append(OptionEntry(OPTION_DETAILS));
+	options.Append(OptionEntry(OPTION_CHEATS));
+	options.Append(OptionEntry(OPTION_HIDE));
 	launcher->options_items.ItemClick([launcher](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
-		const auto  item = winrt::unbox_value<winrt::hstring>(args.ClickedItem());
-		const auto& game = launcher->games[launcher->options_index];
-		if (item == OPTION_PLAY) {
-			launcher->actions.play(game);
-		} else if (item == OPTION_PLAY_BUILD) {
-			// The pipeline cache takes the request at the game's first frame and builds in the background.
-			Common::PipelinePrewarm::Request();
-			launcher->actions.play(game);
-		} else if (item == OPTION_BUILD_PLAY) {
-			// The game's code starts once the pipeline cache built them (Emulator::Run); the launch screen shows how far it is.
-			Common::PipelinePrewarm::RequestBeforeStart();
-			launcher->actions.play(game);
-		} else if (item == OPTION_DETAILS) {
+		const auto  option = winrt::unbox_value_or<winrt::hstring>(EntryTag(args.ClickedItem()), L"");
+		const auto& game   = launcher->games[launcher->options_index];
+		if (option == OPTION_PIPELINES) {
+			OpenPipelines(launcher);
+		} else if (option == OPTION_PLAY) {
+			Play(*launcher, game);
+		} else if (option == OPTION_ACTIVITY) {
+			OpenActivities(launcher);
+		} else if (option == OPTION_DETAILS) {
 			OpenDetails(launcher, game);
-		} else if (item == OPTION_CHEATS) {
+		} else if (option == OPTION_CHEATS) {
 			launcher->actions.open_cheats(game);
-		} else {
+		} else if (option == OPTION_HIDE) {
 			HideGame(game.folder);
 			xaml::Window::Current().Content(CreatePage(launcher->actions, false, launcher->options_index));
 		}
 	});
-	// B (or Escape) closes the options.
+	// A pipeline mode is kept for every game (then on to Play); an activity starts the game in it.
+	launcher->level_items.ItemClick([launcher](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
+		const auto tag = EntryTag(args.ClickedItem());
+		if (launcher->level_from == OPTION_PIPELINES) {
+			const auto mode = static_cast<PipelineMode>(winrt::unbox_value_or<int32_t>(tag, 0));
+			SetLibraryPipelineMode(mode);
+			launcher->pipelines_value.Text(PipelineModeName(mode));
+			CloseLevel(launcher, OPTION_PLAY);
+		} else if (const auto activity = winrt::unbox_value_or<winrt::hstring>(tag, L""); !activity.empty()) {
+			Play(*launcher, launcher->games[launcher->options_index], winrt::to_string(activity));
+		}
+	});
+	// B (or Escape) goes back a level, or closes the options.
 	launcher->options.KeyDown([launcher](auto const&, xaml::Input::KeyRoutedEventArgs const& args) {
 		if (args.Key() == winrt::Windows::System::VirtualKey::GamepadB ||
 		    args.Key() == winrt::Windows::System::VirtualKey::Escape) {
 			args.Handled(true);
-			if (launcher->details.Visibility() == xaml::Visibility::Visible) {
+			if (launcher->level.Visibility() == xaml::Visibility::Visible) {
+				CloseLevel(launcher, launcher->level_from);
+			} else if (launcher->details.Visibility() == xaml::Visibility::Visible) {
 				CloseDetails(launcher);
 			} else {
 				CloseOptions(launcher);

@@ -134,7 +134,7 @@ static void LoadElf(const std::filesystem::path& elf, bool dbg_print_reloc = fal
 
 static void Execute(const std::filesystem::path& game_patch) {
 	std::thread([game_patch] {
-		// The library's "Build known pipelines, then play": the game's code runs once they are built, four at a time (Xbox).
+		// The library's pipeline mode "Build known ones first": the game's code runs once they are built, four at a time (Xbox).
 		Common::PipelinePrewarm::BuildBeforeStart(4);
 		Common::Singleton<Loader::RuntimeLinker>::Instance()->Execute(game_patch);
 	}).detach();
