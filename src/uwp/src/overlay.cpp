@@ -64,6 +64,11 @@ constexpr size_t GRAPH_FRAMES    = 120;
 constexpr double GRAPH_WINDOW_MS = 10000.0;
 constexpr double GRAPH_SLOT_MS   = 50.0;
 constexpr double STALL_MS        = 250.0;
+// The swap file's stripe at the bottom of the graph (Full): its height; the traffic at which its white is brightest; the share of a stretch
+// spent waiting at which its black is darkest.
+constexpr double SWAP_LANE_HEIGHT     = 4.0;
+constexpr double SWAP_FULL_BYTES_PER_S = 32.0 * 1048576.0;
+constexpr double SWAP_FULL_WAIT_SHARE  = 0.25;
 // The graph's range: a frame at 60 fps sits at a third of its height.
 constexpr double GRAPH_MAX_MS = 50.0;
 // The log lines kept; the settings choose how many of them show (overlay_log_lines, at least 2).
@@ -143,6 +148,7 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
       <!-- The frame times of the last GRAPH_WINDOW_MS, scrolling with time; stalls as red blocks. -->
       <Grid x:Name="Graph" Height="48" Background="#14FFFFFF">
         <Canvas x:Name="StallMarks" />
+        <Canvas x:Name="SwapMarks" />
         <Line x:Name="Budget" Stroke="#40FFFFFF" StrokeThickness="1" StrokeDashArray="3,3" />
         <Polyline x:Name="Frames" Stroke="#7CC24D" StrokeThickness="1.5" />
       </Grid>
@@ -785,6 +791,20 @@ struct GameOverlay::State {
 	bool                       stalled = false;
 	// The graph's red blocks (made once, then moved) and its size when it was last drawn.
 	std::vector<xaml::Shapes::Rectangle> stall_blocks;
+	// The swap file's stripe (Full): the traffic to and from it and the game's waits for it between fetches, over the graph's time span; the
+	// totals at the last fetch (ClockMs, bytes moved, ns waited); and its marks (made once, then moved): a white block per stretch of traffic,
+	// a black one per wait.
+	struct SwapSample {
+		double   from_ms   = 0.0;
+		double   to_ms     = 0.0;
+		uint64_t moved     = 0;
+		uint64_t waited_ns = 0;
+	};
+	std::deque<SwapSample>                                               swap_samples;
+	std::optional<SwapSample>                                            swap_last;
+	xaml::Controls::Canvas                                               swap_marks {nullptr};
+	bool                                                                 swap_shown_in_graph = false;
+	std::vector<std::pair<xaml::Shapes::Rectangle, xaml::Shapes::Rectangle>> swap_blocks;
 	double                               graph_width  = 0.0;
 	double                               graph_height = 0.0;
 	xaml::DispatcherTimer      frame_timer {nullptr};
@@ -894,6 +914,8 @@ struct GameOverlay::State {
 	void UpdateNotice();
 	void UpdateFrame();
 	void DrawGraph();
+	void RecordSwap(const MemoryTotals& totals, double at_ms);
+	void DrawSwap(double width, double height, const std::function<double(double)>& x_of);
 	void DrawGraphWhileShown();
 	void Fetch(std::stop_token stop);
 	void ShowSwapFile(bool shown);
@@ -906,6 +928,7 @@ struct GameOverlay::State {
 		MemoryTotals                    memory;
 		std::optional<ShaderStatistics> shaders;
 		std::optional<GameMemoryTotals> game_memory;
+		double                          at_ms = 0.0; // when (ClockMs)
 	};
 	std::mutex                  fetched_mutex;
 	std::optional<Fetched>      fetched;        // the fetcher's latest, under fetched_mutex
@@ -960,6 +983,7 @@ void GameOverlay::State::Update() {
 
 	// Its parts. The GPU's memory is part of RAM on the Xbox; on a PC it is on the graphics card, so the rest is RAM minus the game's memory there.
 	const auto& totals = values.memory;
+	RecordSwap(totals, values.at_ms);
 	game_memory.Text(Megabytes(totals.game));
 	gpu_memory.Text(Megabytes(totals.gpu) + (IsXbox() ? std::wstring() : std::wstring(L" (graphics card)")));
 	const uint64_t parts = totals.game + (IsXbox() ? totals.gpu : 0);
@@ -1178,6 +1202,74 @@ void GameOverlay::State::DrawGraph() {
 	for (size_t i = stalls.size(); i < stall_blocks.size(); i++) {
 		stall_blocks[i].Visibility(xaml::Visibility::Collapsed);
 	}
+	DrawSwap(width, height, x_of);
+}
+
+// The swap file's traffic and the game's waits for it between fetches (the pager's totals, fetched at `at_ms`), kept for the graph's time
+// span. A fetch seen before adds nothing; after a gap (the overlay hidden), counting starts anew.
+void GameOverlay::State::RecordSwap(const MemoryTotals& totals, double at_ms) {
+	if (!totals.pager || at_ms <= 0.0 || (swap_last && at_ms <= swap_last->to_ms)) {
+		return;
+	}
+	const uint64_t moved = totals.swapped_out + totals.swapped_in;
+	if (swap_last && at_ms - swap_last->to_ms <= 4.0 * static_cast<double>(UPDATE_INTERVAL.count()) && moved >= swap_last->moved &&
+	    totals.swap_wait_ns >= swap_last->waited_ns && (moved != swap_last->moved || totals.swap_wait_ns != swap_last->waited_ns)) {
+		swap_samples.push_back({swap_last->to_ms, at_ms, moved - swap_last->moved, totals.swap_wait_ns - swap_last->waited_ns});
+	}
+	swap_last = SwapSample {0.0, at_ms, moved, totals.swap_wait_ns};
+	while (!swap_samples.empty() && swap_samples.front().to_ms < EmulatorHost::ClockMs() - GRAPH_WINDOW_MS) {
+		swap_samples.pop_front();
+	}
+}
+
+// The stripe at the bottom of the graph, Full only: white over each stretch with traffic (brighter with more), and a black notch for the time
+// the game waited in it (as long as the wait on the graph's time axis, darker the larger its share of the stretch).
+void GameOverlay::State::DrawSwap(double width, double height, const std::function<double(double)>& x_of) {
+	size_t used = 0;
+	if (detail == OVERLAY_FULL && swap_shown_in_graph) {
+		const double top = height - SWAP_LANE_HEIGHT;
+		for (const auto& sample: swap_samples) {
+			const double left  = std::clamp(x_of(sample.from_ms), 0.0, width);
+			const double right = std::clamp(x_of(sample.to_ms), 0.0, width);
+			const double span  = sample.to_ms - sample.from_ms;
+			if (right <= left || span <= 0.0) {
+				continue;
+			}
+			if (used == swap_blocks.size()) {
+				xaml::Shapes::Rectangle traffic;
+				traffic.Fill(xaml::Media::SolidColorBrush(winrt::Windows::UI::Colors::White()));
+				traffic.Height(SWAP_LANE_HEIGHT);
+				xaml::Shapes::Rectangle wait;
+				wait.Fill(xaml::Media::SolidColorBrush(winrt::Windows::UI::Colors::Black()));
+				wait.Height(SWAP_LANE_HEIGHT);
+				swap_marks.Children().Append(traffic);
+				swap_marks.Children().Append(wait);
+				swap_blocks.emplace_back(traffic, wait);
+			}
+			const auto& [traffic, wait] = swap_blocks[used++];
+			traffic.Visibility(VisibleIf(sample.moved > 0));
+			if (sample.moved > 0) {
+				const double rate = static_cast<double>(sample.moved) / (span / 1000.0);
+				traffic.Opacity(0.35 + 0.55 * std::min(rate / SWAP_FULL_BYTES_PER_S, 1.0));
+				traffic.Width(right - left);
+				xaml::Controls::Canvas::SetLeft(traffic, left);
+				xaml::Controls::Canvas::SetTop(traffic, top);
+			}
+			wait.Visibility(VisibleIf(sample.waited_ns > 0));
+			if (sample.waited_ns > 0) {
+				const double waited_ms = static_cast<double>(sample.waited_ns) / 1e6;
+				const double notch     = std::clamp(width * waited_ms / GRAPH_WINDOW_MS, 3.0, right - left);
+				wait.Opacity(0.15 + 0.85 * std::min(waited_ms / span / SWAP_FULL_WAIT_SHARE, 1.0));
+				wait.Width(notch);
+				xaml::Controls::Canvas::SetLeft(wait, (left + right - notch) / 2.0);
+				xaml::Controls::Canvas::SetTop(wait, top);
+			}
+		}
+	}
+	for (size_t i = used; i < swap_blocks.size(); i++) {
+		swap_blocks[i].first.Visibility(xaml::Visibility::Collapsed);
+		swap_blocks[i].second.Visibility(xaml::Visibility::Collapsed);
+	}
 }
 
 // The graph is drawn with every frame the app shows (CompositionTarget::Rendering) while the overlay shows it.
@@ -1195,7 +1287,8 @@ void GameOverlay::State::Fetch(std::stop_token stop) {
 	std::mutex wait_mutex;
 	while (!stop.stop_requested()) {
 		if (fetching.load()) {
-			Fetched values {CurrentMemoryTotals(), CurrentShaderStatistics(), fetch_game_memory.load() ? CurrentGameMemory() : std::nullopt};
+			Fetched values {CurrentMemoryTotals(), CurrentShaderStatistics(), fetch_game_memory.load() ? CurrentGameMemory() : std::nullopt,
+			               EmulatorHost::ClockMs()};
 			std::lock_guard lock(fetched_mutex);
 			fetched = std::move(values);
 		}
@@ -1794,6 +1887,7 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.budget           = find(L"Budget").as<xaml::Shapes::Line>();
 	state.frames           = find(L"Frames").as<xaml::Shapes::Polyline>();
 	state.stall_marks      = find(L"StallMarks").as<xaml::Controls::Canvas>();
+	state.swap_marks       = find(L"SwapMarks").as<xaml::Controls::Canvas>();
 	state.fps_brush        = state.fps.Foreground();
 	state.stall_brush      = xaml::Media::SolidColorBrush(winrt::Windows::UI::Color {0xFF, 0xF0, 0x95, 0x95});
 	state.stall_fill_brush = xaml::Media::SolidColorBrush(winrt::Windows::UI::Color {0x47, 0xE2, 0x4B, 0x4A});
@@ -1902,6 +1996,7 @@ void GameOverlay::Apply(const AppSettings& settings) {
 	state.log_shown          = settings.overlay_log;
 	state.controllers_shown  = settings.overlay_controllers;
 	state.cpu_shown          = settings.overlay_cpu;
+	state.swap_shown_in_graph = settings.overlay_swap;
 	state.log_lines          = std::clamp<size_t>(settings.overlay_log_lines, 2, LOG_LINES);
 	state.headset_mic_option = settings.headset_mic;
 	state.notice_enabled     = settings.compile_notice;
@@ -1929,18 +2024,32 @@ void GameOverlay::Apply(const AppSettings& settings) {
 
 void AddOverlaySettings(xaml::Controls::Panel const& overlay, xaml::Controls::Panel const& on_screen, xaml::Controls::StackPanel const& explanation,
                         std::shared_ptr<AppSettings> settings, std::function<void()> changed) {
+	// The swap file's stripe in the graph is Full's: its switch shows while Full is chosen.
+	const auto swap_tile = std::make_shared<xaml::Controls::Button>(nullptr);
+	const auto full      = [](size_t index) { return index == 1 + OVERLAY_FULL; };
+	const size_t current = OverlayShown() ? 1 + std::min(settings->overlay_detail, OVERLAY_DETAILED) : 0;
 	AddChoice(
-	    overlay, explanation, L"Overlay", {L"Off", L"Frame rate", L"Compact", L"Full", L"Detailed"},
-	    OverlayShown() ? 1 + std::min(settings->overlay_detail, OVERLAY_DETAILED) : 0,
-	    [settings, changed](size_t index) {
+	    overlay, explanation, L"Overlay", {L"Off", L"Frame rate", L"Compact", L"Full", L"Detailed"}, current,
+	    [settings, changed, swap_tile, full](size_t index) {
 		    SetOverlayShown(index != 0);
 		    if (index != 0) {
 			    settings->overlay_detail = static_cast<uint32_t>(index - 1);
+		    }
+		    if (*swap_tile != nullptr) {
+			    swap_tile->Visibility(VisibleIf(full(index)));
 		    }
 		    changed();
 	    },
 	    {L"Each step shows more, from just the frame rate up to details for finding performance problems.",
 	     L"During a game, hold both triggers and press [View] + [Menu] to show or hide it."});
+	*swap_tile = AddSwitch(
+	    overlay, explanation, L"Swap file in the graph", settings->overlay_swap,
+	    [settings, changed](bool on) {
+		    settings->overlay_swap = on;
+		    changed();
+	    },
+	    {L"Under the frame times: white where data went to or came from the swap file, black where the game waited for it."});
+	swap_tile->Visibility(VisibleIf(full(current)));
 	AddChoice(overlay, explanation, L"Overlay size", {L"Small", L"Medium", L"Large"}, std::min<uint32_t>(settings->overlay_size, 2),
 	          [settings, changed](size_t index) {
 		          settings->overlay_size = static_cast<uint32_t>(index);
