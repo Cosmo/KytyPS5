@@ -39,9 +39,8 @@ struct Presenter::Frame {
 	uint32_t                      height       = 0;
 	D3D12_RESOURCE_STATES         state        = D3D12_RESOURCE_STATE_COMMON;
 	bool                          blank        = false;
-	// An HDR10 frame: PQ pixels (or linear nits in a 16-bit float frame) that the blit converts to SDR.
-	bool                          hdr          = false;
-	bool                          linear       = false;
+	// The VideoOut format's source flags (VideoOutSourceFlags): PQ (4) and linear (8). The blit converts such a frame to SDR.
+	uint32_t                      source_flags = 0;
 	std::array<float, 4>          color        = {0.0f, 0.0f, 0.0f, 1.0f};
 	uint64_t                      present_tick = 0;
 	bool                          busy         = false;
@@ -448,7 +447,7 @@ public:
 		list->SetPipelineState(m_pipelines[overlay ? 1 : 0].Get());
 		list->SetGraphicsRoot32BitConstants(0, D3D12::RuntimeDataDwords, constants, 0);
 		// The base layer (the main bus) ignores alpha, as upstream's.
-		const uint32_t flags = (premultiplied ? 1u : 0u) | (frame.hdr ? 4u : 0u) | (frame.linear ? 8u : 0u) | (overlay ? 0u : 16u);
+		const uint32_t flags = (premultiplied ? 1u : 0u) | frame.source_flags | (overlay ? 0u : 16u);
 		list->SetGraphicsRoot32BitConstants(1, 1, &flags, 0);
 		list->SetGraphicsRootDescriptorTable(2, gpu);
 		const D3D12_VIEWPORT viewport {static_cast<float>(rect.left), static_cast<float>(rect.top), static_cast<float>(width), static_cast<float>(height),
@@ -758,14 +757,14 @@ struct Presenter::Impl {
 	void Present(bool interpolate = false);
 
 	// The game's picture (or the frame generated before it) onto rect of the back buffer: with FSR 1 when it is on and the picture is smaller than
-	// rect, else with the blitter. Not for HDR10 pictures: FSR 1 has no conversion to SDR.
+	// rect, else with the blitter. Not for HDR10 or linear pictures: FSR 1 has no conversion to SDR.
 	void DrawBase(ID3D12GraphicsCommandList* list, const Frame& frame, D3D12_CPU_DESCRIPTOR_HANDLE target, const D3D12_RECT& rect,
 	              ID3D12Resource* generated = nullptr) {
 		const auto mode   = Config::GetFsr1Upscaling();
 		const auto width  = static_cast<uint32_t>(rect.right - rect.left);
 		const auto height = static_cast<uint32_t>(rect.bottom - rect.top);
 		bool       scaled = false;
-		if (mode != 0 && !frame.hdr && !frame.linear && (frame.width < width || frame.height < height)) {
+		if (mode != 0 && frame.source_flags == 0 && (frame.width < width || frame.height < height)) {
 			if (fsr1 == nullptr) {
 				fsr1 = std::make_unique<Fsr1Scaler>(window.graphic_ctx, renderer.GetPipelineCache().GetCompiler());
 			}
@@ -821,10 +820,10 @@ Presenter::~Presenter() {
 	m_impl->present_scheduler.Wait(m_impl->present_scheduler.CurrentTick() - 1);
 }
 
-Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info, bool hdr,
+Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info, uint64_t video_out_format,
                                           bool /*headset*/, [[maybe_unused]] bool main_bus) {
 	KYTY_PROFILER_FUNCTION();
-	// No HDR output here (IsHdrSupported): an HDR10 frame is converted to SDR when it is shown (FrameBlitter::Record).
+	// No HDR output here (IsHdrSupported): an HDR10 or linear frame is converted to SDR when it is shown (FrameBlitter::Record).
 	// (No headset either: the OpenXR output is Vulkan only, and the headset port shows like the main one.)
 	EXIT_IF(buffer.IsInvalid());
 	auto*             frame = m_impl->frames.Acquire();
@@ -855,8 +854,7 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	frame->Configure(m_impl->window.graphic_ctx, image.backing.extent.width, image.backing.extent.height, frame_format);
 	frame->CopyFrom(buffer, image, SurfaceView(info));
 	frame->blank  = false;
-	frame->hdr    = hdr;
-	frame->linear = frame_format == vk::Format::eR16G16B16A16Sfloat;
+	frame->source_flags = VideoOutSourceFlags(video_out_format);
 #ifdef KYTY_HAS_FSR
 	if (fx) {
 		const bool generation = Config::FsrFrameGenerationEnabled();
@@ -865,7 +863,7 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 			fx->SkipFlip();
 		} else if (generation) {
 			frame->generated_valid = fx->Interpolate(buffer, frame->image.Get(), frame->format.view,
-			                                         hdr || frame->linear, frame->generated);
+			                                         frame->source_flags != 0, frame->generated);
 		}
 		m_impl->generation_on = generation;
 	}
@@ -888,7 +886,7 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t /*width*/, uint32_t /*he
 	}
 #endif
 	frame->blank = true;
-	frame->hdr   = false;
+	frame->source_flags = 0;
 	frame->color = {0.0f, 0.0f, 0.0f, opaque ? 1.0f : 0.0f};
 	return *frame;
 }
