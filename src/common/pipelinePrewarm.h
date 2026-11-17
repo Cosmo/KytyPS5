@@ -6,7 +6,7 @@
 #include <functional>
 #include <string>
 
-// The game menu's "Compile pipelines" and the library's "Play and build known pipelines". The Xbox's driver keeps no compiled pipelines across runs, so a game compiles each one again
+// The game menu's "Compile pipelines" and the library's pipeline mode "Build known ones alongside". The Xbox's driver keeps no compiled pipelines across runs, so a game compiles each one again
 // when it first needs it, which stalls the game. This asks the D3D12 pipeline cache to build the pipelines earlier runs described, in the background
 // (PipelineCache::StartPrewarm); the menu follows it through GetStatus.
 namespace Common::PipelinePrewarm {
@@ -28,7 +28,7 @@ inline void Request() {
 	Detail::requested = true;
 }
 
-// The library's "Build known pipelines, then play": the game starts once the pipelines earlier runs described are built.
+// The library's pipeline mode "Build known ones first": the game starts once the pipelines earlier runs described are built.
 inline void RequestBeforeStart() {
 	Detail::before_start = true;
 }
