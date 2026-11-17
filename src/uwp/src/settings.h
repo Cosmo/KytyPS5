@@ -56,6 +56,9 @@ struct AppSettings {
 	// Whether the overlay shows the end of the emulator's log, and the connected controllers.
 	bool overlay_log         = false;
 	bool overlay_controllers = true;
+	// The CPU panel at the top right (Controllers moves to its left): each core's load and the busiest threads. Not with Detailed, which lists
+	// the threads itself. Off.
+	bool overlay_cpu = false;
 	// A notice at the bottom right while the emulator translates shaders or builds pipelines, overlay or not. On.
 	bool compile_notice = true;
 	// The settings page, Controller (ControllerOptions in input.h): the games' adaptive trigger effects rumble the triggers' motors. On.
