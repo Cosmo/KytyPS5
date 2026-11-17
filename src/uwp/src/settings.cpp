@@ -101,6 +101,7 @@ AppSettings LoadSettings() {
 	read("overlay_detail", settings.overlay_detail);
 	read("overlay_log", settings.overlay_log);
 	read("overlay_controllers", settings.overlay_controllers);
+	read("overlay_cpu", settings.overlay_cpu);
 	read("compile_notice", settings.compile_notice);
 	read("xbox_gpu_limits", settings.xbox_gpu_limits);
 	read("xbox_limits_dxil_parts", settings.xbox_limits_dxil_parts);
@@ -202,6 +203,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["overlay_detail"]      = settings.overlay_detail;
 	json["overlay_log"]         = settings.overlay_log;
 	json["overlay_controllers"] = settings.overlay_controllers;
+	json["overlay_cpu"]         = settings.overlay_cpu;
 	json["compile_notice"]      = settings.compile_notice;
 	json["guest_ram_budget_mb"]        = settings.guest_ram_budget_mb;
 	json["texture_mip_skip"]           = settings.texture_mip_skip;
