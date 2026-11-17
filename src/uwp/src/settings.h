@@ -59,6 +59,8 @@ struct AppSettings {
 	// The CPU panel at the top right (Controllers moves to its left): each core's load and the busiest threads. Not with Detailed, which lists
 	// the threads itself. Off.
 	bool overlay_cpu = false;
+	// Full's frame graph with the swap file's stripe under the frame times. Off.
+	bool overlay_swap = false;
 	// A notice at the bottom right while the emulator translates shaders or builds pipelines, overlay or not. On.
 	bool compile_notice = true;
 	// The settings page, Controller (ControllerOptions in input.h): the games' adaptive trigger effects rumble the triggers' motors. On.
