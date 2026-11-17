@@ -7,15 +7,17 @@
 
 #include <filesystem>
 #include <functional>
+#include <string>
 
 namespace Kyty::Uwp {
 
 // The library: the games of the game folders (as of the last scan) as a row of covers over the
 // selected game's background. A controller, the keyboard or the mouse picks a game; `play` starts
-// it. A game's options (the Menu button, a right click) start it, open its cheats, or hide it until Y (or F5) scans
-// the game folders again.
+// it. A game's options (the Menu button, a right click) pick how games build their pipelines, start it (also in one of its activities),
+// open its cheats, or hide it until Y (or F5) scans the game folders again.
 struct LauncherActions {
-	std::function<void(const GameEntry&)> play;          // starts a game
+	// Starts a game, in an activity (the game options' Launch activity) or normally (empty).
+	std::function<void(const GameEntry&, const std::string&)> play;
 	std::function<void()>                 open_settings; // the View button or the gear button
 	std::function<void()>                 open_trophies; // the trophy button left of the gear
 	std::function<void()>                 open_controls; // the controller button, the first of them
