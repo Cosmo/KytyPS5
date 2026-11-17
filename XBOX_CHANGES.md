@@ -1,6 +1,6 @@
 # Xbox changes to KytyPS5
 
-KytyPS5 (upstream `KytyPS5/KytyPS5` at `1e871718f`) plus what it takes to run on the Xbox Series X: a UWP app with a D3D12 renderer. This branch (`xbox-on-upstream-2026-11-17-1e871718`) has one commit per topic, and each commit adds its row below, so the series can be read, tried and moved to a newer upstream one commit at a time.
+KytyPS5 (upstream `KytyPS5/KytyPS5` at `faec1f45e`) plus what it takes to run on the Xbox Series X: a UWP app with a D3D12 renderer. This branch (`xbox-on-upstream-2026-11-17-faec1f45`) has one commit per topic, and each commit adds its row below, so the series can be read, tried and moved to a newer upstream one commit at a time.
 
 The "Checked" column says how a change was checked when it was made, before the work was regrouped into this series.
 
