@@ -340,8 +340,8 @@ xaml::Controls::Button AddChoice(xaml::Controls::Panel const& panel, xaml::Contr
 	return tile.button;
 }
 
-void AddSwitch(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, const wchar_t* name, bool on,
-               std::function<void(bool)> changed, Paragraphs help) {
+xaml::Controls::Button AddSwitch(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, const wchar_t* name, bool on,
+                                 std::function<void(bool)> changed, Paragraphs help) {
 	auto tile = MakeTile(name, TileKind::Switch);
 	tile.check.Opacity(on ? 1.0 : 0.0);
 	auto state = std::make_shared<bool>(on);
@@ -352,6 +352,7 @@ void AddSwitch(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel co
 	});
 	Explain(tile.button, explanation, help);
 	panel.Children().Append(tile.button);
+	return tile.button;
 }
 
 xaml::Controls::Button AddAction(xaml::Controls::Panel const& panel, xaml::Controls::StackPanel const& explanation, const wchar_t* name,
