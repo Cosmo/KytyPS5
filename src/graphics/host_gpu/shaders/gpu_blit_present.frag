@@ -2,8 +2,8 @@
 #extension GL_GOOGLE_include_directive : require
 
 // Scales a prepared frame onto the swap chain (D3D12 presenter; Vulkan blits instead). An overlay layer is blended as premultiplied alpha: a frame with
-// straight alpha is premultiplied here. An HDR10 frame (PQ, or linear nits) becomes SDR as on upstream's SDR swap chains
-// (gpu_video_out_overlay.frag).
+// straight alpha is premultiplied here. An HDR10 frame (PQ, or linear nits) becomes SDR and a linear frame gets the sRGB transfer, as on upstream's SDR
+// swap chains (gpu_video_out_overlay.frag).
 
 #include "gpu_video_out_hdr10_to_sdr.inc"
 
@@ -22,12 +22,16 @@ void main() {
 		color.a = 1.0;
 	}
 	bool premultiplied = (flags & 1u) != 0u;
-	bool convert       = (flags & PQ_SOURCE) != 0u;
+	bool pq_source     = (flags & PQ_SOURCE) != 0u;
+	bool source_linear = (flags & 8u) != 0u;
+	bool convert       = pq_source || source_linear;
 	if (convert && premultiplied) {
 		color.rgb = color.a > 0.0 ? color.rgb / color.a : vec3(0.0);
 	}
-	if (convert) {
-		color.rgb = Hdr10ToSdr(color.rgb, (flags & 8u) != 0u);
+	if (pq_source) {
+		color.rgb = Hdr10ToSdr(color.rgb, source_linear);
+	} else if (source_linear) {
+		color.rgb = LinearToSrgb(color.rgb);
 	}
 	if (!premultiplied || convert) {
 		color.rgb *= color.a;
