@@ -334,4 +334,20 @@ void ShowAllGames() {
 	WriteAppState(state);
 }
 
+PipelineMode LibraryPipelineMode() {
+	const auto state = ReadAppState();
+	const auto value = state.find("pipeline_mode");
+	if (value == state.end() || !value->is_string()) {
+		return PipelineMode::WhenNeeded;
+	}
+	const auto& mode = value->get_ref<const std::string&>();
+	return mode == "alongside" ? PipelineMode::Alongside : mode == "first" ? PipelineMode::First : PipelineMode::WhenNeeded;
+}
+
+void SetLibraryPipelineMode(PipelineMode mode) {
+	auto state             = ReadAppState();
+	state["pipeline_mode"] = mode == PipelineMode::Alongside ? "alongside" : mode == PipelineMode::First ? "first" : "when_needed";
+	WriteAppState(state);
+}
+
 } // namespace Kyty::Uwp
