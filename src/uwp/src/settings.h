@@ -208,6 +208,12 @@ void                      SetOverlayShown(bool shown);
 void                                             HideGame(const std::filesystem::path& folder);
 void                                             ShowAllGames();
 
+// How the launcher starts a game (the game options' Pipelines, one choice for every game): builds the pipelines when the game needs them, builds
+// the ones earlier runs saved alongside the game (Common::PipelinePrewarm::Request), or builds those first (RequestBeforeStart).
+enum class PipelineMode { WhenNeeded, Alongside, First };
+[[nodiscard]] PipelineMode LibraryPipelineMode();
+void                       SetLibraryPipelineMode(PipelineMode mode);
+
 } // namespace Kyty::Uwp
 
 #endif // EMULATOR_SRC_UWP_SETTINGS_H_

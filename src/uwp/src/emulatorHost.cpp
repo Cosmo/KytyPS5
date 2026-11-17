@@ -222,6 +222,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		}
 		config.console_language          = std::min(settings.console_language, Config::MAX_CONSOLE_LANGUAGE);
 		config.skip_notice_screen        = settings.skip_intro_logos; // sceSystemServiceGetNoticeScreenSkipFlag
+		config.launch_activity           = m_launch_activity;
 		config.controller_vibration_intensity = std::min<uint32_t>(settings.controller_vibration, 100);
 		config.controller_speaker_volume      = std::min<uint32_t>(settings.controller_speaker_volume, 100);
 		config.trophy_enabled            = settings.trophy_notifications;
@@ -318,6 +319,14 @@ void EmulatorHost::RequestExit() {
 	m_exit_changed.notify_all();
 }
 
+void EmulatorHost::SetLaunchActivity(std::string activity) {
+	if (activity.size() > 32 || !std::ranges::all_of(activity, [](char c) { return c >= ' ' && c <= '~'; })) {
+		Log("launch activity left out: it must be 1-32 printable ASCII characters\n");
+		activity.clear();
+	}
+	m_launch_activity = std::move(activity);
+}
+
 void EmulatorHost::QuitToLibrary() {
 	m_restart = true;
 	RequestExit();
@@ -333,7 +342,9 @@ void EmulatorHost::RestartForAddressCollision(uint64_t start, uint64_t size) {
 		return;
 	}
 	const auto arguments = winrt::hstring(L"kyty://run?game=") + winrt::Windows::Foundation::Uri::EscapeComponent(winrt::hstring(m_game_dir.wstring())) +
-	                       L"&retry=" + winrt::to_hstring(attempts + 1);
+	                       L"&retry=" + winrt::to_hstring(attempts + 1) +
+	                       (m_launch_activity.empty() ? winrt::hstring()
+	                                                  : L"&activity=" + winrt::Windows::Foundation::Uri::EscapeComponent(winrt::to_hstring(m_launch_activity)));
 	Log("restarting the app (restart %u): another start puts the host's memory elsewhere\n", attempts + 1);
 	// The process ends when the restart goes through; this only returns when it fails.
 	const auto reason = winrt::Windows::ApplicationModel::Core::CoreApplication::RequestRestartAsync(arguments).get();
