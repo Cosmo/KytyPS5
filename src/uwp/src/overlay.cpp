@@ -3,6 +3,7 @@
 #include "emulatorHost.h"
 #include "fileAccess.h"
 #include "input.h"
+#include "processorLoad.h"
 #include "settingTiles.h"
 #include "settings.h"
 
@@ -69,6 +70,12 @@ constexpr double GRAPH_MAX_MS = 50.0;
 constexpr size_t LOG_LINES    = 20;
 // The rates and the values per frame are over at least this many seconds.
 constexpr double RATE_SECONDS = 1.0;
+// The CPU panel: a core's box and the bars in it, up to 8 boxes a row; the busiest threads it lists, and their bars' width.
+constexpr double CPU_CORE_HEIGHT    = 32.0;
+constexpr double CPU_CORE_PADDING   = 2.0;
+constexpr int32_t CPU_CORES_PER_ROW = 8;
+constexpr size_t CPU_THREADS        = 10;
+constexpr double CPU_THREAD_BAR     = 80.0;
 // The rows of the swap file in the statistics (OverlayMarkup): its group and its row in Waiting, and the gap above the group.
 constexpr std::array<int32_t, 5> SWAP_ROWS {17, 18, 19, 20, 31};
 constexpr uint32_t               SWAP_GAP_ROW = 16;
@@ -287,7 +294,9 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
   </Border>
   </StackPanel>
 
-  <Border x:Name="ControllersPanel" MinWidth="220" HorizontalAlignment="Right" VerticalAlignment="Top" Padding="12"
+  <!-- At the top right: Controllers, and the CPU panel when the settings show it, which then takes the corner. -->
+  <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Right" VerticalAlignment="Top">
+  <Border x:Name="ControllersPanel" MinWidth="220" VerticalAlignment="Top" Padding="12"
           Background="{StaticResource PanelBrush}">
     <StackPanel Spacing="4">
       <TextBlock Typography.NumeralAlignment="Tabular" Text="Controllers" Style="{StaticResource CaptionTextBlockStyle}"
@@ -303,6 +312,41 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
       </Grid>
     </StackPanel>
   </Border>
+
+  <!-- The processor (BuildCpuPanel): the app's share of it and its shape, a box per core with a bar per logical processor (where Windows tells
+       each one's load), which colour is the system's cores, and the busiest threads. -->
+  <Border x:Name="CpuPanel" Width="240" VerticalAlignment="Top" Padding="12" Background="{StaticResource PanelBrush}" Visibility="Collapsed">
+    <StackPanel Spacing="4">
+      <TextBlock Text="CPU" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+      <Grid>
+        <TextBlock x:Name="CpuTotal" Typography.NumeralAlignment="Tabular" />
+        <TextBlock x:Name="CpuShape" Style="{StaticResource CaptionTextBlockStyle}" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                   Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+      </Grid>
+      <Grid x:Name="CpuCores" ColumnSpacing="4" RowSpacing="4" Margin="0,2,0,0" />
+      <StackPanel x:Name="CpuLegend" Orientation="Horizontal" Spacing="12" Visibility="Collapsed">
+        <StackPanel Orientation="Horizontal" Spacing="5">
+          <Ellipse Width="7" Height="7" Fill="#7CC24D" VerticalAlignment="Center" />
+          <TextBlock Text="Game" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="5">
+          <Ellipse Width="7" Height="7" Fill="#8C8C8C" VerticalAlignment="Center" />
+          <TextBlock Text="System" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        </StackPanel>
+      </StackPanel>
+      <TextBlock Text="Busiest threads" Style="{StaticResource CaptionTextBlockStyle}" Margin="0,4,0,0"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+      <!-- A row per thread: its name, its share of one core and a bar for it. -->
+      <Grid x:Name="CpuThreads" ColumnSpacing="8">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="80" />
+        </Grid.ColumnDefinitions>
+      </Grid>
+    </StackPanel>
+  </Border>
+  </StackPanel>
 
   <Border x:Name="LogPanel" Grid.Row="2" Padding="12,8" Background="{StaticResource PanelBrush}">
     <TextBlock Typography.NumeralAlignment="Tabular" x:Name="Log" FontFamily="Consolas" FontSize="12" LineHeight="16" TextWrapping="NoWrap"
@@ -699,6 +743,16 @@ std::wstring SwapPoolText(const MemoryTotals& totals, std::wstring size) {
 	return size + Formatted(L", %.0f%% hits", reads != 0 ? static_cast<double>(totals.pool_hits) * 100.0 / static_cast<double>(reads) : 0.0);
 }
 
+// A thread's name as the CPU panel shows it: the app's window thread, which Windows names "ApplicationView" and more, as "App UI".
+std::wstring ThreadDisplayName(const std::wstring& name) {
+	return name.rfind(L"ApplicationView", 0) == 0 ? std::wstring(L"App UI") : name;
+}
+
+// The CPU panel's colours: the game's bars (as the frame graph), the system's, a core's box and an empty bar.
+xaml::Media::SolidColorBrush CpuBrush(uint8_t alpha, uint8_t red, uint8_t green, uint8_t blue) {
+	return xaml::Media::SolidColorBrush(winrt::Windows::UI::ColorHelper::FromArgb(alpha, red, green, blue));
+}
+
 } // namespace
 
 struct GameOverlay::State {
@@ -806,6 +860,30 @@ struct GameOverlay::State {
 	uint64_t                     started_before = 0;
 	uint64_t                     last_started   = 0;
 
+	// The CPU panel (BuildCpuPanel): whether the settings show it, its parts; a box per core with a bar per logical processor (with the
+	// processor's number), which cores are the system's (ShowSystemCores), each processor's load, and the rows of the busiest threads.
+	struct CoreBox {
+		xaml::Controls::Border                                    box {nullptr};
+		std::vector<std::pair<uint32_t, xaml::Shapes::Rectangle>> bars;
+	};
+	struct ThreadRow {
+		xaml::Controls::TextBlock name {nullptr};
+		xaml::Controls::TextBlock percent {nullptr};
+		xaml::Controls::Grid      track {nullptr};
+		xaml::Shapes::Rectangle   bar {nullptr};
+	};
+	bool                      cpu_shown = false;
+	xaml::UIElement           cpu_panel {nullptr};
+	xaml::Controls::TextBlock cpu_total {nullptr};
+	xaml::UIElement           cpu_legend {nullptr};
+	std::vector<CoreBox>      cpu_cores;
+	std::vector<bool>         cpu_system;
+	ProcessorLoad             processor_load;
+	std::vector<ThreadRow>    cpu_threads;
+
+	void BuildCpuPanel();
+	void UpdateCpuPanel();
+	void ShowSystemCores(std::vector<bool> system);
 	void BuildDetailed(xaml::Controls::Panel const& row, xaml::Media::Brush const& background);
 	void Set(Stat stat, std::wstring const& text, Level level = Level::None);
 	void UpdateDetailed(const std::vector<double>& times, uint64_t used, uint64_t limit, const MemoryTotals& totals);
@@ -1235,6 +1313,8 @@ void GameOverlay::State::UpdateRates(const MemoryTotals& totals) {
 	swap_wait.Text(ms_per_second(delta(totals.swap_wait_ns, before.memory.swap_wait_ns)));
 	if (detail == OVERLAY_DETAILED) {
 		UpdateDetailedRates(current, before, seconds);
+	} else if (cpu_shown) {
+		UpdateCpuPanel();
 	}
 	sample = current;
 }
@@ -1270,6 +1350,164 @@ void GameOverlay::State::Set(Stat stat, std::wstring const& text, Level level) {
 		case Level::Medium: block.Foreground(medium_brush); break;
 		case Level::Bad: block.Foreground(bad_brush); break;
 		default: block.Foreground(value_brush); break;
+	}
+}
+
+// The CPU panel's parts, laid out from the processor the app sees (ProcessorCores): its shape, a box per core with a bar per logical processor,
+// and the rows of the busiest threads. Where Windows doesn't tell each processor's load (ProcessorLoad::Available), there are no boxes.
+void GameOverlay::State::BuildCpuPanel() {
+	const auto find      = [this](const wchar_t* name) { return root.FindName(name); };
+	const auto resources = xaml::Application::Current().Resources();
+	const auto caption   = resources.Lookup(winrt::box_value(L"CaptionTextBlockStyle")).as<xaml::Style>();
+	cpu_panel            = find(L"CpuPanel").as<xaml::UIElement>();
+	cpu_total            = find(L"CpuTotal").as<xaml::Controls::TextBlock>();
+	cpu_legend           = find(L"CpuLegend").as<xaml::UIElement>();
+	cpu_total.Text(L"–");
+
+	// "4 cores · 8 threads"; with one thread a core, "7 cores".
+	const auto& cores      = ProcessorCores();
+	size_t      processors = 0;
+	for (const auto& core: cores) {
+		processors += core.processors.size();
+	}
+	std::wstring shape;
+	if (!cores.empty()) {
+		shape = std::to_wstring(cores.size()) + L" cores";
+		if (processors > cores.size()) {
+			shape += L" · " + std::to_wstring(processors) + L" threads";
+		}
+	}
+	find(L"CpuShape").as<xaml::Controls::TextBlock>().Text(shape);
+
+	auto boxes = find(L"CpuCores").as<xaml::Controls::Grid>();
+	if (cores.empty() || !ProcessorLoad::Available()) {
+		boxes.Visibility(xaml::Visibility::Collapsed);
+	} else {
+		const int32_t columns = std::min<int32_t>(static_cast<int32_t>(cores.size()), CPU_CORES_PER_ROW);
+		for (int32_t column = 0; column < columns; column++) {
+			xaml::Controls::ColumnDefinition definition;
+			definition.Width(xaml::GridLengthHelper::FromValueAndType(1.0, xaml::GridUnitType::Star));
+			boxes.ColumnDefinitions().Append(definition);
+		}
+		for (size_t index = 0; index < cores.size(); index++) {
+			const auto& core = cores[index];
+			if (index % columns == 0) {
+				xaml::Controls::RowDefinition definition;
+				definition.Height(xaml::GridLengthHelper::Auto());
+				boxes.RowDefinitions().Append(definition);
+			}
+			CoreBox entry;
+			xaml::Controls::Grid bars;
+			bars.ColumnSpacing(2.0);
+			for (size_t slot = 0; slot < core.processors.size(); slot++) {
+				xaml::Controls::ColumnDefinition definition;
+				definition.Width(xaml::GridLengthHelper::FromValueAndType(1.0, xaml::GridUnitType::Star));
+				bars.ColumnDefinitions().Append(definition);
+				xaml::Controls::Grid track;
+				track.Background(CpuBrush(0x1A, 0xFF, 0xFF, 0xFF));
+				xaml::Shapes::Rectangle bar;
+				bar.VerticalAlignment(xaml::VerticalAlignment::Bottom);
+				bar.Height(0.0);
+				track.Children().Append(bar);
+				xaml::Controls::Grid::SetColumn(track, static_cast<int32_t>(slot));
+				bars.Children().Append(track);
+				entry.bars.emplace_back(core.processors[slot], bar);
+			}
+			entry.box = xaml::Controls::Border();
+			entry.box.Height(CPU_CORE_HEIGHT);
+			entry.box.Padding(xaml::ThicknessHelper::FromUniformLength(CPU_CORE_PADDING));
+			entry.box.CornerRadius(xaml::CornerRadiusHelper::FromUniformRadius(2.0));
+			entry.box.Child(bars);
+			xaml::Controls::Grid::SetRow(entry.box, static_cast<int32_t>(index) / columns);
+			xaml::Controls::Grid::SetColumn(entry.box, static_cast<int32_t>(index) % columns);
+			boxes.Children().Append(entry.box);
+			cpu_cores.push_back(std::move(entry));
+		}
+		ShowSystemCores(SystemCores());
+	}
+
+	auto list = find(L"CpuThreads").as<xaml::Controls::Grid>();
+	for (size_t index = 0; index < CPU_THREADS; index++) {
+		xaml::Controls::RowDefinition definition;
+		definition.Height(xaml::GridLengthHelper::Auto());
+		list.RowDefinitions().Append(definition);
+		ThreadRow row;
+		row.name = xaml::Controls::TextBlock();
+		row.name.Style(caption);
+		row.name.TextWrapping(xaml::TextWrapping::NoWrap);
+		row.name.TextTrimming(xaml::TextTrimming::CharacterEllipsis);
+		row.percent = xaml::Controls::TextBlock();
+		row.percent.Style(caption);
+		row.percent.HorizontalAlignment(xaml::HorizontalAlignment::Right);
+		xaml::Documents::Typography::SetNumeralAlignment(row.percent, xaml::FontNumeralAlignment::Tabular);
+		row.track = xaml::Controls::Grid();
+		row.track.Height(5.0);
+		row.track.VerticalAlignment(xaml::VerticalAlignment::Center);
+		row.track.Background(CpuBrush(0x24, 0xFF, 0xFF, 0xFF));
+		row.bar = xaml::Shapes::Rectangle();
+		row.bar.HorizontalAlignment(xaml::HorizontalAlignment::Left);
+		row.bar.Fill(CpuBrush(0xFF, 0x7C, 0xC2, 0x4D));
+		row.bar.Width(0.0);
+		row.track.Children().Append(row.bar);
+		int32_t column = 0;
+		for (const auto& element: std::initializer_list<xaml::FrameworkElement> {row.name, row.percent, row.track}) {
+			element.Visibility(xaml::Visibility::Collapsed);
+			xaml::Controls::Grid::SetRow(element, static_cast<int32_t>(index));
+			xaml::Controls::Grid::SetColumn(element, column++);
+			list.Children().Append(element);
+		}
+		cpu_threads.push_back(row);
+	}
+}
+
+// The system's cores in grey (their boxes fainter) and the game's in green, with the legend while there are any of the system's.
+void GameOverlay::State::ShowSystemCores(std::vector<bool> system) {
+	const auto green = CpuBrush(0xFF, 0x7C, 0xC2, 0x4D); // as the frame graph
+	const auto grey  = CpuBrush(0xFF, 0x8C, 0x8C, 0x8C);
+	for (size_t index = 0; index < cpu_cores.size(); index++) {
+		const bool theirs = index < system.size() && system[index];
+		cpu_cores[index].box.Background(CpuBrush(theirs ? 0x0A : 0x1A, 0xFF, 0xFF, 0xFF));
+		for (const auto& [processor, bar]: cpu_cores[index].bars) {
+			bar.Fill(theirs ? grey : green);
+		}
+	}
+	cpu_legend.Visibility(VisibleIf(std::find(system.begin(), system.end(), true) != system.end()));
+	cpu_system = std::move(system);
+}
+
+// Once a second: the app's share of the processor (as the statistics' CPU), which cores are the system's (the Xbox reserves the app's a moment
+// after it starts), each logical processor's load and the busiest threads, each as its share of one core. Threads with nothing to do are left
+// out.
+void GameOverlay::State::UpdateCpuPanel() {
+	if (cpu_share >= 0.0) {
+		cpu_total.Text(std::to_wstring(std::lround(cpu_share * 100.0)) + L" %");
+	}
+	if (!cpu_cores.empty()) {
+		if (auto system = SystemCores(); system != cpu_system) {
+			ShowSystemCores(std::move(system));
+		}
+	}
+	if (const auto load = processor_load.Sample(); !load.empty()) {
+		const double height = CPU_CORE_HEIGHT - 2.0 * CPU_CORE_PADDING;
+		for (const auto& core: cpu_cores) {
+			for (const auto& [processor, bar]: core.bars) {
+				bar.Height(processor < load.size() ? load[processor] * height : 0.0);
+			}
+		}
+	}
+	const auto threads = BusiestThreads(CPU_THREADS);
+	for (size_t index = 0; index < cpu_threads.size(); index++) {
+		const auto& row   = cpu_threads[index];
+		const bool  shown = index < threads.size() && threads[index].percent >= 0.5;
+		for (const auto& element: std::initializer_list<xaml::UIElement> {row.name, row.percent, row.track}) {
+			element.Visibility(VisibleIf(shown));
+		}
+		if (shown) {
+			const double percent = std::min(threads[index].percent, 100.0);
+			row.name.Text(ThreadDisplayName(threads[index].name));
+			row.percent.Text(std::to_wstring(std::lround(percent)) + L" %");
+			row.bar.Width(percent / 100.0 * CPU_THREAD_BAR);
+		}
 	}
 }
 
@@ -1590,6 +1828,7 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.swap_wait         = find(L"SwapWait").as<xaml::Controls::TextBlock>();
 	state.controllers      = find(L"Controllers").as<xaml::Controls::Grid>();
 	state.log              = find(L"Log").as<xaml::Controls::TextBlock>();
+	state.BuildCpuPanel();
 	state.BuildDetailed(find(L"TopRow").as<xaml::Controls::Panel>(),
 	                    state.root.Resources().Lookup(winrt::box_value(L"PanelBrush")).as<xaml::Media::Brush>());
 	page.Children().InsertAt(index, state.root);
@@ -1662,6 +1901,7 @@ void GameOverlay::Apply(const AppSettings& settings) {
 	state.detail             = std::min(settings.overlay_detail, OVERLAY_DETAILED);
 	state.log_shown          = settings.overlay_log;
 	state.controllers_shown  = settings.overlay_controllers;
+	state.cpu_shown          = settings.overlay_cpu;
 	state.log_lines          = std::clamp<size_t>(settings.overlay_log_lines, 2, LOG_LINES);
 	state.headset_mic_option = settings.headset_mic;
 	state.notice_enabled     = settings.compile_notice;
@@ -1679,6 +1919,7 @@ void GameOverlay::Apply(const AppSettings& settings) {
 	}
 	state.stats_panel.Width(state.detail == OVERLAY_FRAME_RATE ? std::numeric_limits<double>::quiet_NaN() : STATS_WIDTH);
 	state.controllers_panel.Visibility(VisibleIf(state.controllers_shown));
+	state.cpu_panel.Visibility(VisibleIf(state.cpu_shown && state.detail != OVERLAY_DETAILED));
 	state.log_panel.Visibility(VisibleIf(state.log_shown));
 	state.SetScale(OverlaySizes[std::min<size_t>(settings.overlay_size, OverlaySizes.size() - 1)]);
 	if (Shown()) {
@@ -1709,6 +1950,13 @@ void AddOverlaySettings(xaml::Controls::Panel const& overlay, xaml::Controls::Pa
 		settings->overlay_controllers = on;
 		changed();
 	});
+	AddSwitch(
+	    on_screen, explanation, L"CPU on screen", settings->overlay_cpu,
+	    [settings, changed](bool on) {
+		    settings->overlay_cpu = on;
+		    changed();
+	    },
+	    {L"A panel with the load of each processor core and the busiest threads.", L"Detailed lists the threads itself and doesn't show it."});
 	// Off, or 2 to 20 lines in steps of 2 (overlay_log and overlay_log_lines; an odd number from the settings file shows as the next even one).
 	{
 		constexpr auto            MAX_LINES = static_cast<uint32_t>(LOG_LINES);
