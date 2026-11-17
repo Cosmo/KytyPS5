@@ -54,9 +54,10 @@ winrt::Windows::UI::Xaml::Controls::Button AddChoice(winrt::Windows::UI::Xaml::C
                                                      std::vector<std::wstring> choices, size_t selected, std::function<void(size_t)> chosen,
                                                      Paragraphs help = {});
 
-// A setting that is on or off: A turns it over; `changed` gets the new state.
-void AddSwitch(winrt::Windows::UI::Xaml::Controls::Panel const& panel, winrt::Windows::UI::Xaml::Controls::StackPanel const& explanation,
-               const wchar_t* name, bool on, std::function<void(bool)> changed, Paragraphs help = {});
+// A setting that is on or off: A turns it over; `changed` gets the new state. The tile.
+winrt::Windows::UI::Xaml::Controls::Button AddSwitch(winrt::Windows::UI::Xaml::Controls::Panel const&      panel,
+                                                     winrt::Windows::UI::Xaml::Controls::StackPanel const& explanation, const wchar_t* name, bool on,
+                                                     std::function<void(bool)> changed, Paragraphs help = {});
 
 // A tile that opens something: its name, and `detail` under it (none when empty); A runs `clicked`. The tile.
 winrt::Windows::UI::Xaml::Controls::Button AddAction(winrt::Windows::UI::Xaml::Controls::Panel const&      panel,
