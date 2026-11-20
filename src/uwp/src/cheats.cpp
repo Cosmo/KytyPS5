@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <regex>
@@ -30,11 +31,8 @@ namespace http = winrt::Windows::Web::Http;
 constexpr uint64_t INDEX_LIMIT = 2u << 20u;
 constexpr uint64_t FILE_LIMIT  = 8u << 20u;
 
-constexpr wchar_t BASE_URL[] = L"https://raw.githubusercontent.com/TeeKay87/HEN-Cheats-Collection/master/cheats/";
-
-bool IsFormat(const std::string& format) {
-	return format == "json" || format == "mc4" || format == "shn";
-}
+constexpr wchar_t BASE_URL[]    = L"https://raw.githubusercontent.com/TeeKay87/HEN-Cheats-Collection/master/cheats/";
+constexpr wchar_t MODULES_URL[] = L"https://kytyps5.github.io/KytyPS5-Modules/";
 
 // A file name of the collection: the title ID, the game version, a name and the format.
 bool MatchName(const std::string& name, std::smatch& match) {
@@ -154,9 +152,54 @@ std::vector<RemoteFile> ParseIndex(std::string_view data, const std::string& for
 		if (match[1].str() != title_id || !seen.insert(name).second) {
 			continue;
 		}
-		files.push_back({name, Trim(std::string_view(line).substr(separator + 1)), match[2].str(), format});
+		files.push_back({name, Trim(std::string_view(line).substr(separator + 1)), match[2].str(), format, RemoteFile::Kind::Cheat,
+		                 std::wstring(BASE_URL) + Wide(format) + L"/" + Wide(name)});
 	}
 	return files;
+}
+
+// A path of KytyPS5-Modules' catalog as a URL within its site; empty when it leads elsewhere.
+std::wstring ModuleUrl(const std::string& path) {
+	try {
+		const winrt::Windows::Foundation::Uri base(MODULES_URL);
+		std::wstring                          url(base.CombineUri(winrt::to_hstring(path)).AbsoluteUri());
+		if (url.size() > std::size(MODULES_URL) - 1 && url.starts_with(MODULES_URL)) {
+			return url;
+		}
+	} catch (const winrt::hresult_error&) {
+	}
+	return {};
+}
+
+// The patches and cheats of KytyPS5-Modules' catalog for `title_id`; `invalid` counts the entries whose path leads elsewhere. An error when the
+// catalog isn't one.
+std::wstring ParseModules(std::string_view data, const std::string& title_id, std::vector<RemoteFile>& files, size_t& invalid) {
+	const auto root = Json::parse(data, nullptr, false);
+	if (!root.is_object() || root.empty()) {
+		return L"Invalid module catalog.";
+	}
+	for (const auto& [category, kind]: {std::pair {"patches", RemoteFile::Kind::Patch}, std::pair {"cheats", RemoteFile::Kind::Cheat}}) {
+		const auto group = root.find(category);
+		if (group == root.end() || !group->is_object()) {
+			continue;
+		}
+		const auto entries = group->find(title_id);
+		if (entries == group->end() || !entries->is_array()) {
+			continue;
+		}
+		for (const auto& entry: *entries) {
+			if (!entry.is_object()) {
+				continue;
+			}
+			auto url = ModuleUrl(StringOf(entry, "path"));
+			if (url.empty()) {
+				invalid++;
+				continue;
+			}
+			files.push_back({StringOf(entry, "title"), StringOf(entry, "gameName"), StringOf(entry, "version"), "json", kind, std::move(url)});
+		}
+	}
+	return {};
 }
 
 // A cheat file in itself: a "mods" array of named mods, whose "enabled" is a bool if it is there.
@@ -179,20 +222,26 @@ std::wstring ValidateDocument(const Json& document) {
 } // namespace
 
 bool RemoteFile::IsSupported() const {
-	return format == "json" && !Url().empty();
-}
-
-std::wstring RemoteFile::Url() const {
-	std::smatch match;
-	if (!IsFormat(format) || !MatchName(name, match) || match[3].str() != format) {
-		return {};
-	}
-	return std::wstring(BASE_URL) + Wide(format) + L"/" + Wide(name);
+	return format == "json" && !url.empty();
 }
 
 Catalog LoadCatalog(const std::string& title_id) {
 	Catalog    catalog;
 	const auto id = Upper(Trim(title_id));
+	{
+		const auto   index = Request(std::wstring(MODULES_URL) + L"index.min.json", INDEX_LIMIT);
+		std::wstring error = index.error;
+		if (error.empty()) {
+			size_t invalid = 0;
+			error          = ParseModules(index.data, id, catalog.files, invalid);
+			if (error.empty() && invalid != 0) {
+				error = L"Skipped " + std::to_wstring(invalid) + L" invalid module catalog entries.";
+			}
+		}
+		if (!error.empty()) {
+			catalog.error = L"Modules: " + error;
+		}
+	}
 	for (const std::string format: {"json", "mc4", "shn"}) {
 		const auto   index = Request(std::wstring(BASE_URL) + Wide(format) + L".txt", INDEX_LIMIT);
 		std::wstring error = index.error;
@@ -219,7 +268,7 @@ Catalog LoadCatalog(const std::string& title_id) {
 		}
 		return a.name < b.name;
 	});
-	Log("cheats: %zu files in the collection for %s\n", catalog.files.size(), id.c_str());
+	Log("cheats: %zu files in the sources for %s\n", catalog.files.size(), id.c_str());
 	return catalog;
 }
 
@@ -227,7 +276,7 @@ Download Fetch(const RemoteFile& file) {
 	if (!file.IsSupported()) {
 		return {{}, L"Only JSON cheat files can be used."};
 	}
-	return Request(file.Url(), FILE_LIMIT);
+	return Request(file.url, FILE_LIMIT);
 }
 
 bool IsSupportedTitleId(const std::string& title_id) {
@@ -265,7 +314,10 @@ std::wstring ValidateImport(const Json& document, const std::string& title_id, c
 	if (version.empty() || StringOf(document, "version") != version) {
 		return L"The cheat file is for another version of the game (this one is " + (version.empty() ? L"unknown" : Wide(version)) + L").";
 	}
-	if (process.empty() || !EqualsIgnoringCase(StringOf(document, "process"), process)) {
+	// A file without a process is for the game's executable (KytyPS5-Modules' cheats name none).
+	const auto file_process = document.find("process");
+	if (process.empty() ||
+	    (file_process != document.end() && !(file_process->is_string() && EqualsIgnoringCase(file_process->get<std::string>(), process)))) {
 		return L"The cheat file is for another program of the game than " + Wide(process) + L".";
 	}
 	static const std::regex offset_pattern(R"(^(?:0[xX])?[0-9a-fA-F]{1,16}$)");
@@ -331,6 +383,36 @@ Json WithSelection(const Json& document, const std::vector<bool>& enabled) {
 		(*mods)[index]["enabled"] = static_cast<bool>(enabled[index]);
 	}
 	return result;
+}
+
+Json Merge(const Json& local, const Json& imported, const std::string& process) {
+	Json                  root = imported.is_object() ? imported : Json::object();
+	Json                  mods = Json::array();
+	std::set<std::string> names;
+	if (const auto list = imported.find("mods"); list != imported.end() && list->is_array()) {
+		for (auto mod: *list) {
+			names.insert(StringOf(mod, "name"));
+			if (mod.is_object()) {
+				mod["enabled"] = false;
+			}
+			mods.push_back(std::move(mod));
+		}
+	}
+	if (ValidateImport(local, StringOf(imported, "id"), StringOf(imported, "version"), process).empty()) {
+		Json kept = Json::array();
+		for (const auto& mod: local["mods"]) {
+			if (!names.contains(StringOf(mod, "name"))) {
+				kept.push_back(mod);
+			}
+		}
+		for (auto& mod: mods) {
+			kept.push_back(std::move(mod));
+		}
+		mods = std::move(kept);
+	}
+	root["mods"]    = std::move(mods);
+	root["process"] = process;
+	return root;
 }
 
 std::string Text(const Json& document) {
