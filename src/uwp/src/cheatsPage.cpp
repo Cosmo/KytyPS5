@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cwctype>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -208,7 +209,7 @@ struct Page {
 	bool                  local_readable  = false;
 	std::string           local_data;
 	Cheats::Json          local_document;
-	// The collection's files, and the one in the panel when it can be downloaded.
+	// The sources' files, and the one in the panel when it can be downloaded.
 	std::vector<Cheats::RemoteFile> files;
 	Cheats::Json                    remote_document;
 	bool                            remote_valid = false;
@@ -300,7 +301,8 @@ Paragraphs CategoryExplanation(int32_t category) {
 	switch (category) {
 		case LOCAL: return {L"The cheats saved for this game. A switches one on or off.", L"Switched-on cheats apply when the game starts."};
 		case REMOTE:
-			return {L"Cheat files for this game from the HEN Cheats Collection.", L"A shows a file's cheats. Download saves them here, switched off."};
+			return {L"Patches and cheats for this game from KytyPS5-Modules and the HEN Cheats Collection.",
+			        L"A shows a file's contents. Download saves them here, switched off."};
 		default: return {}; // Info has the page's width
 	}
 }
@@ -451,7 +453,7 @@ winrt::fire_and_forget LoadRemote(std::shared_ptr<Page> page) {
 	page->remote_tiles.Children().Clear();
 	page->remote_loading.IsActive(true);
 	page->remote_loading.Visibility(xaml::Visibility::Visible);
-	page->remote_caption.Text(L"Loading the collection...");
+	page->remote_caption.Text(L"Loading the lists...");
 	const auto title_id = page->game.title_id;
 	co_await winrt::resume_background();
 	auto catalog = Cheats::LoadCatalog(title_id);
@@ -470,17 +472,24 @@ winrt::fire_and_forget LoadRemote(std::shared_ptr<Page> page) {
 		const auto& file      = page->files[index];
 		const bool  usable    = file.IsSupported();
 		const bool  installed = file.version == version;
-		std::wstring detail   = !usable ? L"Can't be used (" + Wide(file.format) + L")" : installed ? L"Installed version" : L"Other version";
-		Paragraphs   help;
+		const std::wstring kind   = file.kind == Cheats::RemoteFile::Kind::Patch ? L"Patch" : L"Cheat";
+		std::wstring       format = Wide(file.format);
+		std::transform(format.begin(), format.end(), format.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
+		const std::wstring detail = kind + L" \u00B7 " +
+		                            (!usable    ? L"can't be used (" + format + L")"
+		                             : installed ? std::wstring(L"your version")
+		                                         : L"version " + Wide(file.version));
+		Paragraphs help;
 		if (!usable) {
 			help = {L"Only JSON files can be used. This one is " + Wide(file.format) + L"."};
 		} else if (installed) {
-			help = {L"A file for the version you have.", L"A shows its cheats."};
+			help = {L"A file for the version you have.", L"A shows its contents."};
 		} else {
 			help = {L"A file for version " + Wide(file.version) + L". You have " + (version.empty() ? L"an unknown one" : Wide(version)) + L".",
-			        L"Its cheats can't be used with your version."};
+			        L"It can't be used with your version."};
 		}
-		auto tile = AddAction(page->remote_tiles, page->explanation, Wide(file.version).c_str(), detail.c_str(),
+		const auto name = file.name.empty() ? Wide(file.version) : Wide(file.name);
+		auto tile       = AddAction(page->remote_tiles, page->explanation, name.c_str(), detail.c_str(),
 		                      [weak = std::weak_ptr<Page>(page), index, usable] {
 			                      if (auto shared = weak.lock(); shared != nullptr && usable && !shared->FileOpen()) {
 				                      OpenFile(shared, index);
@@ -492,9 +501,9 @@ winrt::fire_and_forget LoadRemote(std::shared_ptr<Page> page) {
 		}
 	}
 	if (!catalog.error.empty()) {
-		page->remote_caption.Text(L"The collection couldn't be read in full. Y tries again.");
+		page->remote_caption.Text(L"The lists couldn't be read in full. Y tries again.");
 	} else {
-		page->remote_caption.Text(page->files.empty() ? std::wstring(L"The collection has no cheats for this game.")
+		page->remote_caption.Text(page->files.empty() ? std::wstring(L"There are no patches or cheats for this game.")
 		                                              : Count(page->files.size(), L"file", L"files") + L" for this game.");
 	}
 }
@@ -548,7 +557,7 @@ winrt::fire_and_forget OpenFile(std::shared_ptr<Page> page, size_t index) {
 	page->file_index      = index;
 	page->remote_document = Cheats::Json();
 	page->remote_valid    = false;
-	page->file_title.Text(Wide(page->game.name) + L" " + Wide(file.version));
+	page->file_title.Text(file.name.empty() ? Wide(page->game.name) + L" " + Wide(file.version) : Wide(file.name));
 	page->file_details.Children().Clear();
 	page->file_cheats.Items().Clear();
 	page->file_actions.Items().Clear();
@@ -588,7 +597,9 @@ winrt::fire_and_forget OpenFile(std::shared_ptr<Page> page, size_t index) {
 		}
 		const auto cheats = Cheats::CheatsOf(document);
 		page->file_details.Children().Append(Detail(L"By", credits.empty() ? L"Unknown" : Wide(credits)));
-		page->file_details.Children().Append(Detail(L"Cheats", std::to_wstring(cheats.size())));
+		page->file_details.Children().Append(Detail(L"Version", Wide(file.version)));
+		page->file_details.Children().Append(
+		    Detail(file.kind == Cheats::RemoteFile::Kind::Patch ? L"Patches" : L"Cheats", std::to_wstring(cheats.size())));
 		for (const auto& cheat: cheats) {
 			xaml::Controls::TextBlock name;
 			name.Style(AppStyle(L"BodyTextBlockStyle"));
@@ -603,7 +614,7 @@ winrt::fire_and_forget OpenFile(std::shared_ptr<Page> page, size_t index) {
 			page->file_details.Children().Append(Detail(L"Saves to", Location(page->path)));
 		}
 		page->remote_document = std::move(document);
-		status                = error.empty() ? L"Downloaded cheats start switched off." : error;
+		status                = error.empty() ? L"Everything downloaded starts switched off." : error;
 	}
 	page->file_status.Text(status);
 	if (page->remote_valid) {
@@ -622,22 +633,44 @@ winrt::fire_and_forget Download(std::shared_ptr<Page> page) {
 		page->file_status.Text(L"The cheats saved for this game can't be read, so they aren't replaced.");
 		co_return;
 	}
+	// As upstream's launcher: the downloaded mods switched off, with the game's executable as their process; "Keep the others" also keeps the
+	// saved ones with other names, offered when that makes a difference.
+	auto document = Cheats::Merge({}, page->remote_document, PROCESS);
 	if (!page->local_data.empty()) {
+		const auto merged = Cheats::Merge(page->local_document, page->remote_document, PROCESS);
+		const bool keep   = merged != document;
+		xaml::Controls::StackPanel text;
+		for (const wchar_t* paragraph: {L"Replace keeps only the downloaded ones.",
+		                                keep ? L"Keep the others adds the downloaded ones and replaces those with the same name." : nullptr,
+		                                L"Downloaded ones start switched off."}) {
+			if (paragraph == nullptr) {
+				continue;
+			}
+			xaml::Controls::TextBlock line;
+			line.TextWrapping(xaml::TextWrapping::Wrap);
+			line.Margin(xaml::ThicknessHelper::FromLengths(0, 0, 0, 8));
+			line.Text(paragraph);
+			text.Children().Append(line);
+		}
 		xaml::Controls::ContentDialog dialog;
-		dialog.Title(winrt::box_value(L"Replace this game's cheats?"));
-		dialog.Content(winrt::box_value(L"The cheats saved for this game are replaced. The downloaded ones start switched off."));
+		dialog.Title(winrt::box_value(L"This game has cheats already"));
+		dialog.Content(text);
 		dialog.PrimaryButtonText(L"Replace");
+		if (keep) {
+			dialog.SecondaryButtonText(L"Keep the others");
+		}
 		dialog.CloseButtonText(L"Cancel");
 		dialog.DefaultButton(xaml::Controls::ContentDialogButton::Close);
 		page->dialog_open = true;
 		const auto answer = co_await dialog.ShowAsync();
 		page->dialog_open = false;
-		if (page->left || answer != xaml::Controls::ContentDialogResult::Primary) {
+		if (page->left || answer == xaml::Controls::ContentDialogResult::None) {
 			co_return;
 		}
+		if (answer == xaml::Controls::ContentDialogResult::Secondary) {
+			document = merged;
+		}
 	}
-	const auto cheats   = Cheats::CheatsOf(page->remote_document);
-	const auto document = Cheats::WithSelection(page->remote_document, std::vector<bool>(cheats.size(), false));
 	if (const auto error = Cheats::Save(page->path, document, page->local_data); !error.empty()) {
 		page->file_status.Text(error);
 		co_return;
