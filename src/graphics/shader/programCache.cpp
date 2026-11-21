@@ -150,13 +150,12 @@ struct ShaderProgramCache::Impl {
 
 		template <bool HasCalls>
 		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
-		                             uint32_t push_data_cursor) {
+		                             ShaderRecompiler::IR::PushData::Window push_data) {
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 			    resource_plan, runtime, resources, specialization));
 			for (auto& candidate: permutations) {
 				const auto& layout = candidate.info.bindings;
-				if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(
-				        push_data_cursor, layout.ShaderDataDwords()) ||
+				if (layout.push_data_start_dword != push_data.StartFor(layout.ShaderDataDwords(), candidate.info.stage) ||
 				    candidate.specialization != specialization) {
 					continue;
 				}
@@ -198,13 +197,13 @@ struct ShaderProgramCache::Impl {
 	                               const ShaderRecompiler::CompileOptions&      options,
 	                               ShaderRecompiler::TranslateResult            translated,
 	                               ShaderRecompiler::IR::ResourceSpecialization specialization,
-	                               uint32_t push_data_start_dword,
+	                               ShaderRecompiler::IR::PushData::Window push_data,
 	                               std::span<const uint32_t> function_code) {
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::ShadersCompiled,
 		                                         Common::DebugCounters::Counter::ShaderCompileNs,
 		                                         Common::DebugCounters::Peak::ShaderCompileNs);
 		auto result = ShaderRecompiler::CompileProgram(std::move(translated), options,
-		                                               specialization, push_data_start_dword);
+		                                               specialization, push_data);
 		const auto label = fmt::format("ShaderRecompiler {}", ShaderRecompiler::StageName(options.stage));
 		if (!ValidateShaderSpirv(label.c_str(), options.shader_hash, result.spirv,
 		                         options.profile->maintenance8)) {
@@ -245,7 +244,7 @@ struct ShaderProgramCache::Impl {
 
 	template <typename InputInfo>
 	CompiledProgram Get(const ShaderParams& params, InputInfo& input_info,
-	                  uint32_t& push_data_cursor) {
+	                  ShaderRecompiler::IR::PushData::Window& push_data) {
 		const auto user_data = std::span(params.user_data).first(params.user_data_count);
 		ShaderRecompiler::IR::SrtRuntime runtime {
 		    .user_data                  = user_data,
@@ -282,7 +281,7 @@ struct ShaderProgramCache::Impl {
 		auto entry = programs.find(lookup_key);
 		const auto bind = [&](const Permutation& permutation) {
 			input_info.stage = {.module = &permutation, .resources = &entry->second.resources};
-			permutation.info.bindings.AdvancePushData(push_data_cursor);
+			permutation.info.bindings.AdvancePushData(push_data, permutation.info.stage);
 			return static_cast<const CompiledProgram&>(permutation);
 		};
 		bool source_changed = false;
@@ -292,9 +291,9 @@ struct ShaderProgramCache::Impl {
 			Permutation* permutation = nullptr;
 			if (cached.call_source) {
 				source_changed = cached.RefreshCallSource(runtime);
-				if (!source_changed) permutation = cached.FindPermutation<true>(runtime, push_data_cursor);
+				if (!source_changed) permutation = cached.FindPermutation<true>(runtime, push_data);
 			} else {
-				permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
+				permutation = cached.FindPermutation<false>(runtime, push_data);
 			}
 			if (permutation != nullptr) return bind(*permutation);
 		}
@@ -351,12 +350,12 @@ struct ShaderProgramCache::Impl {
 			    entry->second.specialization));
 		} else if (source_changed) {
 			entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
-			if (const auto* permutation = entry->second.FindPermutation<true>(runtime, push_data_cursor)) {
+			if (const auto* permutation = entry->second.FindPermutation<true>(runtime, push_data)) {
 				return bind(*permutation);
 			}
 		}
 		entry->second.permutations.push_back(CompilePermutation(
-		    stage_name, options, std::move(translated), entry->second.specialization, push_data_cursor,
+		    stage_name, options, std::move(translated), entry->second.specialization, push_data,
 		    entry->second.FunctionCode()));
 
 		const auto counts = Counts();
@@ -610,11 +609,12 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 		last_stage.user_clip_planes = clip_control.user_clip_planes;
 	}
 	// A mesh program's own draw parameters (or the object ID) come first in the push data, then the user
-	// clip planes. (A mesh program run as a compute shader has its draw parameters in the compute push
-	// data and its planes in the graphics one, both before the cursor: 6 + 4 per plane > DrawDwordCount.)
+	// clip planes; the pixel stage's data takes the end (upstream's PushData::Window). (A mesh program run as a compute shader has its draw
+	// parameters in the compute push data and its planes in the graphics one, both before the window: 6 + 4 per plane > DrawDwordCount.)
 	static_assert(ShaderRecompiler::IR::PushData::UserClipPlaneDword + 4u >
 	              ShaderRecompiler::IR::MeshEmulation::DrawDwordCount);
-	uint32_t          push_data_cursor =
+	ShaderRecompiler::IR::PushData::Window push_data;
+	push_data.begin =
 	    !mesh_active || last_stage.user_clip_planes != 0
 	        ? ShaderRecompiler::IR::PushData::GraphicsDrawDwords(mesh_active, object_primitive_id,
 	                                                             last_stage.user_clip_planes)
@@ -622,7 +622,7 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 	                                            : ShaderRecompiler::IR::PushData::MeshDrawDwordCount;
 	GraphicsPrograms  result;
 	if (pixel_active) {
-		result.pixel = m_impl->Get(pixel_params, pixel_info, push_data_cursor);
+		result.pixel = m_impl->Get(pixel_params, pixel_info, push_data);
 		for (const auto& output: pixel_info.stage.module->info.info.outputs) {
 			if (output.kind == ShaderRecompiler::IR::StageOutputKind::Mrt ||
 			    output.kind == ShaderRecompiler::IR::StageOutputKind::ObjectPrimitiveId) {
@@ -632,7 +632,7 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 		mrt_mask &= color_output_mask;
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
-		result.vertex[i] = m_impl->Get(vertex_params[i], vertex_info[i], push_data_cursor);
+		result.vertex[i] = m_impl->Get(vertex_params[i], vertex_info[i], push_data);
 	}
 	return result;
 }
@@ -642,8 +642,12 @@ CompiledProgram ShaderProgramCache::GetComputeProgram(const HW::ComputeShaderInf
 	input_info.host_subgroup_size = m_limits.compute_wave64 ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, input_info);
 	input_info.lds_storage = input_info.lds_size_dwords * 4u > m_limits.max_compute_shared_memory;
-	uint32_t          push_data_cursor = 0;
-	return m_impl->Get(params, input_info, push_data_cursor);
+	ShaderRecompiler::IR::PushData::Window push_data;
+	auto program = m_impl->Get(params, input_info, push_data);
+	// Graphics and async dispatches share a module (as upstream's pipeline cache); HW_ID2 reads are translated with the graphics compute
+	// queue's values.
+	EXIT_NOT_IMPLEMENTED(program && input_info.async_compute && input_info.stage.module->info.info.reads_queue_id);
+	return program;
 }
 
 
