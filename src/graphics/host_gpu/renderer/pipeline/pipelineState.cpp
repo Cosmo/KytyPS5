@@ -213,6 +213,7 @@ MakeGraphicsPipelineKey(const GraphicContext& graphics, std::span<const RenderCo
 			    .offset = static_cast<uint32_t>(vs_input_info.resources[attribute].Base48() -
 			                                    vs_input_info.buffers[binding].addr),
 			    .binding = static_cast<uint8_t>(binding),
+			    .format  = vs_input_info.resources[attribute].RawFormat(),
 			};
 		}
 	}
