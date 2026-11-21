@@ -12,6 +12,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/gpuBackend.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/shaderCompiler.h"
@@ -490,9 +491,12 @@ void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t
 		const auto& destination = info.resources_dst[i];
 		key.push_back(destination.registers_num);
 		key.push_back(static_cast<uint32_t>(destination.attr_id));
-		// Swizzle, channel count and type class; the pipeline key holds the format itself.
+		// Swizzle, channel count and type class; the pipeline key holds the format itself. Where the vertex shader reads scaled
+		// and 10:10:10:2 SNORM formats as integers and converts them (HostShaderFeatures::vertex_formats_as_integers, the D3D12
+		// renderer), its code depends on the format itself, which then stays in this key too.
 		key.push_back(resource.DstSelXYZW() |
-		              static_cast<uint32_t>(kVertexFetchFormats[resource.RawFormat()]) << 12u);
+		              static_cast<uint32_t>(kVertexFetchFormats[resource.RawFormat()]) << 12u |
+		              (ShaderRecompiler::GetHostShaderFeatures().vertex_formats_as_integers ? static_cast<uint32_t>(resource.RawFormat()) << 20u : 0u));
 	}
 }
 
