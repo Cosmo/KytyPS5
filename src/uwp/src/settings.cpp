@@ -76,6 +76,7 @@ AppSettings LoadSettings() {
 	read("trophy_notifications", settings.trophy_notifications);
 	read("network_connected", settings.network_connected);
 	read("emulate_psn", settings.emulate_psn);
+	read("dialog_auto_close", settings.dialog_auto_close);
 	read("readback_linear_images", settings.readback_linear_images);
 	read("lod_stats", settings.lod_stats);
 	read("readback_tiled_images", settings.readback_tiled_images);
@@ -183,6 +184,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["trophy_notifications"]   = settings.trophy_notifications;
 	json["network_connected"]      = settings.network_connected;
 	json["emulate_psn"]            = settings.emulate_psn;
+	json["dialog_auto_close"]      = settings.dialog_auto_close;
 	json["readback_linear_images"] = settings.readback_linear_images;
 	json["lod_stats"]              = settings.lod_stats;
 	json["readback_tiled_images"]  = settings.readback_tiled_images;

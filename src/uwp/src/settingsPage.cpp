@@ -840,6 +840,13 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    save();
 	    },
 	    {L"Tells games that you are signed in to PSN, for games that need it."});
+	AddSwitch(
+	    panel(L"System"), explanation, L"Close game dialogs by themselves", settings.dialog_auto_close,
+	    [state, save](bool on) {
+		    state->settings.dialog_auto_close = on;
+		    save();
+	    },
+	    {L"A message a game shows, such as an error or the PSN sign-in, presses its button by itself after 5 seconds."});
 
 	// Memory and quality. Game memory paging: Automatic is "not set" (on where the app's memory limit is small), the others are the cap in MB.
 	const auto memory   = panel(L"MemoryGroup");
