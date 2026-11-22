@@ -1,6 +1,7 @@
 #include "systemDialog.h"
 
 #include "log.h"
+#include "settings.h"
 #include "xboxLook.h"
 #include "libs/dialog.h"
 
@@ -12,7 +13,9 @@
 #include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Markup.h>
 
+#include <chrono>
 #include <cstdio>
+#include <string>
 #include <optional>
 #include <utility>
 
@@ -59,7 +62,13 @@ struct Box {
 	// The dialog that shows, by the time it opened (0: none).
 	uint64_t generation = 0;
 	bool     signin     = false;
+	// Settings › System › Close game dialogs by themselves: the button counts down the seconds left, then presses itself.
+	xaml::DispatcherTimer timer {nullptr};
+	int                   seconds_left = 0;
+	std::wstring          label;
 };
+
+constexpr int AUTO_CLOSE_SECONDS = 5;
 
 // UI thread only, but the dispatcher: the visibility callback runs on the game's threads and posts to it; it is set before it is.
 Box                                      g_box;
@@ -79,7 +88,13 @@ void Show(const SystemDialog::HostSnapshot& snapshot) {
 	std::swprintf(code_text, std::size(code_text), L"Error code: 0x%08X", code);
 	box.code.Text(code_text);
 	box.code.Visibility(signin ? xaml::Visibility::Collapsed : xaml::Visibility::Visible);
-	box.button.Content(winrt::box_value(signin ? L"Cancel" : L"OK"));
+	box.label        = signin ? L"Cancel" : L"OK";
+	box.seconds_left = LoadSettings().dialog_auto_close ? AUTO_CLOSE_SECONDS : 0;
+	box.button.Content(winrt::box_value(winrt::hstring(box.seconds_left > 0 ? box.label + L" (" + std::to_wstring(box.seconds_left) + L")" : box.label)));
+	box.timer.Stop();
+	if (box.seconds_left > 0) {
+		box.timer.Start();
+	}
 	if (signin) {
 		SetHints(box.hints, {{XboxButton::A, L"Select"}, {XboxButton::B, L"Cancel"}});
 	} else {
@@ -95,6 +110,7 @@ void Show(const SystemDialog::HostSnapshot& snapshot) {
 }
 
 void Hide() {
+	g_box.timer.Stop();
 	g_box.root.Visibility(xaml::Visibility::Collapsed);
 	Log("system dialog: closed\n");
 	if (g_box.shown) {
@@ -147,6 +163,24 @@ void SetUpSystemDialog(xaml::Controls::Grid const& page, uint32_t index, std::fu
 	page.Children().InsertAt(index, box.root);
 
 	box.button.Click([](auto const&, auto const&) { Close(); });
+	// The countdown (Settings › System › Close game dialogs by themselves): a tick a second; at 0 the button presses itself, which tells the
+	// game what pressing it does (OK, or Cancel for the sign-in).
+	box.timer = xaml::DispatcherTimer();
+	box.timer.Interval(std::chrono::seconds(1));
+	box.timer.Tick([](auto const&, auto const&) {
+		auto& box = g_box;
+		if (box.generation == 0) {
+			box.timer.Stop();
+			return;
+		}
+		if (--box.seconds_left > 0) {
+			box.button.Content(winrt::box_value(winrt::hstring(box.label + L" (" + std::to_wstring(box.seconds_left) + L")")));
+			return;
+		}
+		box.timer.Stop();
+		Log("system dialog: closed by itself after %d s\n", AUTO_CLOSE_SECONDS);
+		Close();
+	});
 	// B closes the sign-in as its Cancel does (as on the desktop); an error closes with its OK only.
 	box.root.KeyDown([](auto const&, xaml::Input::KeyRoutedEventArgs const& args) {
 		const auto key = args.Key();
