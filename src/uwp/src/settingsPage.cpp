@@ -207,6 +207,13 @@ constexpr wchar_t SettingsMarkup[] = LR"xaml(
               <TextBlock x:Name="UserDataStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
             </StackPanel>
             <DropDownButton x:Name="ChooseUserData" Content="Choose folder" />
+            <!-- Where the games' compiled shaders and pipelines go, as the data folder's row. -->
+            <TextBlock Text="Shader cache" Style="{StaticResource BodyTextBlockStyle}" Margin="0,24,0,-8" />
+            <StackPanel>
+              <TextBlock x:Name="ShaderCachePath" TextWrapping="Wrap" />
+              <TextBlock x:Name="ShaderCacheStatus" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            </StackPanel>
+            <DropDownButton x:Name="ChooseShaderCache" Content="Choose folder" />
             <!-- Where the logs and frame dumps go, as the data folder's row (shown where a folder can be chosen for them). -->
             <StackPanel x:Name="Logs" Spacing="12" Visibility="Collapsed">
               <TextBlock Text="Logs and dumps" Style="{StaticResource BodyTextBlockStyle}" Margin="0,24,0,-8" />
@@ -285,6 +292,8 @@ struct SettingsState {
 	xaml::Controls::TextBlock user_data_status {nullptr};
 	xaml::Controls::TextBlock logs_path {nullptr};
 	xaml::Controls::TextBlock logs_status {nullptr};
+	xaml::Controls::TextBlock shader_cache_path {nullptr};
+	xaml::Controls::TextBlock shader_cache_status {nullptr};
 };
 
 void ListFolders(const std::shared_ptr<SettingsState>& state);
@@ -325,6 +334,11 @@ void ShowWritableFolder(xaml::Controls::TextBlock const& path_text, xaml::Contro
 // Saves, patches and trophies are written with the *FromApp functions (Common::File).
 void ShowUserData(const std::shared_ptr<SettingsState>& state) {
 	ShowWritableFolder(state->user_data_path, state->user_data_status, state->settings.user_data_path, WriteError);
+}
+
+// The compiled shaders, as the user's data, with the *FromApp functions (Common::File).
+void ShowShaderCache(const std::shared_ptr<SettingsState>& state) {
+	ShowWritableFolder(state->shader_cache_path, state->shader_cache_status, state->settings.shader_cache_path, WriteError);
 }
 
 // The logs and the frame dumps with the C library.
@@ -1064,6 +1078,30 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	        (IsXbox() ? L"internal storage." : L"the default folder.")};
 	Explain(choose_user_data, explanation, data_folder_help);
 
+	// The shader cache, written as the user's data: the same choices as the data folder.
+	state->shader_cache_path   = page.FindName(L"ShaderCachePath").as<xaml::Controls::TextBlock>();
+	state->shader_cache_status = page.FindName(L"ShaderCacheStatus").as<xaml::Controls::TextBlock>();
+	ShowShaderCache(state);
+	auto choose_shader_cache = page.FindName(L"ChooseShaderCache").as<xaml::Controls::DropDownButton>();
+	// From the picker or the panel; empty: the default folder. The compiled shaders of the old folder stay there.
+	const auto set_shader_cache = [state](const std::filesystem::path& folder) {
+		state->settings.shader_cache_path = folder;
+		SaveSettings(state->settings);
+		ShowShaderCache(state);
+	};
+	std::vector<std::pair<std::wstring, std::function<void()>>> cache_choices = {{picker_name, [set_shader_cache] { PickFolder(set_shader_cache); }}};
+	if (development_files_writable) {
+		const auto button = winrt::make_weak(choose_shader_cache.as<xaml::Controls::Control>());
+		cache_choices.emplace_back(L"Development Files", [show_panel, set_shader_cache, button] { show_panel(button, L"Shader cache", false, set_shader_cache); });
+	}
+	cache_choices.emplace_back(DefaultDataFolderName(), [set_shader_cache] { set_shader_cache({}); });
+	choose_shader_cache.Flyout(menu(std::move(cache_choices)));
+	Explain(choose_shader_cache, explanation,
+	        {L"The folder for the games' compiled shaders and pipelines. KytyPS5 keeps them in its subfolder _PipelineCache.",
+	         L"Compiled shaders in the old folder stay there. Games build theirs again in the new folder.",
+	         std::wstring(L"If the folder can't be written when a game starts, that game uses ") +
+	             (IsXbox() ? L"internal storage." : L"the default folder.")});
+
 	// Logs and dumps, written with the C library, which reaches only folders that grant apps access themselves: on a PC, the picker's choice
 	// (the row says when it needs that access); on the Xbox, Development Files, as the picker there only reaches USB drives, which it can't.
 	const bool logs_in_development_files = development_files && DevelopmentFilesDirectlyWritable();
@@ -1261,15 +1299,15 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    place_entries(on);
 	    },
 	    {L"Adds Remote Controllers: controllers that a DSU-compatible app on your PC or phone shares over your network. Still being tested."});
-	// The games' compiled shaders (LocalState\_PipelineCache, a file per game): each game compiles them afresh on its next start.
+	// The games' compiled shaders (ShaderCacheFolder, a file or two per game): each game compiles them afresh on its next start.
 	auto remove_shaders_status = page.FindName(L"RemoveShadersStatus").as<xaml::Controls::TextBlock>();
 	auto remove_shaders        = page.FindName(L"RemoveShaders").as<xaml::Controls::Button>();
 	Explain(remove_shaders, explanation, {L"Deletes the compiled shaders of all games.", L"Each game compiles them again on its next start."});
-	remove_shaders.Click([remove_shaders_status](auto const&, auto const&) {
+	remove_shaders.Click([remove_shaders_status, state](auto const&, auto const&) {
 		std::error_code error;
 		uint64_t        files = 0;
 		uint64_t        bytes = 0;
-		for (const auto& entry: std::filesystem::directory_iterator(LocalStateFolder() / L"_PipelineCache", error)) {
+		for (const auto& entry: std::filesystem::directory_iterator(ShaderCacheFolder(state->settings), error)) {
 			const auto size = entry.is_regular_file(error) ? entry.file_size(error) : 0;
 			if (std::filesystem::remove(entry.path(), error)) {
 				files++;
