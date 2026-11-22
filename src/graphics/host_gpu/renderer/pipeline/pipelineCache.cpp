@@ -188,7 +188,7 @@ std::filesystem::path ShaderStorePath() {
 	if (title_id.empty()) {
 		return {};
 	}
-	return std::filesystem::path("_PipelineCache") / (title_id + ".shaders");
+	return Config::PipelineCacheFolder() / (title_id + ".shaders");
 }
 
 bool GraphicsPipelineKey::operator==(const GraphicsPipelineKey& other) const {
@@ -433,7 +433,7 @@ void PipelineCache::InitializeDriverCache() {
 		PipelineCacheLog("Vulkan pipeline cache: disabled (non-Release build)");
 		return;
 	}
-	m_driver_cache_path     = std::filesystem::path("_PipelineCache") / (title_id + ".bin");
+	m_driver_cache_path     = Config::PipelineCacheFolder() / (title_id + ".bin");
 	const auto path         = Common::PathToString(m_driver_cache_path);
 	const bool cache_exists = Common::File::IsFileExisting(m_driver_cache_path);
 	if (cache_exists) {
