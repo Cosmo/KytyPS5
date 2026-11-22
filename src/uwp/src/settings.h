@@ -46,6 +46,7 @@ struct AppSettings {
 	bool                               trophy_notifications = true; // a notification for each trophy earned (Config::trophy_enabled)
 	bool                               network_connected    = false; // games see the device's network connection (Config::network_connected)
 	bool                               emulate_psn          = false; // games see a PSN sign-in (upstream's --emulate-psn, Config::psn_emulation_enabled)
+	bool                               dialog_auto_close    = true;  // a game's system dialog presses its button by itself after 5 s (systemDialog.cpp)
 	bool                               debug_layer      = false; // the D3D12 debug layer
 	bool                               game_output      = false; // the game's printf in the log
 	bool                               d3d12_selftest   = false; // translate and sign built-in shaders at start (not on the settings page)
