@@ -26,6 +26,7 @@
 #include <winrt/Windows.UI.Xaml.Shapes.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <chrono>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -325,6 +326,7 @@ struct Launcher {
 	xaml::FrameworkElement       options_main {nullptr};
 	xaml::Controls::ListView     options_items {nullptr};
 	xaml::Controls::TextBlock    pipelines_value {nullptr};
+	xaml::Controls::TextBlock    shaders_value {nullptr}; // the game's compiled shaders: their size, or None
 	// The activities of the game whose options are open (Launch activity...), once read: nothing when the game doesn't take the intent.
 	std::optional<std::vector<std::string>> activities;
 	bool                                    activities_read = false;
@@ -350,6 +352,69 @@ constexpr wchar_t OPTION_ACTIVITY[]  = L"Launch activity...";
 constexpr wchar_t OPTION_DETAILS[]   = L"Details";
 constexpr wchar_t OPTION_CHEATS[]    = L"Cheats";
 constexpr wchar_t OPTION_HIDE[]      = L"Hide game";
+constexpr wchar_t OPTION_SHADERS[]   = L"Delete compiled shaders";
+
+// A game's compiled shaders and pipelines: the files named after its title ID in the shader cache folder, and in LocalState's, where a game
+// keeps them when the chosen folder can't be written as it starts.
+std::vector<std::filesystem::path> GameShaderFiles(const GameEntry& game) {
+	std::vector<std::filesystem::path> files;
+	if (game.title_id.empty()) {
+		return files;
+	}
+	const auto prefix  = winrt::to_hstring(game.title_id + ".");
+	auto       folders = std::vector<std::filesystem::path> {ShaderCacheFolder(LoadSettings()), LocalStateFolder() / L"_PipelineCache"};
+	if (folders[0] == folders[1]) {
+		folders.pop_back();
+	}
+	for (const auto& folder: folders) {
+		std::error_code error;
+		for (const auto& entry: std::filesystem::directory_iterator(folder, error)) {
+			std::error_code file_error;
+			if (entry.is_regular_file(file_error) && entry.path().filename().wstring().starts_with(prefix.c_str())) {
+				files.push_back(entry.path());
+			}
+		}
+	}
+	return files;
+}
+
+// Their size for the options' entry, to a tenth of a MB ("1.2 MB", at least 0.1 MB), or None.
+winrt::hstring GameShadersText(const GameEntry& game) {
+	uint64_t bytes = 0;
+	for (const auto& file: GameShaderFiles(game)) {
+		std::error_code error;
+		const auto      size = std::filesystem::file_size(file, error);
+		bytes += error ? 0 : size;
+	}
+	if (bytes == 0) {
+		return L"None";
+	}
+	wchar_t text[32] {};
+	std::swprintf(text, std::size(text), L"%.1f MB", std::max(0.1, static_cast<double>(bytes) / (1024.0 * 1024.0)));
+	return text;
+}
+
+// Deletes the game's compiled shaders once the player confirms (Cancel has the focus); the game builds them again on its next start.
+winrt::fire_and_forget DeleteGameShaders(std::shared_ptr<Launcher> launcher, GameEntry game) {
+	if (GameShaderFiles(game).empty()) {
+		co_return;
+	}
+	xaml::Controls::ContentDialog dialog;
+	dialog.Title(winrt::box_value(L"Delete compiled shaders?"));
+	dialog.Content(winrt::box_value(winrt::hstring(std::wstring(L"This deletes the compiled shaders of ") + std::wstring(winrt::to_hstring(game.name)) +
+	                                               L". The game builds them again on its next start.")));
+	dialog.PrimaryButtonText(L"Delete");
+	dialog.CloseButtonText(L"Cancel");
+	dialog.DefaultButton(xaml::Controls::ContentDialogButton::Close);
+	if (co_await dialog.ShowAsync() != xaml::Controls::ContentDialogResult::Primary) {
+		co_return;
+	}
+	for (const auto& file: GameShaderFiles(game)) {
+		std::error_code error;
+		std::filesystem::remove(file, error);
+	}
+	launcher->shaders_value.Text(GameShadersText(game));
+}
 
 struct PipelineChoice {
 	PipelineMode   mode;
@@ -794,6 +859,7 @@ void OpenOptions(const std::shared_ptr<Launcher>& launcher, size_t index) {
 	auto folder = game.folder;
 	find(L"OptionsFolder").Text(folder.make_preferred().wstring());
 	launcher->pipelines_value.Text(PipelineModeName(LibraryPipelineMode()));
+	launcher->shaders_value.Text(GameShadersText(game));
 	launcher->activities.reset();
 	launcher->activities_read = false;
 	LoadActivities(launcher, game, ++launcher->options_request);
@@ -1077,6 +1143,7 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	options.Append(OptionsLine());
 	options.Append(OptionEntry(OPTION_DETAILS));
 	options.Append(OptionEntry(OPTION_CHEATS));
+	options.Append(OptionEntry(OPTION_SHADERS, &launcher->shaders_value));
 	options.Append(OptionEntry(OPTION_HIDE));
 	launcher->options_items.ItemClick([launcher](auto const&, xaml::Controls::ItemClickEventArgs const& args) {
 		const auto  option = winrt::unbox_value_or<winrt::hstring>(EntryTag(args.ClickedItem()), L"");
@@ -1091,6 +1158,8 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 			OpenDetails(launcher, game);
 		} else if (option == OPTION_CHEATS) {
 			launcher->actions.open_cheats(game);
+		} else if (option == OPTION_SHADERS) {
+			DeleteGameShaders(launcher, game);
 		} else if (option == OPTION_HIDE) {
 			HideGame(game.folder);
 			xaml::Window::Current().Content(CreatePage(launcher->actions, false, launcher->options_index));
