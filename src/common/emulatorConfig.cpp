@@ -347,6 +347,13 @@ std::filesystem::path FrameDumpFolder() {
 	return g_config != nullptr ? g_config->frame_dump_folder : std::filesystem::path();
 }
 
+std::filesystem::path PipelineCacheFolder() {
+	if (g_config != nullptr && !g_config->pipeline_cache_folder.empty()) {
+		return g_config->pipeline_cache_folder;
+	}
+	return "_PipelineCache";
+}
+
 bool FrameDumpSnapshots() {
 	return g_config != nullptr && g_config->frame_dump_snapshots;
 }
