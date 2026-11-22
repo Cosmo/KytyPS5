@@ -158,6 +158,18 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		}
 	}
 
+	// The games' compiled shaders and pipelines (Settings › Storage); LocalState's when the chosen folder cannot be written. The settings page
+	// checks the same.
+	auto shader_cache = ShaderCacheFolder(settings);
+	if (!settings.shader_cache_path.empty()) {
+		if (WriteError(settings.shader_cache_path) != 0) {
+			Log("the shader cache folder %ls cannot be written: the compiled shaders are in LocalState this time\n", settings.shader_cache_path.c_str());
+			shader_cache = LocalStateFolder() / L"_PipelineCache";
+		} else {
+			Log("shader cache: %ls\n", shader_cache.c_str());
+		}
+	}
+
 	// The game's patches, as with the desktop launcher's _Patches folder: <user data>\_Patches\<title ID>.json.
 	std::filesystem::path game_patch;
 	if (const auto title_id = ReadGame(game_dir).title_id; !title_id.empty()) {
@@ -197,7 +209,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 	Libs::LibKernel::Memory::SetAddressCollisionHandler(
 	    [](uint64_t start, uint64_t size) { EmulatorHost::Get().RestartForAddressCollision(start, size); });
 
-	m_thread = std::thread([this, game_dir = std::move(game_dir), game_patch, settings, user_data, frame_dumps, vblank_rate_scale] {
+	m_thread = std::thread([this, game_dir = std::move(game_dir), game_patch, settings, user_data, frame_dumps, shader_cache, vblank_rate_scale] {
 		// The emulator's main thread: the window logic runs here, not on the UI thread.
 		Common::InitializeThreads();
 
@@ -267,6 +279,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		}
 		config.gpu_hang_exit_seconds       = settings.gpu_hang_exit_seconds;
 		config.frame_dump_folder           = frame_dumps;
+		config.pipeline_cache_folder       = shader_cache;
 		config.frame_dump_snapshots        = settings.frame_dump_snapshots != 0;
 		config.mesh_compute_forced         = settings.mesh_compute;
 		config.guest_ram_budget_mb         = settings.guest_ram_budget_mb;

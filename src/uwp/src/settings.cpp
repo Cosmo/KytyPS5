@@ -49,6 +49,9 @@ AppSettings LoadSettings() {
 	if (const auto path = json.find("logs_path"); path != json.end() && path->is_string()) {
 		settings.logs_path = winrt::to_hstring(path->get<std::string>()).c_str();
 	}
+	if (const auto path = json.find("shader_cache_path"); path != json.end() && path->is_string()) {
+		settings.shader_cache_path = winrt::to_hstring(path->get<std::string>()).c_str();
+	}
 	const auto read = [&json](const char* key, auto& value) {
 		const auto it = json.find(key);
 		if (it != json.end() && !it->is_null()) {
@@ -165,6 +168,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["game_folders"]     = folders;
 	json["user_data_path"]   = winrt::to_string(settings.user_data_path.wstring());
 	json["logs_path"]        = winrt::to_string(settings.logs_path.wstring());
+	json["shader_cache_path"] = winrt::to_string(settings.shader_cache_path.wstring());
 	json["screen_width"]     = settings.screen_width;
 	json["screen_height"]    = settings.screen_height;
 	json["vsync"]            = settings.vsync;
@@ -250,6 +254,10 @@ std::filesystem::path LogsPathSetting() {
 
 std::filesystem::path UserDataFolder(const AppSettings& settings) {
 	return settings.user_data_path.empty() ? LocalStateFolder() : settings.user_data_path;
+}
+
+std::filesystem::path ShaderCacheFolder(const AppSettings& settings) {
+	return (settings.shader_cache_path.empty() ? LocalStateFolder() : settings.shader_cache_path) / L"_PipelineCache";
 }
 
 std::vector<std::filesystem::path> GameFolders() {

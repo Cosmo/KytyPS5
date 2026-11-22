@@ -30,6 +30,8 @@ struct AppSettings {
 	// The settings page, Storage › Logs and dumps: where the app's and the emulator's logs (kyty-uwp.txt, kyty-emulator.txt) and the frame
 	// dumps (_FrameDump) go. Empty: LocalState.
 	std::filesystem::path logs_path;
+	// Settings › Storage: the folder whose _PipelineCache subfolder keeps the games' compiled shaders and pipelines; empty: LocalState.
+	std::filesystem::path shader_cache_path;
 	uint32_t                           screen_width  = 1280; // the TV resolution the games are told: 1080p below 3840 × 2160 (the settings page)
 	uint32_t                           screen_height = 720;
 	bool                               vsync         = false;
@@ -191,6 +193,10 @@ void                      SaveSettings(const AppSettings& settings);
 
 // The folder of the user's data: AppSettings::user_data_path, or LocalState when none is set.
 [[nodiscard]] std::filesystem::path UserDataFolder(const AppSettings& settings);
+
+// The folder of the games' compiled shaders and pipelines (a file or two per game, named after its title ID): _PipelineCache in
+// AppSettings::shader_cache_path, or in LocalState when none is set.
+[[nodiscard]] std::filesystem::path ShaderCacheFolder(const AppSettings& settings);
 
 // The folders games are searched in: LocalState\Games, then AppSettings::game_folders.
 [[nodiscard]] std::vector<std::filesystem::path> GameFolders();

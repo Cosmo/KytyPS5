@@ -140,6 +140,8 @@ struct ConfigOptions {
 	std::filesystem::path shader_override_folder;
 	// Debugging: where the game menu's frame dump puts its files (a folder for each dump is made in it).
 	std::filesystem::path frame_dump_folder;
+	// Where the pipeline caches are kept (<folder>/<title ID><suffix>); empty: _PipelineCache in the working directory.
+	std::filesystem::path pipeline_cache_folder;
 	// Debugging: the frame dump's draw log also gets the average color of every large floating-point render target after each draw that writes it (a readback each, slow).
 	bool frame_dump_snapshots = false;
 	// Debugging (D3D12 build): a thread watches the GPU and ends the emulator, with the report of a GPU hang, as soon as the device is removed or the
@@ -288,6 +290,7 @@ bool SharedFormatAliases();
 uint32_t DumpPipeline();
 std::filesystem::path ShaderOverrideFolder();
 std::filesystem::path FrameDumpFolder();
+std::filesystem::path PipelineCacheFolder();
 bool                  FrameDumpSnapshots();
 uint32_t              GpuHangExitSeconds();
 bool MeshComputeForced();

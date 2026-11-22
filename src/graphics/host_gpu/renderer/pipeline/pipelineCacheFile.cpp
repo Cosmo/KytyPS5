@@ -52,7 +52,7 @@ PipelineCacheFile::PipelineCacheFile(std::string label, std::string_view suffix,
 		Log("disabled (dirty build)");
 		return;
 	}
-	m_path = std::filesystem::path("_PipelineCache") / (title_id + std::string(suffix));
+	m_path = Config::PipelineCacheFolder() / (title_id + std::string(suffix));
 }
 
 void PipelineCacheFile::LogMessage(const std::string& message) const {
