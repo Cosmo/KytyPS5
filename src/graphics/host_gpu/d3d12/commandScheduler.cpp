@@ -252,13 +252,11 @@ void CommandScheduler::Wait(uint64_t tick) {
 }
 
 void CommandScheduler::PopPendingOperations() {
-	m_master.Refresh();
 	for (;;) {
 		PendingOperation operation;
 		{
 			std::lock_guard lock(m_operation_mutex);
-			if (m_pending_operations.empty() ||
-			    !m_master.IsFree(m_pending_operations.front().tick)) {
+			if (m_pending_operations.empty() || !IsFree(m_pending_operations.front().tick)) {
 				return;
 			}
 			operation = std::move(m_pending_operations.front());
@@ -454,7 +452,7 @@ void CommandScheduler::EndTiming() {
 
 void CommandScheduler::ReadTimings() {
 	auto& counters = GetWorkCounters();
-	while (!m_timed_lists.empty() && m_master.IsFree(m_timed_lists.front().tick)) {
+	while (!m_timed_lists.empty() && IsFree(m_timed_lists.front().tick)) {
 		const auto  slot  = m_timed_lists.front().slot;
 		const auto  start = m_timestamp_values[slot * 2];
 		const auto  end   = m_timestamp_values[slot * 2 + 1];
