@@ -5,6 +5,9 @@
 #include "common/common.h"
 #include "common/virtualMemory.h"
 
+#include <utility>
+#include <vector>
+
 namespace Libs::Graphics {
 class RenderContext;
 enum class PageFaultAccess;
@@ -134,6 +137,10 @@ void                   RegisterCallbacks(callback_func_t alloc_func, callback_fu
 // the request fails as before.
 using address_collision_handler_t = void (*)(uint64_t start, uint64_t size);
 void SetAddressCollisionHandler(address_collision_handler_t handler);
+// Fixed ranges this game asked for in earlier runs (where host memory sat in the way): before the pipelines are built, a range that is not the
+// guest's goes to the collision handler at once, as the game's request would later (BuildBeforeStart can take a minute on the Xbox).
+void SetKnownFixedRanges(std::vector<std::pair<uint64_t, uint64_t>> ranges);
+void CheckKnownFixedRanges();
 int AllocateDirectMemory(int64_t search_start, int64_t search_end, size_t size, size_t alignment,
                          int memory_type, int64_t* phys_addr_out, bool automatic = false);
 bool IsAmmMemoryRange(uint64_t vaddr, size_t size);
