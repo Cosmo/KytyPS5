@@ -71,6 +71,7 @@ AppSettings LoadSettings() {
 	read("user_name", settings.user_name);
 	read("console_language", settings.console_language);
 	read("skip_intro_logos", settings.skip_intro_logos);
+	read("audio_output", settings.audio_output);
 	read("home_screen_music", settings.home_screen_music);
 	read("controller_vibration", settings.controller_vibration);
 	read("controller_speaker_volume", settings.controller_speaker_volume);
@@ -180,6 +181,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["user_name"]        = settings.user_name;
 	json["console_language"] = settings.console_language;
 	json["skip_intro_logos"] = settings.skip_intro_logos;
+	json["audio_output"]     = settings.audio_output;
 	json["home_screen_music"] = settings.home_screen_music;
 	json["controller_vibration"]      = settings.controller_vibration;
 	json["controller_speaker_volume"] = settings.controller_speaker_volume;
