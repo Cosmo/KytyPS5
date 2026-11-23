@@ -355,6 +355,40 @@ PipelineMode LibraryPipelineMode() {
 	return mode == "alongside" ? PipelineMode::Alongside : mode == "first" ? PipelineMode::First : PipelineMode::WhenNeeded;
 }
 
+std::vector<std::pair<uint64_t, uint64_t>> KnownFixedRanges(const std::filesystem::path& game) {
+	std::vector<std::pair<uint64_t, uint64_t>> ranges;
+	const auto                                 state = ReadAppState();
+	const auto                                 all   = state.find("fixed_ranges");
+	if (all == state.end() || !all->is_object()) {
+		return ranges;
+	}
+	const auto found = all->find(winrt::to_string(game.wstring()));
+	if (found == all->end() || !found->is_array()) {
+		return ranges;
+	}
+	for (const auto& range: *found) {
+		if (range.is_array() && range.size() == 2 && range[0].is_number_unsigned() && range[1].is_number_unsigned()) {
+			ranges.emplace_back(range[0].get<uint64_t>(), range[1].get<uint64_t>());
+		}
+	}
+	return ranges;
+}
+
+void AddKnownFixedRange(const std::filesystem::path& game, uint64_t start, uint64_t size) {
+	auto  state = ReadAppState();
+	auto& list  = state["fixed_ranges"][winrt::to_string(game.wstring())];
+	if (!list.is_array()) {
+		list = nlohmann::json::array();
+	}
+	for (const auto& range: list) {
+		if (range.is_array() && range.size() == 2 && range[0] == start && range[1] == size) {
+			return;
+		}
+	}
+	list.push_back({start, size});
+	WriteAppState(state);
+}
+
 void RequestLibraryPipelines() {
 	switch (LibraryPipelineMode()) {
 	case PipelineMode::Alongside:

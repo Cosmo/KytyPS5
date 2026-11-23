@@ -224,6 +224,10 @@ void                       SetLibraryPipelineMode(PipelineMode mode);
 // shortcut, or the app's restart after an address collision).
 void RequestLibraryPipelines();
 
+// Fixed address ranges a game asked for where host memory sat (EmulatorHost::RestartForAddressCollision), by the game's folder or file.
+[[nodiscard]] std::vector<std::pair<uint64_t, uint64_t>> KnownFixedRanges(const std::filesystem::path& game);
+void                                                     AddKnownFixedRange(const std::filesystem::path& game, uint64_t start, uint64_t size);
+
 } // namespace Kyty::Uwp
 
 #endif // EMULATOR_SRC_UWP_SETTINGS_H_
