@@ -576,6 +576,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	features.vertex_formats_as_integers   = true; // scaled and 10:10:10:2 SNORM vertex input (D3D12::VertexFormat)
 	features.unnormalized_samplers_in_shader = true; // D3D12 samplers have no unnormalized coordinates
 	features.sample_compare_without_bias_grad = !m_compiler.SupportsCompareBiasGrad();
+	features.integer_sample_as_fetch          = true; // (DXIL samples float, unorm and snorm resources only)
 	features.storage_images_as_arrays         = true; // (a 1D or 2D storage view starts at the first layer: Image::UnorderedAccessView)
 	features.realtime_clock_placeholder       = true; // (no shader clock in DXIL)
 	features.speculative_buffer_loads         = true; // (buffer views read 0 past their end: far fewer blocks for the driver to compile)
