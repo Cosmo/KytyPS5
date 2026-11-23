@@ -93,7 +93,7 @@ struct EmitterState {
 		               input_info.vertex->mesh.compute_emulation;
 		tess_compute = (program.stage == ShaderType::Local || program.stage == ShaderType::TessellationControl ||
 		                program.stage == ShaderType::TessellationEvaluation) &&
-		               input_info.vertex != nullptr && input_info.vertex->tess.compute_emulation;
+		               input_info.vertex != nullptr && GetHostShaderFeatures().tess_compute_emulation;
 	}
 
 	Builder                                          builder;

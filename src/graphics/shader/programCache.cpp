@@ -441,8 +441,7 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 			ShaderRecompiler::AnalyzeTessellationPrograms(vertex_params[0].code, vertex_params[1].code, layout->second);
 		}
 		for (auto& stage: vertex_info) {
-			stage.tess                   = layout->second;
-			stage.tess.compute_emulation = m_limits.tess_compute_emulation;
+			stage.tess = layout->second;
 		}
 	} else {
 		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
