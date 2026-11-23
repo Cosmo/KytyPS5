@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
+#include "graphics/host_gpu/renderer/resolveCache.h"
 #include "kernel/eventQueue.h"
 
 #include <memory>
@@ -57,6 +58,7 @@ public:
 	RenderExecutor&   GetRenderExecutor() { return m_render_executor; }
 	BufferCache&      GetBufferCache() { return m_buffer_cache; }
 	TextureCache&     GetTextureCache() { return m_texture_cache; }
+	ResolveCache&     GetResolveCache() { return m_resolve_cache; }
 	PipelineCache&    GetPipelineCache() { return m_pipeline_cache; }
 	ImageHeap&        GetImageHeap() { return m_image_heap; }
 	OcclusionQueries& GetOcclusionQueries() { return m_occlusion_queries; }
@@ -98,6 +100,7 @@ private:
 	ComputeKernels            m_compute_kernels;
 	SamplerCache              m_sampler_cache;
 	PageManager               m_page_manager;
+	ResolveCache              m_resolve_cache;
 	BufferCache               m_buffer_cache;
 	TextureCache              m_texture_cache;
 	ImageHeap                 m_image_heap;
