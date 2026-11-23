@@ -804,6 +804,14 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 		    },
 		    {L"The system language the games use for text and speech, where a game offers it.", L"Trophy names follow it too."});
 	}
+	AddChoice(
+	    panel(L"System"), explanation, L"Audio output", {L"TV", L"AV amplifier", L"Sound bar", L"Headphones"},
+	    std::min<size_t>(settings.audio_output, 3),
+	    [state, save](size_t index) {
+		    state->settings.audio_output = static_cast<uint32_t>(index);
+		    save();
+	    },
+	    {L"The audio device the games see: a TV, an AV amplifier (7.1), a sound bar (5.1) or headphones."});
 	AddSwitch(
 	    panel(L"System"), explanation, L"Skip intro logos", settings.skip_intro_logos,
 	    [state, save](bool on) {

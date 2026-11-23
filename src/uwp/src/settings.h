@@ -42,6 +42,7 @@ struct AppSettings {
 	std::string                        user_name     = "Kyty";
 	uint32_t                           console_language = 1; // English (United States)
 	bool                               skip_intro_logos = false; // games that ask the console skip their logo videos at the start
+	uint32_t                           audio_output     = 0; // the audio device games see: 0 TV, 1 AV amplifier, 2 sound bar, 3 headphones (Config::AudioOutput)
 	bool                               home_screen_music = true; // a game's music in the library while its cover has the focus (titleMusic.h)
 	bool                               trophy_notifications = true; // a notification for each trophy earned (Config::trophy_enabled)
 	bool                               network_connected    = false; // games see the device's network connection (Config::network_connected)
