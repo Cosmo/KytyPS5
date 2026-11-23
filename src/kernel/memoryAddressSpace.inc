@@ -1845,20 +1845,45 @@ public:
 			return false;
 		}
 		// (The pager's windows: their faults bring them back.)
-		if ((m_lazy.FlagsOf(address) & (Xbox::Lazy::kSwept | Xbox::Lazy::kEvicting | Xbox::Lazy::kEvicted)) != 0) {
+		constexpr uint8_t kPaged = Xbox::Lazy::kSwept | Xbox::Lazy::kEvicting | Xbox::Lazy::kEvicted;
+		const uint8_t     flags  = m_lazy.FlagsOf(address);
+		if ((flags & kPaged) != 0) {
 			return false;
 		}
-		MEMORY_BASIC_INFORMATION info {};
-		if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT) {
-			return false;
+		// A fully committed window needs no system call to tell (VirtualQuery measures the run behind the page, slow over a large range).
+		if ((flags & Xbox::Lazy::kFull) == 0) {
+			MEMORY_BASIC_INFORMATION info {};
+			if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT) {
+				return false;
+			}
 		}
 		constexpr uint64_t kPage = 0x1000;
 		const uint64_t     page  = address & ~(kPage - 1u);
-		if (!VirtualMemory::Windows::ProtectLazy(page, kPage, is_write ? VirtualMemory::Mode::ReadWrite : VirtualMemory::Mode::Read)) {
-			return false;
+		const auto         mode  = is_write ? VirtualMemory::Mode::ReadWrite : VirtualMemory::Mode::Read;
+		uint64_t           end   = 0;
+		// A write opens the copy's pages from here on at once, up to the first window that is not fully committed or that the pager holds: the copy
+		// writes them all, as HostCopyToGuest opens a whole run. One page per fault cost an image write-back a fault for every page of the image.
+		// (A read opens one page: opening a run for reading would take write access from the pages that have it.)
+		if (is_write && (flags & Xbox::Lazy::kFull) != 0) {
+			constexpr uint64_t kWindow  = uint64_t {1} << Xbox::Lazy::Regions::kWindowBits;
+			const uint64_t     copy_end = (copy->end + kPage - 1u) & ~(kPage - 1u);
+			uint64_t           next     = (page & ~(kWindow - 1u)) + kWindow;
+			while (next < copy_end && (m_lazy.FlagsOf(next) & (Xbox::Lazy::kFull | kPaged)) == Xbox::Lazy::kFull) {
+				next += kWindow;
+			}
+			const uint64_t run_end = std::min(next, copy_end);
+			if (VirtualMemory::Windows::ProtectLazy(page, run_end - page, mode)) {
+				end = run_end;
+			}
+		}
+		if (end == 0) {
+			if (!VirtualMemory::Windows::ProtectLazy(page, kPage, mode)) {
+				return false;
+			}
+			end = page + kPage;
 		}
 		copy->opened_begin = std::min(copy->opened_begin, page);
-		copy->opened_end   = std::max(copy->opened_end, page + kPage);
+		copy->opened_end   = std::max(copy->opened_end, end);
 		return true;
 	}
 
