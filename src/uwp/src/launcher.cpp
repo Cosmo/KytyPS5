@@ -16,6 +16,7 @@
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.Text.h>
 #include <winrt/Windows.UI.Xaml.Automation.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
@@ -199,8 +200,12 @@ constexpr wchar_t LauncherMarkup[] = LR"xaml(
                    Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
       </StackPanel>
 
-      <TextBlock x:Name="Title" Grid.Row="3" Margin="48,0" Style="{StaticResource TitleTextBlockStyle}"
-                 TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+      <!-- The selected game's name, and its badges after it (PRO, VR). -->
+      <StackPanel Grid.Row="3" Margin="48,0" Orientation="Horizontal" Spacing="12">
+        <TextBlock x:Name="Title" Style="{StaticResource TitleTextBlockStyle}" MaxWidth="880" VerticalAlignment="Center"
+                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+        <StackPanel x:Name="TitleBadges" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" />
+      </StackPanel>
 
       <ScrollViewer Grid.Row="4" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Hidden"
                     VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled" IsTabStop="False">
@@ -313,6 +318,7 @@ struct Launcher {
 	uint32_t                                 selection = 0;
 	size_t                                   selected  = 0;
 	xaml::Controls::TextBlock                title {nullptr};
+	xaml::Controls::StackPanel               title_badges {nullptr};
 	xaml::Controls::StackPanel               covers {nullptr};
 	xaml::Controls::Grid                     page {nullptr};
 	xaml::Controls::Button                   settings_button {nullptr};
@@ -526,17 +532,35 @@ std::vector<DetailRow> ReadDetails(const GameEntry& game) {
 			}
 			return value->get<uint32_t>();
 		};
-		// The PS5 Pro bit is the desktop launcher's (attribute3 bit 22). Other attribute bits are not shown as features: their meanings
-		// are not confirmed; their values are among the metadata below.
+		// The known feature bits of attribute, attribute3 and attribute4 (psdevwiki's param.json page and comparisons of games' files; the
+		// PS5 Pro bit is also the desktop launcher's), shown whether or not KytyPS5 uses the feature. Their raw values are among the metadata
+		// below.
+		const auto attribute  = flags("attribute");
 		const auto attribute3 = flags("attribute3");
-		rows.push_back({L"Graphics", {}});
-		rows.push_back({L"PS5 Pro mode", !attribute3 ? L"Unknown" : (*attribute3 & (1u << 22)) != 0 ? L"Supported" : L"Not supported"});
+		const auto attribute4 = flags("attribute4");
+		const auto has        = [](const std::optional<uint32_t>& value, uint32_t bit) { return value && (*value & (1u << bit)) != 0; };
+		const auto supported  = [&](const std::optional<uint32_t>& value, uint32_t bit) -> std::wstring {
+			return !value ? L"Unknown" : has(value, bit) ? L"Supported" : L"Not supported";
+		};
+		rows.push_back({L"Features", {}});
+		rows.push_back({L"HDR", supported(attribute, 29)});
+		rows.push_back({L"120 Hz", supported(attribute3, 6)});
+		rows.push_back({L"VRR", !attribute3                                                         ? L"Unknown"
+		                        : has(attribute3, 18) && has(attribute3, 19) && has(attribute3, 20) ? L"Turned off by the game"
+		                        : has(attribute3, 19)                                               ? L"Supported, needed for its 120 Hz mode"
+		                        : has(attribute3, 18)                                               ? L"Supported"
+		                                                                                            : L"Not supported"});
+		rows.push_back({L"PS5 Pro mode", supported(attribute3, 22)});
+		rows.push_back({L"PS5 Pro 8K", supported(attribute3, 23)});
 		if (const auto psml = manifest.find("psml"); psml != manifest.end() && psml->is_object()) {
 			const auto version = psml->find("mfsrVersion");
 			if (version != psml->end() && version->is_string() && !version->get_ref<const std::string&>().empty()) {
 				rows.push_back({L"PSML version", winrt::to_hstring(version->get_ref<const std::string&>()).c_str()});
 			}
 		}
+		rows.push_back({L"PS VR2", !attribute3 ? L"Unknown" : has(attribute3, 11) ? L"Required" : has(attribute3, 10) ? L"Supported" : L"Not supported"});
+		rows.push_back({L"Power Saver", supported(attribute4, 0)});
+		rows.push_back({L"Suspends when its user signs out", !attribute ? L"Unknown" : has(attribute, 0) ? L"Yes" : L"No"});
 	}
 
 	rows.push_back({L"Game information", {}});
@@ -893,11 +917,49 @@ winrt::fire_and_forget ShowBackdrop(std::shared_ptr<Launcher> launcher, uint32_t
 	launcher->front = 1 - launcher->front;
 }
 
+// A badge after the selected game's name: its text in the outline's color, or dark on a filled one.
+xaml::Controls::Border Badge(const wchar_t* text, winrt::Windows::UI::Color outline, winrt::Windows::UI::Color color, bool filled) {
+	xaml::Controls::TextBlock label;
+	label.Text(text);
+	label.FontSize(14);
+	label.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+	label.Foreground(xaml::Media::SolidColorBrush(filled ? winrt::Windows::UI::Color {255, 0x0B, 0x0E, 0x14} : color));
+	xaml::Controls::Border badge;
+	badge.Child(label);
+	badge.Padding({8, 3, 8, 3});
+	badge.CornerRadius({4, 4, 4, 4});
+	badge.BorderThickness({1, 1, 1, 1});
+	badge.BorderBrush(xaml::Media::SolidColorBrush(outline));
+	if (filled) {
+		badge.Background(xaml::Media::SolidColorBrush(outline));
+	}
+	return badge;
+}
+
+// The badges of `game`: PRO (PS5 Pro), and VR (PS VR2; VR ONLY when the game needs the headset).
+void ShowBadges(const std::shared_ptr<Launcher>& launcher, const GameEntry& game) {
+	auto badges = launcher->title_badges.Children();
+	badges.Clear();
+	const winrt::Windows::UI::Color gold {255, 0xD9, 0xB4, 0x5A};
+	const winrt::Windows::UI::Color gold_text {255, 0xF0, 0xD4, 0x8A};
+	const winrt::Windows::UI::Color blue {255, 0x8F, 0xA3, 0xC7};
+	const winrt::Windows::UI::Color blue_text {255, 0xC9, 0xD6, 0xF0};
+	if ((game.attribute3 & GameFeature::Ps5Pro) != 0) {
+		badges.Append(Badge(L"PRO", gold, gold_text, false));
+	}
+	if ((game.attribute3 & GameFeature::PsVr2Needed) != 0) {
+		badges.Append(Badge(L"VR ONLY", blue, blue_text, true));
+	} else if ((game.attribute3 & GameFeature::PsVr2) != 0) {
+		badges.Append(Badge(L"VR", blue, blue_text, false));
+	}
+}
+
 void Select(const std::shared_ptr<Launcher>& launcher, size_t index) {
 	launcher->selected = index;
 	launcher->settings_button.XYFocusDown(launcher->covers.Children().GetAt(static_cast<uint32_t>(index)));
 	const auto& game   = launcher->games[index];
 	launcher->title.Text(winrt::to_hstring(game.name));
+	ShowBadges(launcher, game);
 	ShowBackdrop(launcher, ++launcher->selection, BackdropImage(game.folder));
 	if (launcher->home_screen_music) {
 		TitleMusic::Play(game);
@@ -1120,6 +1182,7 @@ xaml::UIElement CreatePage(LauncherActions actions, bool scan, std::optional<siz
 	launcher->backdrops[0] = find(L"BackdropA").as<xaml::Controls::Image>();
 	launcher->backdrops[1] = find(L"BackdropB").as<xaml::Controls::Image>();
 	launcher->title        = find(L"Title").as<xaml::Controls::TextBlock>();
+	launcher->title_badges = find(L"TitleBadges").as<xaml::Controls::StackPanel>();
 	launcher->options      = find(L"Options").as<xaml::FrameworkElement>();
 	launcher->options_panel = find(L"OptionsPanel").as<xaml::FrameworkElement>();
 	launcher->options_main  = find(L"OptionsMain").as<xaml::FrameworkElement>();
