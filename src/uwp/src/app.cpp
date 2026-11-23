@@ -1118,6 +1118,7 @@ void App::Show(winrt::hstring const& activation_arguments) {
 		if (run_request) {
 			EmulatorHost::Get().SetRestartAttempts(run_request->retry);
 			EmulatorHost::Get().SetLaunchActivity(run_request->activity);
+			RequestLibraryPipelines();
 		}
 		if (trophy_link) {
 			window.Content(open_trophies(*trophy_link));
