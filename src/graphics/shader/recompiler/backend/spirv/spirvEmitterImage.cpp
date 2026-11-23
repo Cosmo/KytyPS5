@@ -399,6 +399,223 @@ void NormalizeTexelCoordinates(ValueEmitContext& ctx, const IR::Inst& /*inst*/, 
 	coord = result;
 }
 
+// HostShaderFeatures::integer_sample_as_fetch: the texel a sample of an integer image would read with nearest filtering and clamped
+// coordinates, at the sample's explicit level (rounded) or level 0, with its texel offset. Not for cube images (returns 0: the caller
+// samples).
+uint32_t SampleIntegerAsFetch(ValueEmitContext& ctx, const IR::ImageResource& candidate, uint32_t resource, uint32_t array_index,
+                              uint32_t coord, uint32_t result_type, const std::array<uint32_t, 5>& operands, size_t operand_count) {
+	auto& state = ctx.state;
+	if (candidate.cube) {
+		return 0u;
+	}
+	const auto& info        = ImageDimensionInfoFor(candidate.dimension);
+	// (A 1D image's host coordinates have its row after x.)
+	const auto  row         = info.one_dimensional ? 1u : 0u;
+	const auto  spatial     = info.spatial_components + row;
+	const auto  coordinates = info.coordinate_components + row;
+	const auto  glsl        = [&](uint32_t type, GLSLstd450 op, auto... args) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpExtInst, type, result, GlslStd450(state), static_cast<uint32_t>(op), args...);
+		return result;
+	};
+	const auto component = [&](uint32_t vector, uint32_t type, uint32_t index, uint32_t count) {
+		if (count == 1u) {
+			return vector;
+		}
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, type, result, vector, index);
+		return result;
+	};
+	// The level: the sample's explicit one, else the first.
+	auto level = ConstantI32(state, 0);
+	uint32_t offset_mask = 0;
+	uint32_t offset      = 0;
+	if (operand_count != 0u) {
+		size_t next = 1;
+		if ((operands[0] & spv::ImageOperandsLodMask) != 0u) {
+			level = Unary(state, spv::OpConvertFToS, TypeI32(state),
+			              glsl(TypeF32(state), GLSLstd450FMax, glsl(TypeF32(state), GLSLstd450RoundEven, operands[next]), ZeroF32(state)));
+			next++;
+		}
+		if ((operands[0] & (spv::ImageOperandsConstOffsetMask | spv::ImageOperandsOffsetMask)) != 0u && next < operand_count) {
+			offset_mask = operands[0] & (spv::ImageOperandsConstOffsetMask | spv::ImageOperandsOffsetMask);
+			offset      = operands[next];
+		}
+	}
+	state.builder.RequireCapability(spv::CapabilityImageQuery);
+	const auto image = LoadImageDescriptor(state, resource, 0u, array_index);
+	const auto size  = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpImageQuerySizeLod, ImageViewSizeType(state, candidate.dimension), size, image, level);
+	const auto size_components = coordinates; // the size type has a layer count for arrays, like the coordinates
+	std::array<uint32_t, 4> texel {};
+	for (uint32_t index = 0; index < coordinates; index++) {
+		const auto c = component(coord, TypeF32(state), index, coordinates);
+		const auto s = Unary(state, spv::OpBitcast, TypeI32(state), component(size, TypeU32(state), index, size_components));
+		const auto last = Binary(state, spv::OpISub, TypeI32(state), s, ConstantI32(state, 1));
+		const auto at   = index < spatial
+		                      ? Unary(state, spv::OpConvertFToS, TypeI32(state),
+		                              glsl(TypeF32(state), GLSLstd450Floor,
+		                                   Binary(state, spv::OpFMul, TypeF32(state), c, Unary(state, spv::OpConvertSToF, TypeF32(state), s))))
+		                      : Unary(state, spv::OpConvertFToS, TypeI32(state), glsl(TypeF32(state), GLSLstd450RoundEven, c));
+		texel[index] = glsl(TypeI32(state), GLSLstd450SClamp, at, ConstantI32(state, 0), last);
+	}
+	uint32_t coord_i = texel[0];
+	if (coordinates > 1u) {
+		coord_i = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeConstruct, TypeI32Vector(state, coordinates), coord_i,
+		                          std::span<const uint32_t>(texel).first(coordinates));
+	}
+	const auto fetched = state.builder.AllocateId();
+	if (offset_mask != 0u) {
+		state.builder.AddFunction(spv::OpImageFetch, result_type, fetched, image, coord_i, spv::ImageOperandsLodMask | offset_mask, level, offset);
+	} else {
+		state.builder.AddFunction(spv::OpImageFetch, result_type, fetched, image, coord_i, spv::ImageOperandsLodMask, level);
+	}
+	return fetched;
+}
+
+// HostShaderFeatures::integer_sample_as_fetch, 2D images and arrays: the texel a nearest sample reads, through the sampler. Gathers
+// (allowed on integer images) read the 2x2 texels around the position with the sampler's addressing (wrap, mirror, clamp, border), and
+// the one the position falls in is kept: one gather per component. The level is the sample's own (explicit LOD, gradients, or in a pixel
+// shader the coordinates' derivatives with the sample's bias), nearest, within the image's levels; the sampler's own LOD bias and range
+// are not in the sample instruction. Returns 0 for images that take another path (1D, 3D, cube).
+uint32_t SampleIntegerThroughGather(ValueEmitContext& ctx, const IR::ImageResource& candidate, uint32_t resource, uint32_t array_index,
+                                    uint32_t sampler_id, bool sampler_dynamic, uint32_t coord, uint32_t result_type, spv::Op opcode,
+                                    const std::array<uint32_t, 5>& operands, size_t operand_count) {
+	auto& state = ctx.state;
+	const auto& info = ImageDimensionInfoFor(candidate.dimension);
+	if (candidate.cube || info.one_dimensional || info.spatial_components != 2u) {
+		return 0u;
+	}
+	const auto coordinates = info.coordinate_components;
+	const auto type_f2     = TypeF32Vector(state, 2);
+	const auto type_u2     = TypeU32Vector(state, 2);
+	const auto glsl        = [&](uint32_t type, GLSLstd450 op, auto... args) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpExtInst, type, result, GlslStd450(state), static_cast<uint32_t>(op), args...);
+		return result;
+	};
+	const auto xy = [&](uint32_t value, uint32_t type) {
+		if (coordinates == 2u) {
+			return value;
+		}
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpVectorShuffle, type, result, value, value, 0u, 1u);
+		return result;
+	};
+	// The image operands: an explicit level, gradients, a bias, and a texel offset (which the gathers take as they are).
+	const auto mask        = operand_count != 0u ? operands[0] : 0u;
+	uint32_t   next        = 1;
+	uint32_t   level_f     = 0;
+	uint32_t   grad_x      = 0;
+	uint32_t   grad_y      = 0;
+	uint32_t   bias        = 0;
+	if ((mask & spv::ImageOperandsBiasMask) != 0u) {
+		bias = operands[next++];
+	}
+	if ((mask & spv::ImageOperandsLodMask) != 0u) {
+		level_f = operands[next++];
+	}
+	if ((mask & spv::ImageOperandsGradMask) != 0u) {
+		grad_x = operands[next++];
+		grad_y = operands[next++];
+	}
+	uint32_t offset_mask = mask & (spv::ImageOperandsConstOffsetMask | spv::ImageOperandsOffsetMask);
+	uint32_t offset      = offset_mask != 0u && next < operand_count ? operands[next] : 0u;
+	if (offset == 0u) {
+		offset_mask = 0u;
+	}
+	if ((offset_mask & spv::ImageOperandsOffsetMask) != 0u) {
+		state.builder.RequireCapability(spv::CapabilityImageGatherExtended);
+	}
+	const auto position = xy(coord, type_f2);
+	if (level_f == 0u && grad_x == 0u && (opcode == spv::OpImageSampleImplicitLod)) {
+		grad_x = Unary(state, spv::OpDPdx, type_f2, position);
+		grad_y = Unary(state, spv::OpDPdy, type_f2, position);
+	}
+	state.builder.RequireCapability(spv::CapabilityImageQuery);
+	const auto image   = LoadImageDescriptor(state, resource, 0u, array_index);
+	const auto size_at = [&](uint32_t level) {
+		const auto size = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpImageQuerySizeLod, ImageViewSizeType(state, candidate.dimension), size, image, level);
+		return Unary(state, spv::OpConvertUToF, type_f2, xy(size, type_u2));
+	};
+	if (grad_x != 0u) {
+		// The level the gradients select: log2 of the longer footprint, in texels of the first level.
+		const auto size0   = size_at(ConstantI32(state, 0));
+		const auto dx      = Binary(state, spv::OpFMul, type_f2, grad_x, size0);
+		const auto dy      = Binary(state, spv::OpFMul, type_f2, grad_y, size0);
+		const auto length2 = [&](uint32_t v) { return Binary(state, spv::OpDot, TypeF32(state), v, v); };
+		const auto longest = glsl(TypeF32(state), GLSLstd450FMax, length2(dx), length2(dy));
+		const auto nonzero = glsl(TypeF32(state), GLSLstd450FMax, longest, ConstantF32Value(state, 1e-30f));
+		level_f            = Binary(state, spv::OpFMul, TypeF32(state), glsl(TypeF32(state), GLSLstd450Log2, nonzero),
+		                            ConstantF32Value(state, 0.5f));
+	}
+	if (level_f == 0u) {
+		level_f = ConstantF32Value(state, 0.0f);
+	}
+	if (bias != 0u) {
+		level_f = Binary(state, spv::OpFAdd, TypeF32(state), level_f, bias);
+	}
+	// The nearest level within the image's.
+	const bool many_levels = candidate.mip_mode == IR::ImageMipMode::Dynamic && candidate.mip_count > 1u;
+	uint32_t   level       = ConstantI32(state, 0);
+	if (many_levels) {
+		const auto levels = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpImageQueryLevels, TypeI32(state), levels, image);
+		const auto last    = Binary(state, spv::OpISub, TypeI32(state), levels, ConstantI32(state, 1));
+		const auto nearest = glsl(TypeF32(state), GLSLstd450FClamp,
+		                          glsl(TypeF32(state), GLSLstd450Floor, Binary(state, spv::OpFAdd, TypeF32(state), level_f,
+		                                                                       ConstantF32Value(state, 0.5f))),
+		                          ConstantF32Value(state, 0.0f), ConstantF32Value(state, 15.0f));
+		level = glsl(TypeI32(state), GLSLstd450SMax,
+		             glsl(TypeI32(state), GLSLstd450SMin, Unary(state, spv::OpConvertFToS, TypeI32(state), nearest), last),
+		             ConstantI32(state, 0));
+	}
+	// Which of the gathered texels the position is in: the gather's footprint starts at floor(position * size - 0.5).
+	const auto half      = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, type_f2, half, ConstantF32Value(state, 0.5f), ConstantF32Value(state, 0.5f));
+	const auto texel     = Binary(state, spv::OpFSub, type_f2, Binary(state, spv::OpFMul, type_f2, position, size_at(level)), half);
+	const auto fraction  = Binary(state, spv::OpFSub, type_f2, texel, glsl(type_f2, GLSLstd450Floor, texel));
+	const auto component = [&](uint32_t vector, uint32_t index) {
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), result, vector, index);
+		return result;
+	};
+	const auto right = Binary(state, spv::OpFOrdGreaterThanEqual, TypeBool(state), component(fraction, 0), ConstantF32Value(state, 0.5f));
+	const auto lower = Binary(state, spv::OpFOrdGreaterThanEqual, TypeBool(state), component(fraction, 1), ConstantF32Value(state, 0.5f));
+	const auto scalar_type = ImageScalarType(state, candidate.numeric_class);
+	const auto EmitAtLevel = [&](uint32_t mip) {
+		const auto sampled = MakeSampledImage(state, resource, sampler_id, mip, array_index, sampler_dynamic);
+		std::array<uint32_t, 4> channels {};
+		for (uint32_t channel = 0; channel < 4u; channel++) {
+			const auto gathered = state.builder.AllocateId();
+			if (offset_mask != 0u) {
+				state.builder.AddFunction(spv::OpImageGather, result_type, gathered, sampled, coord, ConstantU32(state, channel), offset_mask,
+				                          offset);
+			} else {
+				state.builder.AddFunction(spv::OpImageGather, result_type, gathered, sampled, coord, ConstantU32(state, channel));
+			}
+			// Gather order: (u0, v1), (u1, v1), (u1, v0), (u0, v0).
+			const auto pick = [&](uint32_t index) {
+				const auto result = state.builder.AllocateId();
+				state.builder.AddFunction(spv::OpCompositeExtract, scalar_type, result, gathered, index);
+				return result;
+			};
+			const auto top    = Select(state, scalar_type, right, pick(2), pick(3));
+			const auto bottom = Select(state, scalar_type, right, pick(1), pick(0));
+			channels[channel] = Select(state, scalar_type, lower, bottom, top);
+		}
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeConstruct, result_type, result, channels[0], channels[1], channels[2], channels[3]);
+		return result;
+	};
+	if (!many_levels) {
+		return EmitAtLevel(0u);
+	}
+	return EmitIndexSwitch(state, Unary(state, spv::OpBitcast, TypeU32(state), level), candidate.mip_count, result_type, EmitAtLevel);
+}
+
 // HostShaderFeatures::sample_compare_without_bias_grad: a comparison sample loses its bias or gradients and samples at the level the
 // hardware picks in a pixel shader, at level 0 elsewhere; its other image operands (offsets) stay.
 void CompareWithoutBiasGrad(EmitterState& state, spv::Op& opcode, std::array<uint32_t, 5>& operands, size_t& count) {
@@ -1425,6 +1642,19 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				sample_operand_count = std::max(size_t{1}, sample_operand_count);
 				sample_operands[0] |= spv::ImageOperandsMinLodMask;
 				sample_operands[sample_operand_count++] = min_lod;
+			}
+			if (!dref && candidate.numeric_class != Prospero::TextureNumericClass::Float &&
+			    GetHostShaderFeatures().integer_sample_as_fetch) {
+				if (const auto gathered = SampleIntegerThroughGather(ctx, candidate, resource, array_index, sampler.id, sampler.dynamic, coord,
+				                                                     result_type, sample_opcode, sample_operands, sample_operand_count);
+				    gathered != 0u) {
+					return gathered;
+				}
+				if (const auto fetched = SampleIntegerAsFetch(ctx, candidate, resource, array_index, coord, result_type, sample_operands,
+				                                              sample_operand_count);
+				    fetched != 0u) {
+					return fetched;
+				}
 			}
 			const auto sampled = MakeSampledImage(state, resource, sampler.id, 0u, array_index,
 			                                      sampler.dynamic);
