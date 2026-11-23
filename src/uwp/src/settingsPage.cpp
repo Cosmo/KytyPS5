@@ -1211,6 +1211,14 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    {L"Decodes the videos games play through the system video player with the console's video decoder, so the CPU stays free for the game.",
 	     L"Videos the decoder can't take are decoded on the CPU. Off decodes all of them on the CPU."});
 	AddSwitch(
+	    testing, explanation, L"Short videos", settings.short_videos,
+	    [state, save](bool on) {
+		    state->settings.short_videos = on;
+		    save();
+	    },
+	    {L"Ends the videos games play through the system video player after one second, so intros and logos pass quickly.",
+	     L"Videos that loop play normally. Videos a game decodes itself play in full."});
+	AddSwitch(
 	    testing, explanation, L"PlayGo fallback", settings.playgo_fallback,
 	    [state, save](bool on) {
 		    state->settings.playgo_fallback = on;

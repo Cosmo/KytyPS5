@@ -295,6 +295,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.swap_pool_mb                = settings.swap_pool_mb;
 		config.video_decode_threads        = settings.video_decode_threads;
 		config.video_hardware_decode       = settings.video_hardware_decode;
+		config.short_videos                = settings.short_videos;
 		config.gpu_memory_log              = settings.gpu_memory_log;
 		config.gpu_crash_diagnostics       = settings.gpu_crash_diagnostics;
 		config.pipeline_cache_any_build    = settings.shader_cache_any_build;
