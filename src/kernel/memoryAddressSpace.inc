@@ -1838,10 +1838,11 @@ public:
 	// host copy closing what it had opened (the GPU thread reading a buffer while the priority thread writes an image back over its pages).
 	// The copy is the host's own access (the desktop build's goes through the backing view and never faults), so the page opens for it.
 	// The GPU's fault handler would take it for the game's access and wait for the write-backs over the page: on the priority thread,
-	// for the one it is running.
+	// for the one it is running. Only a copy that writes opens the page (the write-back is one): a copy that reads must wait for the
+	// image write-backs over the page like the game's access, or it reads the bytes from before them (a game's lighting turned to NaN).
 	bool OpenForHostCopy(uint64_t address, bool is_write) {
 		auto* copy = t_host_copy;
-		if (copy == nullptr || address < copy->begin || address >= copy->end) {
+		if (!is_write || copy == nullptr || address < copy->begin || address >= copy->end) {
 			return false;
 		}
 		// (The pager's windows: their faults bring them back.)
@@ -1863,8 +1864,7 @@ public:
 		uint64_t           end   = 0;
 		// A write opens the copy's pages from here on at once, up to the first window that is not fully committed or that the pager holds: the copy
 		// writes them all, as HostCopyToGuest opens a whole run. One page per fault cost an image write-back a fault for every page of the image.
-		// (A read opens one page: opening a run for reading would take write access from the pages that have it.)
-		if (is_write && (flags & Xbox::Lazy::kFull) != 0) {
+		if ((flags & Xbox::Lazy::kFull) != 0) {
 			constexpr uint64_t kWindow  = uint64_t {1} << Xbox::Lazy::Regions::kWindowBits;
 			const uint64_t     copy_end = (copy->end + kPage - 1u) & ~(kPage - 1u);
 			uint64_t           next     = (page & ~(kWindow - 1u)) + kWindow;
