@@ -465,7 +465,9 @@ void BuildStageStaticKey(const ShaderVertexInputInfo& info, std::vector<uint32_t
 	// Each tessellation stage keys only the layout fields its module depends on. The D3D12 renderer's tessellation through compute passes
 	// keys the whole layout, as before.
 	const auto& tess = info.tess;
-	if (tess.compute_emulation) {
+	const bool  tess_stage = info.logical_stage == ShaderType::Local || info.logical_stage == ShaderType::TessellationControl ||
+	                        info.logical_stage == ShaderType::TessellationEvaluation;
+	if (tess_stage && ShaderRecompiler::GetHostShaderFeatures().tess_compute_emulation) {
 		key.push_back(tess.input_control_points);
 		if (tess.input_control_points != 0) {
 			key.insert(key.end(), {tess.output_control_points, tess.ls_stride, tess.hs_stride, tess.patch_base, tess.patch_size, tess.domain,

@@ -21,6 +21,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/host_gpu/workCounters.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/recompiler/ir/TessEmulation.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -614,7 +615,7 @@ const char* RenderExecutor::PrepareTessDraw(const DrawCallInfo& draw, const Draw
                                             const DrawRenderState& state, TessDraw& tess) {
 	using Emulation  = IR::TessEmulation;
 	const auto& info = state.vertex_info[1].tess;
-	if (!info.compute_emulation) {
+	if (!ShaderRecompiler::GetHostShaderFeatures().tess_compute_emulation) {
 		return "tessellation is not supported";
 	}
 	if (info.domain != 1u && info.domain != 2u) {

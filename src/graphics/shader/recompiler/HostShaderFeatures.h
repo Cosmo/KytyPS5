@@ -69,6 +69,9 @@ struct HostShaderFeatures {
 	// record (D3D12: ExecuteIndirect), instead of a task shader's payload; such a draw then has no first instance to read
 	// (IR::PushData::MeshTaskPayloadDwordCount), so the program cache keeps the records of packets that patch one on the CPU.
 	bool indirect_mesh_parameters_in_push_data = false;
+	// The host's tessellator is not used (the Series X's emits no domain points): a tessellated draw's LS, HS and TES run as the
+	// capture draw, compute shader and vertex stage of IR::TessEmulation, and their keys hold the whole tessellation layout.
+	bool tess_compute_emulation = false;
 };
 
 void                                    SetHostShaderFeatures(const HostShaderFeatures& features);
