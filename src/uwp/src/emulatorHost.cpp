@@ -235,6 +235,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		}
 		config.console_language          = std::min(settings.console_language, Config::MAX_CONSOLE_LANGUAGE);
 		config.skip_notice_screen        = settings.skip_intro_logos; // sceSystemServiceGetNoticeScreenSkipFlag
+		config.audio_output              = static_cast<Config::AudioOutput>(std::min<uint32_t>(settings.audio_output, 3));
 		config.launch_activity           = m_launch_activity;
 		config.controller_vibration_intensity = std::min<uint32_t>(settings.controller_vibration, 100);
 		config.controller_speaker_volume      = std::min<uint32_t>(settings.controller_speaker_volume, 100);
