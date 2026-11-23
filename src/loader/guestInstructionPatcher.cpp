@@ -503,6 +503,86 @@ ResolveBoundedJumpTable(const DecodedFunction& function, uintptr_t branch_addres
 	return resolved_targets;
 }
 
+bool IsFramePointerRegister(ZydisRegister reg) {
+	return reg == ZYDIS_REGISTER_RBP || reg == ZYDIS_REGISTER_EBP || reg == ZYDIS_REGISTER_BP || reg == ZYDIS_REGISTER_BPL;
+}
+
+// A leaf function's locals below its frame: the function starts with push rbp; mov rbp, rsp and pushes of saved registers, moves rsp
+// no further (only its epilogues pop), and addresses its locals as [rbp - d]. Past the saved registers (d > 8 * pushes) they are below
+// rsp, in the red zone, where an exception's frame overwrites them; the instructions get the red zone bytes they use and set, as for
+// rsp-relative operands, so that the memory instructions while they are live run with the red zone protected.
+void MarkFramePointerRedZone(DecodedFunction& function, uintptr_t function_start) {
+	auto it = function.instructions.find(function_start);
+	if (it == function.instructions.end() || it->second.instruction.mnemonic != ZYDIS_MNEMONIC_PUSH ||
+	    it->second.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || it->second.operands[0].reg.value != ZYDIS_REGISTER_RBP) {
+		return;
+	}
+	auto next = std::next(it);
+	if (next == function.instructions.end() || next->second.instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
+	    next->second.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || next->second.operands[0].reg.value != ZYDIS_REGISTER_RBP ||
+	    next->second.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER || next->second.operands[1].reg.value != ZYDIS_REGISTER_RSP) {
+		return;
+	}
+	std::set<uintptr_t> prologue {it->first, next->first};
+	s64                 saved = 0;
+	for (auto push = std::next(next); push != function.instructions.end() && push->second.instruction.mnemonic == ZYDIS_MNEMONIC_PUSH &&
+	                                  push->second.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER;
+	     ++push) {
+		prologue.insert(push->first);
+		saved += static_cast<s64>(sizeof(u64));
+	}
+	// The frame must stay where the prologue left it: rsp moves only by pops (the epilogues), rbp only by its own pop.
+	for (const auto& [address, decoded]: function.instructions) {
+		if (prologue.contains(address)) {
+			continue;
+		}
+		if (decoded.changes_stack_pointer && decoded.instruction.mnemonic != ZYDIS_MNEMONIC_POP) {
+			return;
+		}
+		for (u8 index = 0; index < decoded.instruction.operand_count; ++index) {
+			const auto& operand = decoded.operands[index];
+			if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER && IsFramePointerRegister(operand.reg.value) &&
+			    (operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0 && decoded.instruction.mnemonic != ZYDIS_MNEMONIC_POP) {
+				return;
+			}
+		}
+	}
+	for (auto& [address, decoded]: function.instructions) {
+		if (prologue.contains(address)) {
+			continue;
+		}
+		for (u8 index = 0; index < decoded.instruction.operand_count_visible; ++index) {
+			const auto& operand = decoded.operands[index];
+			if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY || operand.mem.base != ZYDIS_REGISTER_RBP ||
+			    operand.mem.index != ZYDIS_REGISTER_NONE || operand.mem.disp.value >= -saved) {
+				continue;
+			}
+			if (decoded.instruction.mnemonic == ZYDIS_MNEMONIC_LEA) {
+				// Its address goes on to other instructions: what they reach is not modeled.
+				function.requires_conservative_red_zone_tracking = true;
+				function.uses_red_zone                           = true;
+				continue;
+			}
+			// rsp is rbp - saved here.
+			const s64 access_start = operand.mem.disp.value + saved;
+			const s64 access_size  = std::max<s64>(operand.size / 8, 1);
+			const s64 range_start  = std::max(access_start, -static_cast<s64>(GuestRedZoneSize));
+			const s64 range_end    = std::min<s64>(access_start + access_size, 0);
+			for (s64 offset = range_start; offset < range_end; ++offset) {
+				const size_t bit = static_cast<size_t>(offset + static_cast<s64>(GuestRedZoneSize));
+				if ((operand.actions & ZYDIS_OPERAND_ACTION_MASK_READ) != 0) {
+					decoded.red_zone_use.set(bit);
+				}
+				if ((operand.actions & ZYDIS_OPERAND_ACTION_WRITE) != 0) {
+					decoded.red_zone_def.set(bit);
+				}
+			}
+			decoded.has_red_zone_operand = true;
+			function.uses_red_zone       = true;
+		}
+	}
+}
+
 DecodedFunction DecodeFunction(uintptr_t function_start, uintptr_t function_end,
                                uintptr_t segment_start, uintptr_t segment_end) {
 	DecodedFunction               function;
@@ -578,6 +658,7 @@ DecodedFunction DecodeFunction(uintptr_t function_start, uintptr_t function_end,
 		}
 	}
 	function.has_indirect_branch = indirect_branches.size() != resolved_indirect_branches.size();
+	MarkFramePointerRedZone(function, function_start);
 	return function;
 }
 
