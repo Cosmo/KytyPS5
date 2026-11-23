@@ -444,18 +444,7 @@ const wchar_t* PipelineModeName(PipelineMode mode) {
 
 // Starts `game` in the pipeline mode of the game options (A on a cover, Play, an activity).
 void Play(const Launcher& launcher, const GameEntry& game, const std::string& activity = {}) {
-	switch (LibraryPipelineMode()) {
-	case PipelineMode::Alongside:
-		// The pipeline cache takes the request at the game's first frame and builds in the background.
-		Common::PipelinePrewarm::Request();
-		break;
-	case PipelineMode::First:
-		// The game's code starts once the pipeline cache built them (Emulator::Run); the launch screen shows how far it is.
-		Common::PipelinePrewarm::RequestBeforeStart();
-		break;
-	case PipelineMode::WhenNeeded:
-		break;
-	}
+	RequestLibraryPipelines();
 	launcher.actions.play(game, activity);
 }
 

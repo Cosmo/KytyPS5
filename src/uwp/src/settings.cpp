@@ -1,5 +1,6 @@
 #include "settings.h"
 
+#include "common/pipelinePrewarm.h"
 #include "fileAccess.h"
 #include "log.h"
 
@@ -352,6 +353,21 @@ PipelineMode LibraryPipelineMode() {
 	}
 	const auto& mode = value->get_ref<const std::string&>();
 	return mode == "alongside" ? PipelineMode::Alongside : mode == "first" ? PipelineMode::First : PipelineMode::WhenNeeded;
+}
+
+void RequestLibraryPipelines() {
+	switch (LibraryPipelineMode()) {
+	case PipelineMode::Alongside:
+		// The pipeline cache takes the request at the game's first frame and builds in the background.
+		Common::PipelinePrewarm::Request();
+		break;
+	case PipelineMode::First:
+		// The game's code starts once the pipeline cache built them (Emulator::Run); the launch screen shows how far it is.
+		Common::PipelinePrewarm::RequestBeforeStart();
+		break;
+	case PipelineMode::WhenNeeded:
+		break;
+	}
 }
 
 void SetLibraryPipelineMode(PipelineMode mode) {
