@@ -129,6 +129,7 @@ AppSettings LoadSettings() {
 	read("swap_pool_mb", settings.swap_pool_mb);
 	read("video_decode_threads", settings.video_decode_threads);
 	read("video_hardware_decode", settings.video_hardware_decode);
+	read("short_videos", settings.short_videos);
 	read("gpu_memory_log", settings.gpu_memory_log);
 	read("gpu_crash_diagnostics", settings.gpu_crash_diagnostics);
 	read("shader_cache_any_build", settings.shader_cache_any_build);
@@ -224,6 +225,7 @@ void SaveSettings(const AppSettings& settings) {
 	json["swap_pool_mb"]               = settings.swap_pool_mb;
 	json["video_decode_threads"]       = settings.video_decode_threads;
 	json["video_hardware_decode"]      = settings.video_hardware_decode;
+	json["short_videos"]               = settings.short_videos;
 	json["gpu_memory_log"]             = settings.gpu_memory_log;
 	json["gpu_crash_diagnostics"]      = settings.gpu_crash_diagnostics;
 	json["shader_cache_any_build"]     = settings.shader_cache_any_build;

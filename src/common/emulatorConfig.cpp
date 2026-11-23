@@ -449,6 +449,10 @@ bool VideoHardwareDecode() {
 	return g_config != nullptr && g_config->video_hardware_decode;
 }
 
+bool ShortVideos() {
+	return g_config != nullptr && g_config->short_videos;
+}
+
 uint64_t AppMemoryUsage() {
 	return g_config != nullptr && g_config->app_memory_usage != nullptr ? g_config->app_memory_usage() : 0;
 }
