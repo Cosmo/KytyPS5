@@ -99,8 +99,6 @@ HostShaderLimits ShaderLimits(GraphicContext& graphics, const D3D12::DxilCompile
 	    .mesh_shader_enabled    = graphics.mesh_shaders && compiler.SupportsMeshShaders(),
 	    // Without mesh shaders, merged geometry programs run as compute shaders.
 	    .mesh_compute_emulation = true,
-	    // The Series X's tessellator emits no domain points: tessellation always runs as compute passes (both devices, one path).
-	    .tess_compute_emulation = true,
 	    // D3D12 fixes the mesh shader limits.
 	    .max_mesh_invocations   = 128,
 	    .max_mesh_group_size_x  = 128,
@@ -581,6 +579,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	features.storage_images_as_arrays         = true; // (a 1D or 2D storage view starts at the first layer: Image::UnorderedAccessView)
 	features.realtime_clock_placeholder       = true; // (no shader clock in DXIL)
 	features.speculative_buffer_loads         = true; // (buffer views read 0 past their end: far fewer blocks for the driver to compile)
+	features.tess_compute_emulation           = true; // (the Series X's tessellator emits no domain points: compute passes on both devices, one path)
 	// 64-bit image atomics under a lock; they would need shader model 6.6 and its typed 64-bit atomics. (The lock words are in the
 	// guest buffer table.)
 	features.image_atomic64_lock = features.guest_pointer_table;
