@@ -220,6 +220,9 @@ void                                             ShowAllGames();
 enum class PipelineMode { WhenNeeded, Alongside, First };
 [[nodiscard]] PipelineMode LibraryPipelineMode();
 void                       SetLibraryPipelineMode(PipelineMode mode);
+// Asks the pipeline cache for what the library's pipeline mode wants, before a game starts: from the library, and from a run request (a
+// shortcut, or the app's restart after an address collision).
+void RequestLibraryPipelines();
 
 } // namespace Kyty::Uwp
 
