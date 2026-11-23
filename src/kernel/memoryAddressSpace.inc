@@ -836,6 +836,9 @@ public:
 		if (!m_lazy_enabled) {
 			return false;
 		}
+		if (OpenForHostCopy(address, is_write)) {
+			return true;
+		}
 		// Fastest path, no system call and no lock: the window flags (xbox/lazyRegions.h). A window committed as a whole has no commit fault. If some
 		// page of it is protected, the fault is a page watcher's (or the guest's own protection): the next handler decides. Otherwise the fault raced
 		// with the commit and the access can be retried. (VirtualQuery below takes time in proportion to the run of equal pages around the address:
@@ -1804,6 +1807,86 @@ public:
 		return m_lazy.Protect(vaddr, size, lazy_mode, host);
 	}
 
+	// This thread's host copy (LazyCopyIn, LazyCopyOut) and the pages OpenForHostCopy opened for it.
+	struct HostCopy {
+		uint64_t begin        = 0;
+		uint64_t end          = 0;
+		uint64_t opened_begin = UINT64_MAX;
+		uint64_t opened_end   = 0;
+	};
+	static inline thread_local HostCopy* t_host_copy = nullptr;
+
+	// Marks a host copy of [vaddr, vaddr + size) on this thread; at its end, the pages opened for it get their protections back.
+	class HostCopyScope {
+	public:
+		HostCopyScope(uint64_t vaddr, uint64_t size): m_copy {vaddr, vaddr + size}, m_previous(t_host_copy) { t_host_copy = &m_copy; }
+		~HostCopyScope() {
+			t_host_copy = m_previous;
+			if (m_copy.opened_end > m_copy.opened_begin) {
+				RestoreHostProtection(m_copy.opened_begin, m_copy.opened_end - m_copy.opened_begin, VirtualMemory::Mode::ReadWrite);
+			}
+		}
+		HostCopyScope(const HostCopyScope&)            = delete;
+		HostCopyScope& operator=(const HostCopyScope&) = delete;
+
+	private:
+		HostCopy  m_copy;
+		HostCopy* m_previous;
+	};
+
+	// A fault of this thread's host copy on a page that another thread protected after the copy looked at it: a page watcher, or another
+	// host copy closing what it had opened (the GPU thread reading a buffer while the priority thread writes an image back over its pages).
+	// The copy is the host's own access (the desktop build's goes through the backing view and never faults), so the page opens for it.
+	// The GPU's fault handler would take it for the game's access and wait for the write-backs over the page: on the priority thread,
+	// for the one it is running.
+	bool OpenForHostCopy(uint64_t address, bool is_write) {
+		auto* copy = t_host_copy;
+		if (copy == nullptr || address < copy->begin || address >= copy->end) {
+			return false;
+		}
+		// (The pager's windows: their faults bring them back.)
+		constexpr uint8_t kPaged = Xbox::Lazy::kSwept | Xbox::Lazy::kEvicting | Xbox::Lazy::kEvicted;
+		const uint8_t     flags  = m_lazy.FlagsOf(address);
+		if ((flags & kPaged) != 0) {
+			return false;
+		}
+		// A fully committed window needs no system call to tell (VirtualQuery measures the run behind the page, slow over a large range).
+		if ((flags & Xbox::Lazy::kFull) == 0) {
+			MEMORY_BASIC_INFORMATION info {};
+			if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT) {
+				return false;
+			}
+		}
+		constexpr uint64_t kPage = 0x1000;
+		const uint64_t     page  = address & ~(kPage - 1u);
+		const auto         mode  = is_write ? VirtualMemory::Mode::ReadWrite : VirtualMemory::Mode::Read;
+		uint64_t           end   = 0;
+		// A write opens the copy's pages from here on at once, up to the first window that is not fully committed or that the pager holds: the copy
+		// writes them all, as HostCopyToGuest opens a whole run. One page per fault cost an image write-back a fault for every page of the image.
+		// (A read opens one page: opening a run for reading would take write access from the pages that have it.)
+		if (is_write && (flags & Xbox::Lazy::kFull) != 0) {
+			constexpr uint64_t kWindow  = uint64_t {1} << Xbox::Lazy::Regions::kWindowBits;
+			const uint64_t     copy_end = (copy->end + kPage - 1u) & ~(kPage - 1u);
+			uint64_t           next     = (page & ~(kWindow - 1u)) + kWindow;
+			while (next < copy_end && (m_lazy.FlagsOf(next) & (Xbox::Lazy::kFull | kPaged)) == Xbox::Lazy::kFull) {
+				next += kWindow;
+			}
+			const uint64_t run_end = std::min(next, copy_end);
+			if (VirtualMemory::Windows::ProtectLazy(page, run_end - page, mode)) {
+				end = run_end;
+			}
+		}
+		if (end == 0) {
+			if (!VirtualMemory::Windows::ProtectLazy(page, kPage, mode)) {
+				return false;
+			}
+			end = page + kPage;
+		}
+		copy->opened_begin = std::min(copy->opened_begin, page);
+		copy->opened_end   = std::max(copy->opened_end, end);
+		return true;
+	}
+
 	// Host copy of committed guest pages that may be read-only or no-access (page watchers): make them readable for the copy and restore.
 	// A guest thread that touches such a page during the copy does not fault; see the T3 design note, "the known race".
 	void HostCopyFromGuest(uint64_t address, uint8_t* destination, uint64_t size) {
@@ -1871,6 +1954,7 @@ public:
 			return false;
 		}
 		std::shared_lock copy_lock(m_copy_lock);
+		HostCopyScope    host_copy(vaddr, size);
 		struct Segment {
 			uint64_t address, bytes;
 			int      kind; // 0 gap, 1 not committed, 2 committed
@@ -2007,13 +2091,16 @@ public:
 				cursor += length;
 			}
 		}
-		for (const auto& [address, bytes]: pieces) {
-			const auto* source = static_cast<const uint8_t*>(data) + (address - vaddr);
-			if (m_lazy.AllWritable(address, bytes)) {
-				// every window is committed as a whole and read-write: a plain copy cannot fault (see LazyCopyOut)
-				std::memcpy(reinterpret_cast<void*>(address), source, bytes);
-			} else {
-				HostCopyToGuest(address, source, bytes);
+		{
+			HostCopyScope host_copy(vaddr, size);
+			for (const auto& [address, bytes]: pieces) {
+				const auto* source = static_cast<const uint8_t*>(data) + (address - vaddr);
+				if (m_lazy.AllWritable(address, bytes)) {
+					// every window is committed as a whole and read-write: a plain copy faults only where another thread protects a page meanwhile
+					std::memcpy(reinterpret_cast<void*>(address), source, bytes);
+				} else {
+					HostCopyToGuest(address, source, bytes);
+				}
 			}
 		}
 		unpin();
