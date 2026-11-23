@@ -85,7 +85,8 @@ void SaveLibrary(const std::vector<GameEntry>& games) {
 		list.push_back({{"title_id", game.title_id},
 		                {"name", game.name},
 		                {"version", game.version},
-		                {"folder", winrt::to_string(game.folder.wstring())}});
+		                {"folder", winrt::to_string(game.folder.wstring())},
+		                {"attribute3", game.attribute3}});
 	}
 	const auto text = nlohmann::json {{"games", list}}.dump(2);
 	if (FILE* file = _wfopen(LibraryPath().c_str(), L"wb"); file != nullptr) {
@@ -107,6 +108,9 @@ GameEntry ReadGame(const std::filesystem::path& folder) {
 			game.version  = JsonString(param, "appVersion");
 			if (game.version.empty()) {
 				game.version = JsonString(param, "contentVersion");
+			}
+			if (const auto flags = param.find("attribute3"); flags != param.end() && flags->is_number_integer()) {
+				game.attribute3 = flags->get<uint32_t>();
 			}
 			if (auto name = TitleName(param); !name.empty()) {
 				game.name = std::move(name);
@@ -149,11 +153,18 @@ std::vector<GameEntry> LoadGameLibrary() {
 		if (!entry.is_object()) {
 			continue;
 		}
+		// A list saved before the games' feature flags were kept: as none (the library scans the games again).
+		if (!entry.contains("attribute3")) {
+			return {};
+		}
 		GameEntry game;
 		game.title_id = JsonString(entry, "title_id");
 		game.name     = JsonString(entry, "name");
 		game.version  = JsonString(entry, "version");
 		game.folder   = std::filesystem::path(winrt::to_hstring(JsonString(entry, "folder")).c_str());
+		if (const auto flags = entry.find("attribute3"); flags != entry.end() && flags->is_number_integer()) {
+			game.attribute3 = flags->get<uint32_t>();
+		}
 		games.push_back(std::move(game));
 	}
 	return games;

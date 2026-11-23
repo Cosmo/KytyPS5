@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_UWP_GAMELIBRARY_H_
 #define EMULATOR_SRC_UWP_GAMELIBRARY_H_
 
+#include <cstdint>
 #include <cstddef>
 #include <filesystem>
 #include <optional>
@@ -14,7 +15,16 @@ struct GameEntry {
 	std::string           name;
 	std::string           version;
 	std::filesystem::path folder; // the game's folder, or its .zar archive
+	uint32_t              attribute3 = 0; // param.json's feature flags (PS5 Pro, PS VR2, ...: GameFeature)
 };
+
+// Bits of GameEntry::attribute3 the library shows as badges (param.json; the meanings as psdevwiki and comparisons of games' files give
+// them).
+namespace GameFeature {
+constexpr uint32_t Ps5Pro      = 1u << 22u;
+constexpr uint32_t PsVr2       = 1u << 10u;
+constexpr uint32_t PsVr2Needed = 1u << 11u;
+} // namespace GameFeature
 
 // The game in `folder` (a folder with an eboot.bin, or a .zar archive), described by its sce_sys\param.json.
 [[nodiscard]] GameEntry ReadGame(const std::filesystem::path& folder);
