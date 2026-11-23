@@ -1273,6 +1273,24 @@ void SetAddressCollisionHandler(address_collision_handler_t handler) {
 	g_address_collision_handler.store(handler);
 }
 
+static std::vector<std::pair<uint64_t, uint64_t>> g_known_fixed_ranges;
+
+void SetKnownFixedRanges(std::vector<std::pair<uint64_t, uint64_t>> ranges) {
+	g_known_fixed_ranges = std::move(ranges);
+}
+
+void CheckKnownFixedRanges() {
+	const auto handler = g_address_collision_handler.load();
+	if (handler == nullptr || g_guest_address_space == nullptr) {
+		return;
+	}
+	for (const auto& [start, size]: g_known_fixed_ranges) {
+		if (g_guest_address_space->OverlapsOwned(start, size) && !g_guest_address_space->Owns(start, size)) {
+			handler(start, size);
+		}
+	}
+}
+
 void RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func) {
 	EXIT_IF(g_alloc_callback != nullptr || g_free_callback != nullptr);
 	EXIT_IF(alloc_func == nullptr || free_func == nullptr);

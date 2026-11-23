@@ -206,6 +206,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 	}
 
 	m_game_dir = game_dir;
+	Libs::LibKernel::Memory::SetKnownFixedRanges(KnownFixedRanges(m_game_dir));
 	Libs::LibKernel::Memory::SetAddressCollisionHandler(
 	    [](uint64_t start, uint64_t size) { EmulatorHost::Get().RestartForAddressCollision(start, size); });
 
@@ -349,6 +350,26 @@ void EmulatorHost::RestartForAddressCollision(uint64_t start, uint64_t size) {
 	constexpr uint32_t MaxAttempts = 8;
 	Log("the game asks for 0x%llx bytes at 0x%llx, but host memory sits in that range\n", static_cast<unsigned long long>(size),
 	    static_cast<unsigned long long>(start));
+	// What sits there: the host's regions in the range (the guest's own reservations are large reserved private regions; up to 16 others).
+	{
+		uint32_t shown = 0;
+		for (uint64_t address = start; address < start + size && shown < 16;) {
+			MEMORY_BASIC_INFORMATION info {};
+			if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) == 0) {
+				break;
+			}
+			const auto base = reinterpret_cast<uint64_t>(info.BaseAddress);
+			const bool guest_placeholder = info.State == MEM_RESERVE && info.Type == MEM_PRIVATE && info.RegionSize >= (uint64_t {16} << 20u);
+			if (info.State != MEM_FREE && !guest_placeholder) {
+				Log("  host region 0x%llx, 0x%llx bytes, state 0x%lx, type 0x%lx, protect 0x%lx, allocated at 0x%llx\n", static_cast<unsigned long long>(base),
+				    static_cast<unsigned long long>(info.RegionSize), info.State, info.Type, info.Protect,
+				    static_cast<unsigned long long>(reinterpret_cast<uint64_t>(info.AllocationBase)));
+				shown++;
+			}
+			address = base + info.RegionSize;
+		}
+	}
+	AddKnownFixedRange(m_game_dir, start, size);
 	const uint32_t attempts = m_restart_attempts;
 	if (attempts >= MaxAttempts) {
 		Log("the app restarted %u times already: going on, the request fails\n", attempts);

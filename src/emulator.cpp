@@ -134,6 +134,8 @@ static void LoadElf(const std::filesystem::path& elf, bool dbg_print_reloc = fal
 
 static void Execute(const std::filesystem::path& game_patch) {
 	std::thread([game_patch] {
+		// A fixed range an earlier run of this game found host memory in: a restart now costs seconds, after the pipelines a minute.
+		Libs::LibKernel::Memory::CheckKnownFixedRanges();
 		// The library's pipeline mode "Build known ones first": the game's code runs once they are built, four at a time (Xbox).
 		Common::PipelinePrewarm::BuildBeforeStart(4);
 		Common::Singleton<Loader::RuntimeLinker>::Instance()->Execute(game_patch);
