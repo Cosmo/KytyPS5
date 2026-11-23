@@ -1796,6 +1796,14 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			totals.rdpid += result.rdpid;
 			totals.clwb += result.clwb;
 			totals.rdtsc += result.rdtsc;
+			if (protect_memory_faults && result.red_zone_function_count != 0) {
+				Log::WriteToConsoleAndLog(fmt::format(
+				    "Red zone protection: {}: {} of {} functions keep data below rsp; {} memory instructions while it is live, {} protected "
+				    "(short {}, unrelocatable {})\n",
+				    module_name, result.red_zone_function_count, result.function_count, result.memory_instruction_count,
+				    result.patched_memory_instruction_count, result.short_memory_instruction_count,
+				    result.unrelocatable_memory_instruction_count));
+			}
 			if (protect_memory_faults) {
 				LOGF("Windows guest red-zone patching: %s, functions=%" PRIu64 ", red_zone=%" PRIu64
 				     ", memory=%" PRIu64 ", patched=%" PRIu64 ", short=%" PRIu64 ", stack=%" PRIu64
