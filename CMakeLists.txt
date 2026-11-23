@@ -290,6 +290,7 @@ if(KYTY_GPU_BACKEND STREQUAL "D3D12")
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/image/textureCommon.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/blendMapping.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/bufferCache.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/resolveCache.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/streamBuffer.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/samplerInfo.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/textureCache.cpp"
