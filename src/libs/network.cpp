@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <thread>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -3360,6 +3361,16 @@ int KYTY_SYSV_ABI HttpWaitRequest(HttpEpollHandle eh, HttpNBEvent* nbev, int max
 		return HTTP_ERROR_INVALID_VALUE;
 	}
 
+	// No request here ever sends an event: wait as long as the caller asked (microseconds; negative: no limit, here 100 ms), so a
+	// caller that polls with a timeout sleeps instead of spinning (a game's HTTP worker thread took a whole core).
+	static std::atomic_bool logged = false;
+	if (!logged.exchange(true, std::memory_order_relaxed)) {
+		Log::WriteToConsoleAndLog(fmt::format("sceHttpWaitRequest: no events ever come; the first call waits {} us\n", timeout));
+	}
+	if (timeout != 0) {
+		const int64_t micros = timeout < 0 ? 100000 : std::min<int64_t>(timeout, 1000000);
+		std::this_thread::sleep_for(std::chrono::microseconds(micros));
+	}
 	return 0;
 }
 
