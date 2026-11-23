@@ -190,6 +190,9 @@ struct ConfigOptions {
 #else
 	bool video_hardware_decode = false;
 #endif
+	// Testing: a video the system video player plays ends after its first second, as if its file ended there (videos that loop, and sound
+	// without a picture, play in full). Off.
+	bool short_videos = false;
 	// Debugging: where the GPU memory is (images and buffers by kind and size) in the log every 10 seconds. It walks every image and buffer under the
 	// texture cache's lock, so it is off unless a setting turns it on.
 	bool gpu_memory_log = false;
@@ -325,6 +328,7 @@ bool PipelineCacheAnyBuild();
 bool GpuCrashDiagnostics();
 bool VideoDecodeThreads();
 bool VideoHardwareDecode();
+bool ShortVideos();
 uint64_t AppMemoryUsage();
 uint64_t AppMemoryLimit();
 #endif

@@ -1354,6 +1354,10 @@ private:
 				loop_period = std::max(loop_period, Duration(fmt->streams[audio_id.value()]));
 			}
 		}
+		// Testing (Config::ShortVideos): a video ends one second after where it starts playing, as if the file ended there, so the game
+		// goes on the way it does after a whole video.
+		const bool              short_video = Config::ShortVideos() && video_id.has_value();
+		std::optional<uint64_t> first_ms;
 		while (!worker_stop) {
 			Packet packet(av_packet_alloc());
 			if (packet == nullptr) {
@@ -1361,6 +1365,18 @@ private:
 				break;
 			}
 			auto result = av_read_frame(fmt, packet.get());
+			if (result >= 0 && short_video && !loop) {
+				const int64_t ts = packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
+				if (ts != AV_NOPTS_VALUE) {
+					const uint64_t ms = to_ms(ts, fmt->streams[packet->stream_index]->time_base);
+					if (!first_ms) {
+						first_ms = ms;
+					} else if (ms >= *first_ms + 1000) {
+						::printf("AvPlayer: short videos: the video ends after one second\n");
+						break;
+					}
+				}
+			}
 			if (result < 0) {
 				if (result == AVERROR_EOF && loop) {
 					video_offset += loop_period;
