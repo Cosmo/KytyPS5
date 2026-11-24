@@ -110,9 +110,9 @@ struct ImageInfo {
 	};
 	[[nodiscard]] Gfx7MicroLevel Gfx7MicroLevelLayout(uint32_t level) const;
 	[[nodiscard]] uint64_t       Gfx7MicroSize() const;
-	// Slices a level holds: with POW2_PAD the count rounds up to a power of two (a cube's six faces
-	// take the room of eight).
-	[[nodiscard]] uint32_t       Gfx7MicroSlots() const;
+	// Slices a level holds (array layers, or the level's depth slices of a linear or 1D-thin volume):
+	// with POW2_PAD the count rounds up to a power of two (a cube's six faces take the room of eight).
+	[[nodiscard]] uint32_t       Gfx7MicroSlots(uint32_t level) const;
 	[[nodiscard]] uint64_t       Gfx7MicroLevelOffset(uint32_t level) const;
 
 	void                                           UpdateSize();

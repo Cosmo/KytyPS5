@@ -959,7 +959,7 @@ void TextureCache::UploadGfx7MicroTiled(Image& image) {
 	for (uint32_t level = 0; level < info.resources.levels; level++) {
 		const auto active = info.MipExtent(level);
 		linear_size += uint64_t {(active.width + tw - 1u) / tw} * ((active.height + th - 1u) / th) *
-		               bytes * (info.gfx7_micro_thick ? active.depth : info.resources.layers);
+		               bytes * active.depth;
 	}
 	auto staging = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::Upload, 0,
 	                                        vk::BufferUsageFlagBits::eTransferSrc, linear_size);
@@ -1013,13 +1013,16 @@ void TextureCache::UploadGfx7MicroTiled(Image& image) {
 			in_offset += layout.size * layout.groups;
 			continue;
 		}
-		for (uint32_t layer = 0; layer < info.resources.layers; layer++) {
+		// The level's array layers, or its depth slices for a volume (MipExtent's depth is either).
+		const bool volume = info.IsVolume();
+		for (uint32_t layer = 0; layer < active.depth; layer++) {
 			const uint64_t      slice = in_offset + layer * layout.size;
 			vk::BufferImageCopy copy {};
 			copy.bufferOffset      = out_offset;
 			copy.bufferRowLength   = columns * tw;
 			copy.bufferImageHeight = rows * th;
-			copy.imageSubresource  = {vk::ImageAspectFlagBits::eColor, level, layer, 1};
+			copy.imageSubresource  = {vk::ImageAspectFlagBits::eColor, level, volume ? 0u : layer, 1};
+			copy.imageOffset       = vk::Offset3D {0, 0, volume ? static_cast<int32_t>(layer) : 0};
 			copy.imageExtent       = vk::Extent3D {active.width, active.height, 1};
 			copies.push_back(copy);
 			if (info.gfx7_linear) {
@@ -1045,7 +1048,7 @@ void TextureCache::UploadGfx7MicroTiled(Image& image) {
 				}
 			}
 		}
-		in_offset += layout.size * info.Gfx7MicroSlots();
+		in_offset += layout.size * info.Gfx7MicroSlots(level);
 	}
 	staging->Flush(0, linear_size);
 	image.Upload(copies, staging->Handle(), 0, linear_size);

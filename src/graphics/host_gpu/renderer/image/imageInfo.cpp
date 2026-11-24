@@ -125,15 +125,18 @@ ImageInfo::Gfx7MicroLevel ImageInfo::Gfx7MicroLevelLayout(uint32_t level) const 
 	return layout;
 }
 
-uint32_t ImageInfo::Gfx7MicroSlots() const {
-	return gfx7_micro_pow2 ? std::bit_ceil(resources.layers) : resources.layers;
+uint32_t ImageInfo::Gfx7MicroSlots(uint32_t level) const {
+	// A linear or 1D-thin volume stores each depth slice of a level as a 2D slice.
+	const uint32_t slices = IsVolume() && !gfx7_micro_thick ? std::max(extent.depth >> level, 1u)
+	                                                        : resources.layers;
+	return gfx7_micro_pow2 ? std::bit_ceil(slices) : slices;
 }
 
 uint64_t ImageInfo::Gfx7MicroLevelOffset(uint32_t level) const {
 	uint64_t offset = 0;
 	for (uint32_t l = 0; l < level && l < resources.levels; l++) {
 		const auto layout = Gfx7MicroLevelLayout(l);
-		offset += layout.size * layout.groups * Gfx7MicroSlots();
+		offset += layout.size * layout.groups * Gfx7MicroSlots(l);
 	}
 	return offset;
 }

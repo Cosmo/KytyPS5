@@ -1397,15 +1397,19 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 		return program != nullptr && (program->dynamic_info->init_vaddr != 0 ||
 		                              (program->dynamic_info->has_init && !program->elf->IsNextGen()));
 	};
-	run_preinit(libc);
-	if (has_init(libc)) {
-		StartModule(libc, 0, nullptr, nullptr);
-	}
-	for (auto* module: shipped_modules) {
-		run_preinit(module);
+	// A module with an init routine starts through it alone. libc's init routine sets the heap up as
+	// its preinit array does; running both made the game's malloc replacement allocate its whole heap
+	// a second time.
+	const auto start = [&](Program* module) {
 		if (has_init(module)) {
 			StartModule(module, 0, nullptr, nullptr);
+		} else {
+			run_preinit(module);
 		}
+	};
+	start(libc);
+	for (auto* module: shipped_modules) {
+		start(module);
 	}
 
 	LOGF_COLOR(Log::Color::BrightYellow, "---\n--- Execute: %s\n---\n", "Main");
