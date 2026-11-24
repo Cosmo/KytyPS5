@@ -212,6 +212,8 @@ int KYTY_SYSV_ABI KernelSetVirtualRangeName(const void* addr, uint64_t len, cons
 int KYTY_SYSV_ABI KernelClearVirtualRangeName(const void* addr, uint64_t len);
 int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len);
 size_t KYTY_SYSV_ABI KernelGetDirectMemorySize();
+int KYTY_SYSV_ABI    KernelGetDirectMemoryType(int64_t phys_addr, int* type_out, int64_t* start_out,
+                                               int64_t* end_out);
 int KYTY_SYSV_ABI    KernelAvailableDirectMemorySize(int64_t search_start, int64_t search_end,
                                                      size_t alignment, int64_t* phys_addr_out,
                                                      size_t* size_out);

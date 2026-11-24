@@ -1391,13 +1391,19 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 #endif
 		}
 	};
+	// A PS4 module may start at address 0 of its text: libc.prx's DT_INIT is 0, and that routine
+	// runs its static constructors (the classic locale C++ streams read, among others).
+	const auto has_init = [](const Program* program) {
+		return program != nullptr && (program->dynamic_info->init_vaddr != 0 ||
+		                              (program->dynamic_info->has_init && !program->elf->IsNextGen()));
+	};
 	run_preinit(libc);
-	if (libc != nullptr && libc->dynamic_info->init_vaddr != 0) {
+	if (has_init(libc)) {
 		StartModule(libc, 0, nullptr, nullptr);
 	}
 	for (auto* module: shipped_modules) {
 		run_preinit(module);
-		if (module != nullptr && module->dynamic_info->init_vaddr != 0) {
+		if (has_init(module)) {
 			StartModule(module, 0, nullptr, nullptr);
 		}
 	}
@@ -2005,6 +2011,11 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program) {
 	GetDynValue(elf, &program->dynamic_info->symbol_table_entry_size, DT_SYMENT);
 
 	GetDynPtr(elf, &program->dynamic_info->init_vaddr, DT_INIT);
+	{
+		std::vector<uint64_t> init_values;
+		GetDynValues(elf, &init_values, DT_INIT);
+		program->dynamic_info->has_init = !init_values.empty();
+	}
 	GetDynPtr(elf, &program->dynamic_info->fini_vaddr, DT_FINI);
 	GetDynPtr(elf, &program->dynamic_info->init_array_vaddr, DT_INIT_ARRAY);
 	GetDynPtr(elf, &program->dynamic_info->fini_array_vaddr, DT_FINI_ARRAY);

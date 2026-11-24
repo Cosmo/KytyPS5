@@ -64,6 +64,7 @@ struct DynamicInfo {
 	uint64_t   symbol_table_entry_size = 0;
 
 	uint64_t init_vaddr          = 0;
+	bool     has_init            = false; // DT_INIT present (its value may legitimately be 0)
 	uint64_t fini_vaddr          = 0;
 	uint64_t init_array_vaddr    = 0;
 	uint64_t fini_array_vaddr    = 0;

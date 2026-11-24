@@ -2000,7 +2000,7 @@ int KYTY_SYSV_ABI sigfillset(uint64_t* set) {
 }
 
 // POSIX mmap, which the PS4 libc uses for its heap: anonymous and stack mappings are flexible
-// memory, MAP_VOID reserves address space. File mappings are not supported yet.
+// memory, MAP_VOID reserves address space, and a file is mapped as a copy of its contents.
 void* KYTY_SYSV_ABI mmap(void* addr, size_t len, int prot, int flags, int fd, int64_t offset) {
 	PRINT_NAME();
 	constexpr int MapSharing = 0x0003; // MAP_SHARED | MAP_PRIVATE
@@ -2025,9 +2025,34 @@ void* KYTY_SYSV_ABI mmap(void* addr, size_t len, int prot, int flags, int fd, in
 		result = LibKernel::Memory::KernelMapFlexibleMemory(&out, aligned, prot,
 		                                                    flags & ~(MapSharing | MapAnon | MapStack));
 	} else {
-		LOGF("\t file mappings are not supported (fd = %d)\n", fd);
-		*GetErrorAddr() = POSIX_ENODEV;
-		return failed;
+		// A file mapping is a private copy of the file, except that a writable shared mapping would
+		// have to write back to it, which is not supported.
+		constexpr int MapShared = 0x1;
+		constexpr int ProtWrite = 0x2;
+		if (((flags & MapShared) != 0 && (prot & ProtWrite) != 0) || (offset & 0x3fff) != 0) {
+			*GetErrorAddr() = POSIX_ENODEV;
+			return failed;
+		}
+		result = LibKernel::Memory::KernelMapFlexibleMemory(&out, aligned, 3, flags & MapFixed);
+		if (result != OK) {
+			*GetErrorAddr() = LibKernel::KernelToPosix(result);
+			return failed;
+		}
+		size_t done = 0;
+		while (done < len) {
+			const auto got = LibKernel::FileSystem::KernelPread(
+			    fd, static_cast<char*>(out) + done, len - done, offset + static_cast<int64_t>(done));
+			if (got < 0) {
+				LibKernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(out), aligned);
+				*GetErrorAddr() = LibKernel::KernelToPosix(static_cast<int>(got));
+				return failed;
+			}
+			if (got == 0) {
+				break; // past the end of the file the mapping reads as zeros
+			}
+			done += static_cast<size_t>(got);
+		}
+		result = LibKernel::Memory::KernelMprotect(out, aligned, prot);
 	}
 	if (result != OK) {
 		*GetErrorAddr() = LibKernel::KernelToPosix(result);
@@ -3347,7 +3372,13 @@ LIB_DEFINE(InitLibKernel_1_FS) {
 	LIB_FUNC("uWyW3v98sU4", FileSystem::KernelCheckReachability);
 }
 
+// A PS4 Pro would answer 1; PS4 games see the base console.
+static int KYTY_SYSV_ABI KernelIsNeoMode() {
+	return 0;
+}
+
 LIB_DEFINE(InitLibKernel_1_Mem) {
+	LIB_FUNC("WslcK1FQcGI", KernelIsNeoMode);
 	LIB_FUNC("mL8NDH86iQI", Memory::KernelMapNamedFlexibleMemory);
 	LIB_FUNC("IWIBBdTHit4", Memory::KernelMapFlexibleMemory);
 	LIB_FUNC("DGMG3JshrZU", Memory::KernelSetVirtualRangeName);
@@ -3356,6 +3387,7 @@ LIB_DEFINE(InitLibKernel_1_Mem) {
 	LIB_FUNC("4h6F1LLbTiw", Memory::KernelMapFlexibleMemory);
 	LIB_FUNC("cQke9UuBQOk", Memory::KernelMunmap);
 	LIB_FUNC("pO96TwzOm5E", Memory::KernelGetDirectMemorySize);
+	LIB_FUNC("BC+OG5m9+bw", Memory::KernelGetDirectMemoryType);
 	LIB_FUNC("C0f7TJcbfac", Memory::KernelAvailableDirectMemorySize);
 	LIB_FUNC("tZ2yplY8MBY", Memory::KernelGetPageTableStats);
 	LIB_FUNC("rTXw65xmLIA", Memory::KernelAllocateDirectMemory);

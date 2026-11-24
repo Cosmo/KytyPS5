@@ -1219,6 +1219,12 @@ void Initialize() {
 	                           (Loader::SystemContentIsTrinityMode() ? 1216ull * 1024ull * 1024ull : 0);
 	EXIT_IF(g_flexible_memory_size + table_overhead >= memory_budget - RESERVED_CACHE_SIZE);
 	g_guest_memory_size = memory_budget - RESERVED_CACHE_SIZE - table_overhead;
+	if (Loader::SystemContentIsPs4()) {
+		// A PS4 game gets the console's direct memory: 5248 MiB in all minus the 512 MiB flexible
+		// area, as shadPS4 configures it for SDK 5.00 and later (extended memory on).
+		constexpr uint64_t Ps4DirectMemorySize = (5248ull - 512ull) * 1024ull * 1024ull;
+		g_guest_memory_size = std::min(g_guest_memory_size, Ps4DirectMemorySize + g_flexible_memory_size);
+	}
 	LOGF("\t flexible memory size = %" PRIu64 " MiB, direct memory size = %" PRIu64 " MiB\n",
 	     g_flexible_memory_size / (1024ull * 1024ull),
 	     (g_guest_memory_size - g_flexible_memory_size) / (1024ull * 1024ull));
@@ -2205,6 +2211,25 @@ size_t KYTY_SYSV_ABI KernelGetDirectMemorySize() {
 	PRINT_NAME();
 
 	return PhysicalMemory::Size();
+}
+
+int KYTY_SYSV_ABI KernelGetDirectMemoryType(int64_t phys_addr, int* type_out, int64_t* start_out,
+                                            int64_t* end_out) {
+	PRINT_NAME();
+
+	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
+
+	if (type_out == nullptr || start_out == nullptr || end_out == nullptr || phys_addr < 0) {
+		return KERNEL_ERROR_EINVAL;
+	}
+	PhysicalMemory::AllocatedBlock block {};
+	if (!g_physical_memory->Find(static_cast<uint64_t>(phys_addr), &block)) {
+		return KERNEL_ERROR_ENOENT;
+	}
+	*type_out  = block.memory_type;
+	*start_out = static_cast<int64_t>(block.start_addr);
+	*end_out   = static_cast<int64_t>(block.start_addr + block.size);
+	return OK;
 }
 
 int KYTY_SYSV_ABI KernelAvailableDirectMemorySize(int64_t search_start, int64_t search_end,

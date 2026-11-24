@@ -583,8 +583,8 @@ Graphics::ImageInfo BufferAttributeGroup::Ps4ImageInfo(const VideoOutBuffer& buf
 		EXIT("unsupported video-out pixel format: 0x%016" PRIx64 "\n", attribute.pixel_format);
 	}
 	if (ps4_tiling != VIDEO_OUT_PS4_TILING_MODE_LINEAR) {
-		// gfx7 2D-thin display tiling is not decoded yet (backward compatibility, block 6): the
-		// buffer is shown as if it were linear until the gfx7 detiler exists.
+		// gfx7 2D-thin display tiling is not decoded yet: a buffer the GPU rendered is the same
+		// image as its render target; one the CPU wrote would show scrambled.
 		static std::atomic_bool noted {false};
 		if (!noted.exchange(true)) {
 			LOGF("PS4 tiled video-out buffers shown untiled (%ux%u)\n", attribute.width,
@@ -601,11 +601,13 @@ Graphics::ImageInfo BufferAttributeGroup::Ps4ImageInfo(const VideoOutBuffer& buf
 	info.pixel_format    = pixel_format.format;
 	info.guest_format    = pixel_format.guest_format;
 	info.type            = Graphics::Prospero::ImageType::kColor2D;
+	const bool tiled     = ps4_tiling != VIDEO_OUT_PS4_TILING_MODE_LINEAR;
 	info.extent          = {attribute.width, attribute.height, 1};
 	info.resources       = {1, 1};
 	info.bytes_per_block = pixel_format.bytes_per_element;
 	info.samples         = 1;
-	info.tile_mode       = Graphics::Prospero::TileMode::kLinear;
+	info.tile_mode       = tiled ? Graphics::Prospero::TileMode::kRenderTarget
+	                             : Graphics::Prospero::TileMode::kLinear;
 	info.bgra16          = pixel_format.bgra16;
 	info.UpdateSize();
 	if (info.data.size == 0) {

@@ -701,6 +701,10 @@ bool SystemContentIsTrinityMode() {
 	return Common::Singleton<SystemContent>::Instance()->trinity_mode;
 }
 
+bool SystemContentIsPs4() {
+	return Common::Singleton<SystemContent>::Instance()->psf_path.extension() == ".sfo";
+}
+
 bool SystemContentParamSfoGetInt(const char* name, int32_t* value) {
 	if (name == nullptr || value == nullptr) {
 		return false;

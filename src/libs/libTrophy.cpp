@@ -9,7 +9,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -129,6 +132,49 @@ constexpr int NP_TROPHY2_ERROR_INVALID_TROPHY_ID = static_cast<int>(0x8055390a);
 constexpr int NP_TROPHY2_ERROR_INVALID_GROUP_ID  = static_cast<int>(0x8055390b);
 constexpr int NP_TROPHY2_ERROR_NOT_REGISTERED    = static_cast<int>(0x80553920);
 
+// A PS4 trophy package (sce_sys/trophy/trophyNN.trp): its PNGs are plain, but the list with names
+// and grades (TROP.ESFM) is encrypted with a console key we do not ship. The trophies are known by
+// number and icon only, and counted as bronze.
+static Trophies::Package LoadPs4TrophyPackage(const std::filesystem::path& path) {
+	Trophies::Package package;
+	std::ifstream     file(path, std::ios::binary);
+	std::vector<char> data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+	const auto        be32 = [&](size_t at) {
+		const auto* p = reinterpret_cast<const uint8_t*>(data.data() + at);
+		return (uint32_t {p[0]} << 24u) | (uint32_t {p[1]} << 16u) | (uint32_t {p[2]} << 8u) | p[3];
+	};
+	const auto be64 = [&](size_t at) { return (uint64_t {be32(at)} << 32u) | be32(at + 4u); };
+	constexpr size_t HeaderSize = 96u;
+	constexpr size_t EntrySize  = 64u;
+	if (data.size() < HeaderSize || be32(0) != 0xDCA24D00u) {
+		return package;
+	}
+	const auto count = be32(16);
+	package.title    = "Trophies";
+	for (uint32_t i = 0; i < count && HeaderSize + (i + 1u) * EntrySize <= data.size(); i++) {
+		const size_t entry = HeaderSize + i * EntrySize;
+		char         name[33] {};
+		std::memcpy(name, data.data() + entry, 32u);
+		int id = -1;
+		if (std::sscanf(name, "TROP%d.PNG", &id) != 1 || id < 0) {
+			continue;
+		}
+		const auto position = be64(entry + 32u);
+		const auto length   = be64(entry + 40u);
+		if (position > data.size() || length > data.size() - position) {
+			continue;
+		}
+		Trophies::Trophy trophy;
+		trophy.id    = id;
+		trophy.grade = 4; // bronze
+		trophy.name  = "Trophy " + std::to_string(id);
+		const auto* begin = reinterpret_cast<const std::byte*>(data.data()) + position;
+		trophy.icon_png.assign(begin, begin + length);
+		package.trophies.emplace(id, std::move(trophy));
+	}
+	return package;
+}
+
 // Caller holds g_trophy_mutex. Both NpTrophy2 and UDS use the same user/service record.
 static TrophyState* LoadTrophyState(TrophyKey key) {
 	if (const auto it = g_states.find(key); it != g_states.end()) {
@@ -141,6 +187,11 @@ static TrophyState* LoadTrophyState(TrophyKey key) {
 		const auto filename = "/app0/" + Trophies::PackagePath(key.second).generic_string();
 		package = Trophies::LoadPackage(LibKernel::FileSystem::GetRealFilename(filename),
 		                                Config::GetConsoleLanguage());
+		if (package.trophies.empty()) {
+			char ps4_name[64];
+			std::snprintf(ps4_name, sizeof(ps4_name), "/app0/sce_sys/trophy/trophy%02u.trp", key.second);
+			package = LoadPs4TrophyPackage(LibKernel::FileSystem::GetRealFilename(ps4_name));
+		}
 		if (package.trophies.empty()) {
 			LOGF("[Trophy] could not load trophy package %s for %s\n", filename.c_str(),
 			     title_id.c_str());
@@ -568,6 +619,118 @@ LIB_DEFINE(InitNet_1_NpTrophy2) {
 }
 
 } // namespace LibNpTrophy2
+
+// The PS4 trophy API (backward compatibility), on the same records as NpTrophy2.
+namespace LibNpTrophy {
+
+LIB_NAME("NpTrophy", "NpTrophy");
+
+struct GameDetails {
+	uint64_t size;
+	uint32_t num_groups;
+	uint32_t num_trophies;
+	uint32_t num_platinum;
+	uint32_t num_gold;
+	uint32_t num_silver;
+	uint32_t num_bronze;
+	char     title[128];
+};
+
+struct GameData {
+	uint64_t size;
+	uint32_t unlocked_trophies;
+	uint32_t unlocked_platinum;
+	uint32_t unlocked_gold;
+	uint32_t unlocked_silver;
+	uint32_t unlocked_bronze;
+	uint32_t progress_percentage;
+};
+
+static int KYTY_SYSV_ABI NpTrophyGetGameInfo(int context, int /*handle*/, GameDetails* details,
+                                             GameData* data) {
+	PRINT_NAME();
+	std::scoped_lock           lock(LibNpTrophy2::g_trophy_mutex);
+	LibNpTrophy2::TrophyState* state = nullptr;
+	if (const auto result = LibNpTrophy2::GetTrophyState(context, &state); result != 0) {
+		return result;
+	}
+	const auto total    = static_cast<uint32_t>(state->package->trophies.size());
+	const auto unlocked = static_cast<uint32_t>(state->unlocks.unlocked.size());
+	if (details != nullptr) {
+		details->num_groups   = 0;
+		details->num_trophies = total;
+		details->num_platinum = 0;
+		details->num_gold     = 0;
+		details->num_silver   = 0;
+		details->num_bronze   = total;
+		std::snprintf(details->title, sizeof(details->title), "%s", state->package->title.c_str());
+	}
+	if (data != nullptr) {
+		data->unlocked_trophies   = unlocked;
+		data->unlocked_platinum   = 0;
+		data->unlocked_gold       = 0;
+		data->unlocked_silver     = 0;
+		data->unlocked_bronze     = unlocked;
+		data->progress_percentage = total != 0u ? unlocked * 100u / total : 0u;
+	}
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpTrophyGetTrophyUnlockState(int context, int /*handle*/, uint32_t* flags,
+                                                      uint32_t* count) {
+	PRINT_NAME();
+	if (flags == nullptr || count == nullptr) {
+		return LibNpTrophy2::NP_TROPHY2_ERROR_INVALID_ARGUMENT;
+	}
+	std::scoped_lock           lock(LibNpTrophy2::g_trophy_mutex);
+	LibNpTrophy2::TrophyState* state = nullptr;
+	if (const auto result = LibNpTrophy2::GetTrophyState(context, &state); result != 0) {
+		return result;
+	}
+	std::memset(flags, 0, 16u); // SceNpTrophyFlagArray: 128 bits
+	for (const auto id: state->unlocks.unlocked) {
+		if (id >= 0 && id < 128) {
+			flags[id / 32] |= 1u << (id % 32);
+		}
+	}
+	*count = static_cast<uint32_t>(state->package->trophies.size());
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpTrophyUnlockTrophy(int context, int /*handle*/, int trophy_id,
+                                              int* platinum_id) {
+	PRINT_NAME();
+	std::scoped_lock           lock(LibNpTrophy2::g_trophy_mutex);
+	LibNpTrophy2::TrophyState* state = nullptr;
+	if (const auto result = LibNpTrophy2::GetTrophyState(context, &state); result != 0) {
+		return result;
+	}
+	LibNpTrophy2::RecordTrophyUnlock(*state, trophy_id);
+	if (platinum_id != nullptr) {
+		*platinum_id = -1;
+	}
+	return 0;
+}
+
+static int KYTY_SYSV_ABI NpTrophyShowTrophyList(int /*context*/, int /*handle*/) {
+	PRINT_NAME();
+	return 0;
+}
+
+LIB_DEFINE(InitNet_1_NpTrophy) {
+	LIB_FUNC("XbkjbobZlCY", LibNpTrophy2::NpTrophy2CreateContext);
+	LIB_FUNC("q7U6tEAQf7c", LibNpTrophy2::NpTrophy2CreateHandle);
+	LIB_FUNC("TJCAxto9SEU", LibNpTrophy2::NpTrophy2RegisterContext);
+	LIB_FUNC("E1Wrwd07Lr8", LibNpTrophy2::NpTrophy2DestroyContext);
+	LIB_FUNC("GNcF4oidY0Y", LibNpTrophy2::NpTrophy2DestroyHandle);
+	LIB_FUNC("aTnHs7W-9Uk", LibNpTrophy2::NpTrophy2AbortHandle);
+	LIB_FUNC("YYP3f2W09og", NpTrophyGetGameInfo);
+	LIB_FUNC("LHuSmO3SLd8", NpTrophyGetTrophyUnlockState);
+	LIB_FUNC("28xmRUFao68", NpTrophyUnlockTrophy);
+	LIB_FUNC("d9jpdPz5f-8", NpTrophyShowTrophyList);
+}
+
+} // namespace LibNpTrophy
 
 namespace LibNpUniversalDataSystem {
 

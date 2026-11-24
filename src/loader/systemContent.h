@@ -12,6 +12,8 @@ namespace Loader {
 
 void     SystemContentLoadParamSfo(const std::filesystem::path& file_name);
 bool     SystemContentIsTrinityMode();
+// The game describes itself with a binary param.sfo: a PS4 game (backward compatibility).
+bool     SystemContentIsPs4();
 bool     SystemContentParamSfoGetInt(const char* name, int32_t* value);
 bool     SystemContentParamSfoGetString(const char* name, std::string* value);
 bool     SystemContentParamSfoGetString(const char* name, char* value, size_t value_size);
