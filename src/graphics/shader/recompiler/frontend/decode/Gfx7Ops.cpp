@@ -362,8 +362,9 @@ void Gfx7TextureSharpToGfx10(uint32_t* fields) {
 	                                         : fields[4] & 0x1fffu;
 	const uint32_t base_array = fields[5] & 0x1fffu;
 	const uint32_t pitch      = (fields[4] >> 13u) & 0x3fffu;
-	// gfx7 tiling is not decoded yet. Indices 0..7 are depth surfaces and 9..12 the displayable
-	// thin modes render targets use, so sampling a target finds its image; the rest read as linear.
+	// Indices 0..7 are depth surfaces and 9..12 and 14 the thin modes render targets use, so
+	// sampling a target finds its image. The rest read as linear; for linear (8), 1D-thin (13) and
+	// 1D-thick (19) textures the texture cache decodes the gfx7 layout from the last word.
 	const uint32_t mode = tile <= 7u ? 0x18u : ((tile >= 9u && tile <= 12u) || tile == 14u) ? 0x1bu : 0x00u;
 	fields[0] = base_low;
 	fields[1] = base_high | (Gfx7ImageFormat(dfmt, nfmt) << 20u) | ((width & 3u) << 30u);

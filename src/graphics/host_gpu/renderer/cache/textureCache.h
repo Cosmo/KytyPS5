@@ -68,6 +68,10 @@ public:
 	void                        UpdateImage(ImageId id);
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);
+	// PS4 (backward compatibility): the layout of a tiled render target (or GPU-written image) of
+	// this size at `address`, for a texture that samples it in a layout gfx10 has no swizzle for.
+	[[nodiscard]] bool FindTargetInfoAt(uint64_t address, uint32_t width, uint32_t height,
+	                                    ImageInfo* info);
 	[[nodiscard]] ImageViewHandle FindTexture(ImageId id, const ImageDesc& desc);
 	[[nodiscard]] ImageViewHandle FindRenderTarget(ImageId id, const ImageDesc& desc);
 	[[nodiscard]] ImageViewHandle FindDepthTarget(ImageId id, const ImageDesc& desc);
@@ -251,6 +255,7 @@ private:
 	void                        InitializeImage(ImageId id);
 	[[nodiscard]] bool          CanDownload(const Image& image) const;
 	void UploadImage(Image& image, Buffer& source, uint64_t source_offset);
+	void UploadGfx7MicroTiled(Image& image);
 	void DownloadImage(Image& image, Buffer& destination, uint64_t destination_offset,
 	                   uint64_t destination_size, uint32_t levels);
 	void DownloadDepth(Image& image, Buffer& destination, uint64_t destination_offset);

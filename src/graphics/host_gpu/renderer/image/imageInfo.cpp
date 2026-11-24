@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/renderer/renderTarget.h"
 
 #include <algorithm>
+#include <bit>
 
 namespace Libs::Graphics {
 namespace {
@@ -78,6 +79,67 @@ vk::Extent3D ImageInfo::MipExtent(uint32_t level) const {
 	EXIT_IF(level >= resources.levels || level >= mip_layout.size());
 	return {std::max(extent.width >> level, 1u), std::max(extent.height >> level, 1u),
 	        IsVolume() ? std::max(extent.depth >> level, 1u) : resources.layers};
+}
+
+ImageInfo::Gfx7MicroLevel ImageInfo::Gfx7MicroLevelLayout(uint32_t level) const {
+	const bool block = tiling.texel_width > 1u;
+	uint32_t   w     = gfx7_micro_pitch >> level;
+	uint32_t   h     = extent.height >> level;
+	if (block) {
+		w = (w + 3u) / 4u;
+		h = (h + 3u) / 4u;
+	}
+	w = std::max(w, 1u);
+	h = std::max(h, 1u);
+	if (gfx7_micro_pow2) {
+		w = std::bit_ceil(w);
+		h = std::bit_ceil(h);
+	}
+	Gfx7MicroLevel layout;
+	if (gfx7_linear) {
+		// Rows align to 64 bytes (at least 8 texels); each slice starts on a 256-byte boundary.
+		const uint32_t row_align = std::max(8u, 64u / bytes_per_block);
+		layout.pitch  = level == 0u ? w : Common::AlignUp(w, row_align);
+		layout.height = h;
+		layout.size   = Common::AlignUp(uint64_t {layout.pitch} * layout.height * bytes_per_block,
+		                                uint64_t {256u});
+		return layout;
+	}
+	// Micro tiles are 8x8 blocks (8x8x4 when thick), and each level is a whole number of 256-byte
+	// groups.
+	const uint32_t thickness = gfx7_micro_thick ? 4u : 1u;
+	layout.pitch             = Common::AlignUp(w, 8u);
+	layout.height            = Common::AlignUp(h, 8u);
+	layout.size = uint64_t {layout.pitch} * layout.height * bytes_per_block * thickness;
+	while (layout.size % 256u != 0u) {
+		layout.pitch += 8u;
+		layout.size = uint64_t {layout.pitch} * layout.height * bytes_per_block * thickness;
+	}
+	if (gfx7_micro_thick) {
+		uint32_t d = std::max(extent.depth >> level, 1u);
+		if (gfx7_micro_pow2) {
+			d = std::bit_ceil(d);
+		}
+		layout.groups = (d + thickness - 1u) / thickness;
+	}
+	return layout;
+}
+
+uint32_t ImageInfo::Gfx7MicroSlots() const {
+	return gfx7_micro_pow2 ? std::bit_ceil(resources.layers) : resources.layers;
+}
+
+uint64_t ImageInfo::Gfx7MicroLevelOffset(uint32_t level) const {
+	uint64_t offset = 0;
+	for (uint32_t l = 0; l < level && l < resources.levels; l++) {
+		const auto layout = Gfx7MicroLevelLayout(l);
+		offset += layout.size * layout.groups * Gfx7MicroSlots();
+	}
+	return offset;
+}
+
+uint64_t ImageInfo::Gfx7MicroSize() const {
+	return Gfx7MicroLevelOffset(resources.levels);
 }
 
 void ImageInfo::UpdateSize() {

@@ -93,6 +93,27 @@ struct ImageInfo {
 	TileTextureBlockLayout        tiling;
 	uint64_t                      tiled_slice_stride = 0;
 	uint32_t                      first_tail_level   = 16;
+	// PS4 (backward compatibility) textures the CPU fills in a gfx7 layout that gfx10 has no swizzle
+	// for: the padded pitch from the T#, nonzero when guest memory is laid out that way, and whether
+	// the levels are padded to powers of two. 1D-thin micro tiles (8x8) unless one of the flags says
+	// linear rows or 1D-thick volume tiles (8x8x4).
+	uint32_t gfx7_micro_pitch = 0;
+	bool     gfx7_micro_pow2  = false;
+	bool     gfx7_linear      = false;
+	bool     gfx7_micro_thick = false;
+
+	struct Gfx7MicroLevel {
+		uint32_t pitch  = 0; // blocks
+		uint32_t height = 0; // blocks
+		uint64_t size   = 0; // one slice (one 4-slice group when thick), bytes
+		uint32_t groups = 1; // thick volumes: 4-slice groups of the level
+	};
+	[[nodiscard]] Gfx7MicroLevel Gfx7MicroLevelLayout(uint32_t level) const;
+	[[nodiscard]] uint64_t       Gfx7MicroSize() const;
+	// Slices a level holds: with POW2_PAD the count rounds up to a power of two (a cube's six faces
+	// take the room of eight).
+	[[nodiscard]] uint32_t       Gfx7MicroSlots() const;
+	[[nodiscard]] uint64_t       Gfx7MicroLevelOffset(uint32_t level) const;
 
 	void                                           UpdateSize();
 	[[nodiscard]] uint32_t                         DataAlignment() const;

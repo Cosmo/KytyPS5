@@ -610,6 +610,39 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		desc.info.metadata.range         = {descriptor.MetaAddr() << 8u, metadata_size.size};
 		desc.info.metadata.dcc_alpha_msb = descriptor.DccAlphaPos();
 	}
+	// PS4 (backward compatibility): Gfx7TextureSharpToGfx10 leaves the gfx7 tile index, padded pitch
+	// and POW2_PAD in the last word for the layouts gfx10 has no swizzle for.
+	if ((descriptor.fields[7] & 0x80000000u) != 0u) {
+		const uint32_t gfx7_tile  = descriptor.fields[7] & 0x1fu;
+		const uint32_t gfx7_pitch = ((descriptor.fields[7] >> 5u) & 0x3fffu) + 1u;
+		const bool     gfx7_pow2  = (descriptor.fields[7] & 0x40000000u) != 0u;
+		if (gfx7_tile == 8u) {
+			// Linear: rows as long as the T# says, not as gfx10 would pad them.
+			desc.info.gfx7_micro_pitch = gfx7_pitch;
+			desc.info.gfx7_micro_pow2  = gfx7_pow2;
+			desc.info.gfx7_linear      = true;
+			desc.info.data.size        = desc.info.Gfx7MicroSize();
+		} else if (gfx7_tile == 13u) {
+			// 1D-thin micro tiles.
+			desc.info.gfx7_micro_pitch = gfx7_pitch;
+			desc.info.gfx7_micro_pow2  = gfx7_pow2;
+			desc.info.data.size        = std::max(desc.info.data.size, desc.info.Gfx7MicroSize());
+			// A render target in that mode is sampled as what the GPU drew, not from guest memory.
+			ImageInfo target {};
+			if (texture_cache.FindTargetInfoAt(address, width, height, &target) &&
+			    target.type == desc.info.type &&
+			    target.resources.layers >= desc.info.resources.layers &&
+			    target.resources.levels >= desc.info.resources.levels) {
+				desc.info = target;
+			}
+		} else if (gfx7_tile == 19u && volume) {
+			// 1D-thick volume: 8x8x4 micro tiles in raster order.
+			desc.info.gfx7_micro_pitch = gfx7_pitch;
+			desc.info.gfx7_micro_pow2  = gfx7_pow2;
+			desc.info.gfx7_micro_thick = true;
+			desc.info.data.size        = desc.info.Gfx7MicroSize();
+		}
+	}
 	desc.view_info = TextureViewInfo(resource, descriptor, view_format, surface_format, storage,
 	                                 view_levels, desc.info.resources.layers);
 	desc.view_info.base_level = view_base;
