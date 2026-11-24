@@ -26,6 +26,10 @@ namespace VideoDec2 {
 LIB_DEFINE(InitVideoDec2_1);
 } // namespace VideoDec2
 
+namespace VideoDecPs4 {
+LIB_DEFINE(InitVideoDec_1);
+} // namespace VideoDecPs4
+
 namespace Vdecsw {
 LIB_DEFINE(InitVdecsw_1);
 } // namespace Vdecsw
@@ -165,6 +169,7 @@ void InitAll(Loader::SymbolDatabase* s) {
 	LibUlt::InitUlt_1(s);
 	InitUserService_1(s);
 	VideoDec2::InitVideoDec2_1(s);
+	VideoDecPs4::InitVideoDec_1(s);
 	Vdecsw::InitVdecsw_1(s);
 	LibGen5::InitVideoOut_1(s);
 	LibGen5::VrrStatus::InitVideoOutVrrStatus_1(s);

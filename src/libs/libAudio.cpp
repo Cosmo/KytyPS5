@@ -629,6 +629,7 @@ LIB_DEFINE(InitAudio_1_Ajm) {
 	LIB_FUNC("jVCWcthifr8", Ajm::AjmBatchJobRun);
 	LIB_FUNC("Z9NVCesiP0Q", Ajm::AjmBatchJobRunSplit);
 	LIB_FUNC("7jdAXK+2fMo", Ajm::AjmBatchJobRunSplitBufferRa); // PS4
+	LIB_FUNC("dmDybN--Fn8", Ajm::AjmBatchJobControlBufferRa);  // PS4
 	LIB_FUNC("fFFkk0xfGWs", Ajm::AjmBatchStartBuffer);         // PS4
 	LIB_FUNC("1t3ixYNXyuc", Ajm::AjmDecAt9ParseConfigData);
 	LIB_FUNC("eDFeTyi+G3Y", Ajm::AjmDecMp3ParseFrame);

@@ -320,16 +320,18 @@ private:
 		const auto sample_size = picture.bit_depth > 8 ? 2u : 1u;
 		const auto width       = static_cast<uint32_t>(frame->width);
 		const auto height      = static_cast<uint32_t>(frame->height);
-		const auto pitch       = AlignUp(width * sample_size, 256);
+		const auto pitch       = AlignUp(width * sample_size, m_config.pitch_alignment);
+		const auto rows        = AlignUp(height, m_config.height_alignment);
 		const auto chroma_rows = (static_cast<uint64_t>(height) + 1u) / 2u;
-		const auto required =
-		    static_cast<uint64_t>(pitch) * height + static_cast<uint64_t>(pitch) * chroma_rows;
+		const auto padded_chroma_rows = (static_cast<uint64_t>(rows) + 1u) / 2u;
+		const auto required           = static_cast<uint64_t>(pitch) * rows +
+		                      static_cast<uint64_t>(pitch) * padded_chroma_rows;
 		if (required > frame_buffer.size) {
 			return Result::FrameBufferSize;
 		}
 
 		auto* dst    = static_cast<uint8_t*>(frame_buffer.data);
-		auto* chroma = dst + static_cast<size_t>(pitch) * height;
+		auto* chroma = dst + static_cast<size_t>(pitch) * rows;
 		std::memset(dst, 0, static_cast<size_t>(required));
 		if (frame->format == AV_PIX_FMT_NV12) {
 			for (uint32_t y = 0; y < height; y++) {
@@ -371,6 +373,15 @@ private:
 			              output_strides) != frame->height) {
 				return Result::ApiFail;
 			}
+		}
+		// Padding rows repeat the last row, so filtering at the bottom edge stays in the picture.
+		for (uint32_t y = height; y < rows; y++) {
+			std::memcpy(dst + static_cast<size_t>(y) * pitch, dst + static_cast<size_t>(height - 1u) * pitch,
+			            pitch);
+		}
+		for (uint64_t y = chroma_rows; y < padded_chroma_rows; y++) {
+			std::memcpy(chroma + static_cast<size_t>(y) * pitch,
+			            chroma + static_cast<size_t>(chroma_rows - 1u) * pitch, pitch);
 		}
 
 		output->valid           = true;

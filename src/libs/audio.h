@@ -204,6 +204,10 @@ void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(uint8_t* buffer, uint32_t instan
                                                 const AjmBuffer* output_buffers,
                                                 size_t output_buffers_num, void* sideband_output,
                                                 size_t sideband_output_size, const void* return_address);
+void* KYTY_SYSV_ABI AjmBatchJobControlBufferRa(uint8_t* buffer, uint32_t instance, uint64_t flags,
+                                               const void* sideband_input, size_t sideband_input_size,
+                                               void* sideband_output, size_t sideband_output_size,
+                                               const void* return_address);
 int KYTY_SYSV_ABI   AjmBatchStartBuffer(uint32_t context, const uint8_t* batch, uint32_t batch_size,
                                         int priority, AjmBatchError* error, uint32_t* batch_id);
 int KYTY_SYSV_ABI AjmBatchJobRunSplit(AjmBatchInfo* info, uint32_t instance, uint64_t flags,

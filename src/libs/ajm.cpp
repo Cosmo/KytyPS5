@@ -1122,6 +1122,25 @@ void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(uint8_t* buffer, uint32_t instan
 	return buffer + 8u + 8u + 16u * buffers;
 }
 
+// The control job of the PS4 batch API: the job header, a return address buffer when the game names
+// one, the control flags and the sideband input and output buffers.
+void* KYTY_SYSV_ABI AjmBatchJobControlBufferRa(uint8_t* buffer, uint32_t instance, uint64_t flags,
+                                               const void* sideband_input, size_t sideband_input_size,
+                                               void* sideband_output, size_t sideband_output_size,
+                                               const void* return_address) {
+	PRINT_NAME();
+	EXIT_NOT_IMPLEMENTED(buffer == nullptr);
+
+	AjmDecoder*      decoder       = nullptr;
+	AjmGaplessState* gapless       = nullptr;
+	const auto       decode_result = AjmControlInstance(instance, flags, sideband_input,
+	                                                    sideband_input_size, &decoder, &gapless);
+	AjmWriteSideband(flags, sideband_output, sideband_output_size, decoder, gapless, decode_result);
+
+	const size_t buffers = 2u + (return_address != nullptr ? 1u : 0u);
+	return buffer + 8u + 8u + 16u * buffers;
+}
+
 int KYTY_SYSV_ABI AjmBatchStartBuffer(uint32_t context, const uint8_t* batch, uint32_t batch_size,
                                       int priority, AjmBatchError* error, uint32_t* batch_id) {
 	PRINT_NAME();

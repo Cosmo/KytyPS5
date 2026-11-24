@@ -5,6 +5,7 @@
 #include "libs/videoDec2Decoder.h"
 #include "loader/symbolDatabase.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -672,5 +673,308 @@ LIB_DEFINE(InitVideoDec2_1) {
 }
 
 } // namespace VideoDec2
+
+// The PS4 video decoder (backward compatibility): AVC, one access unit in and at most one picture out
+// per call, on the same decoder as Videodec2 with the PS4 frame layout. Layouts as in shadPS4.
+namespace VideoDecPs4 {
+
+LIB_NAME("Videodec", "Videodec");
+
+namespace Decoder = VideoDec2::Decoder;
+
+constexpr int32_t VIDEODEC_ERROR_API_FAIL             = static_cast<int32_t>(0x80C10000u);
+constexpr int32_t VIDEODEC_ERROR_STRUCT_SIZE          = static_cast<int32_t>(0x80C10002u);
+constexpr int32_t VIDEODEC_ERROR_HANDLE               = static_cast<int32_t>(0x80C10003u);
+constexpr int32_t VIDEODEC_ERROR_AU_SIZE              = static_cast<int32_t>(0x80C10009u);
+constexpr int32_t VIDEODEC_ERROR_AU_POINTER           = static_cast<int32_t>(0x80C1000Au);
+constexpr int32_t VIDEODEC_ERROR_FRAME_BUFFER_SIZE    = static_cast<int32_t>(0x80C1000Bu);
+constexpr int32_t VIDEODEC_ERROR_FRAME_BUFFER_POINTER = static_cast<int32_t>(0x80C1000Cu);
+constexpr int32_t VIDEODEC_ERROR_ARGUMENT_POINTER     = static_cast<int32_t>(0x80C1000Fu);
+constexpr int32_t VIDEODEC_ERROR_DECODE_AU            = static_cast<int32_t>(0x80C10011u);
+constexpr int32_t VIDEODEC_ERROR_MISMATCH_SPEC        = static_cast<int32_t>(0x80C10012u);
+
+struct VideodecConfigInfo {
+	uint64_t this_size;
+	uint32_t codec_type;
+	uint32_t profile;
+	uint32_t max_level;
+	int32_t  max_frame_width;
+	int32_t  max_frame_height;
+	int32_t  max_dpb_frame_count;
+	uint64_t videodec_flags;
+};
+static_assert(sizeof(VideodecConfigInfo) == 40);
+
+struct VideodecResourceInfo {
+	uint64_t this_size;
+	uint64_t cpu_memory_size;
+	void*    cpu_memory;
+	uint64_t cpu_gpu_memory_size;
+	void*    cpu_gpu_memory;
+	uint64_t max_frame_buffer_size;
+	uint32_t frame_buffer_alignment;
+};
+static_assert(sizeof(VideodecResourceInfo) == 56);
+
+struct VideodecCtrl {
+	uint64_t this_size;
+	void*    handle;
+	uint64_t version;
+};
+
+struct VideodecFrameBuffer {
+	uint64_t this_size;
+	void*    frame_buffer;
+	uint64_t frame_buffer_size;
+};
+
+struct VideodecInputData {
+	uint64_t this_size;
+	void*    au_data;
+	uint64_t au_size;
+	uint64_t pts_data;
+	uint64_t dts_data;
+	uint64_t attached_data;
+};
+
+struct VideodecAvcInfo {
+	uint32_t num_units_in_tick;
+	uint32_t time_scale;
+	uint8_t  fixed_frame_rate_flag;
+	uint8_t  aspect_ratio_idc;
+	uint16_t sar_width;
+	uint16_t sar_height;
+	uint8_t  colour_primaries;
+	uint8_t  transfer_characteristics;
+	uint8_t  matrix_coefficients;
+	uint8_t  video_full_range_flag;
+	uint32_t frame_crop_left_offset;
+	uint32_t frame_crop_right_offset;
+	uint32_t frame_crop_top_offset;
+	uint32_t frame_crop_bottom_offset;
+};
+
+struct VideodecPictureInfo {
+	uint64_t this_size;
+	uint32_t is_valid;
+	uint32_t codec_type;
+	uint32_t frame_width;
+	uint32_t frame_pitch;
+	uint32_t frame_height;
+	uint32_t is_error_pic;
+	uint64_t pts_data;
+	uint64_t attached_data;
+	union {
+		uint8_t         reserved[64];
+		VideodecAvcInfo avc;
+	} codec;
+};
+static_assert(sizeof(VideodecPictureInfo) == 112);
+
+static std::mutex                            g_decoders_mutex;
+static std::unordered_set<Decoder::Instance*> g_decoders;
+
+static Decoder::Instance* GetDecoder(const VideodecCtrl* ctrl) {
+	if (ctrl == nullptr) {
+		return nullptr;
+	}
+	std::scoped_lock lock(g_decoders_mutex);
+	auto*            instance = static_cast<Decoder::Instance*>(ctrl->handle);
+	return g_decoders.contains(instance) ? instance : nullptr;
+}
+
+static int32_t MapResult(Decoder::Result result) {
+	switch (result) {
+		case Decoder::Result::Ok:
+		case Decoder::Result::NoFrame: return OK;
+		case Decoder::Result::AccessUnit: return VIDEODEC_ERROR_DECODE_AU;
+		case Decoder::Result::FrameBufferSize: return VIDEODEC_ERROR_FRAME_BUFFER_SIZE;
+		case Decoder::Result::OversizeDecode: return VIDEODEC_ERROR_MISMATCH_SPEC;
+		default: return VIDEODEC_ERROR_API_FAIL;
+	}
+}
+
+// The picture of a decode or flush, written up to the size the game gave.
+static void FillPicture(const Decoder::Output& decoded, VideodecPictureInfo* picture) {
+	VideodecPictureInfo out {};
+	out.this_size = picture->this_size;
+	if (decoded.valid) {
+		Decoder::PictureInfo info {};
+		(void)Decoder::GetPictureInfo(decoded.buffer, &info);
+		const auto width  = (decoded.width + 15u) & ~15u;
+		const auto height = (decoded.height + 15u) & ~15u;
+		out.is_valid      = 1;
+		out.frame_width   = width;
+		out.frame_pitch   = decoded.pitch;
+		out.frame_height  = height;
+		out.is_error_pic  = decoded.error_frame ? 1u : 0u;
+		out.pts_data      = info.pts;
+		out.attached_data = info.attached_data;
+		auto& avc         = out.codec.avc;
+		avc.aspect_ratio_idc         = info.sar_width != 0 && info.sar_height != 0 ? 255 : 0;
+		avc.sar_width                = info.sar_width;
+		avc.sar_height               = info.sar_height;
+		avc.colour_primaries         = info.color_primaries;
+		avc.transfer_characteristics = info.color_trc;
+		avc.matrix_coefficients      = info.color_space;
+		avc.video_full_range_flag    = info.color_range == 2 ? 1 : 0;
+		avc.frame_crop_left_offset   = info.crop_left;
+		avc.frame_crop_right_offset  = width - decoded.width + info.crop_right;
+		avc.frame_crop_top_offset    = info.crop_top;
+		avc.frame_crop_bottom_offset = height - decoded.height + info.crop_bottom;
+	}
+	std::memcpy(picture, &out, std::min<uint64_t>(picture->this_size, sizeof(out)));
+}
+
+static int32_t KYTY_SYSV_ABI QueryResourceInfo(const VideodecConfigInfo* config,
+                                               VideodecResourceInfo*     resource) {
+	PRINT_NAME();
+	if (config == nullptr || resource == nullptr) {
+		return VIDEODEC_ERROR_ARGUMENT_POINTER;
+	}
+	if (config->this_size != sizeof(VideodecConfigInfo) ||
+	    resource->this_size != sizeof(VideodecResourceInfo)) {
+		return VIDEODEC_ERROR_STRUCT_SIZE;
+	}
+	// The worst case of the configuration: NV12 frames padded to 256 x 16, the DPB and two more.
+	const uint64_t width  = config->max_frame_width > 0 ? config->max_frame_width : 1920;
+	const uint64_t height = config->max_frame_height > 0 ? config->max_frame_height : 1080;
+	const uint64_t frame  = ((width + 255u) & ~uint64_t {255u}) * ((height + 15u) & ~uint64_t {15u}) * 3u / 2u;
+	const uint64_t padded = ((frame + 255u) & ~uint64_t {255u}) + 0x4000u;
+	const uint64_t dpb    = config->max_dpb_frame_count > 0 ? config->max_dpb_frame_count : 8;
+	resource->cpu_memory_size        = 16ull << 20u;
+	resource->cpu_memory             = nullptr;
+	resource->cpu_gpu_memory_size    = padded * (dpb + 2u) + (8ull << 20u);
+	resource->cpu_gpu_memory         = nullptr;
+	resource->max_frame_buffer_size  = padded;
+	resource->frame_buffer_alignment = 0x100;
+	return OK;
+}
+
+static int32_t KYTY_SYSV_ABI CreateDecoder(const VideodecConfigInfo*   config,
+                                           const VideodecResourceInfo* resource, VideodecCtrl* ctrl) {
+	PRINT_NAME();
+	if (config == nullptr || resource == nullptr || ctrl == nullptr) {
+		return VIDEODEC_ERROR_ARGUMENT_POINTER;
+	}
+	if (config->this_size != sizeof(VideodecConfigInfo) ||
+	    resource->this_size != sizeof(VideodecResourceInfo)) {
+		return VIDEODEC_ERROR_STRUCT_SIZE;
+	}
+	Decoder::Config decoder_config {};
+	decoder_config.codec_type       = VideoDec2::VIDEODEC2_CODEC_TYPE_AVC;
+	decoder_config.max_width        = config->max_frame_width;
+	decoder_config.max_height       = config->max_frame_height;
+	decoder_config.pitch_alignment  = 64;
+	decoder_config.height_alignment = 16;
+	auto* instance                  = Decoder::Create(decoder_config);
+	if (instance == nullptr) {
+		return VIDEODEC_ERROR_API_FAIL;
+	}
+	{
+		std::scoped_lock lock(g_decoders_mutex);
+		g_decoders.insert(instance);
+	}
+	ctrl->this_size = sizeof(VideodecCtrl);
+	ctrl->handle    = instance;
+	ctrl->version   = 1;
+	return OK;
+}
+
+static int32_t KYTY_SYSV_ABI DeleteDecoder(VideodecCtrl* ctrl) {
+	PRINT_NAME();
+	auto* instance = GetDecoder(ctrl);
+	if (instance == nullptr) {
+		return VIDEODEC_ERROR_HANDLE;
+	}
+	{
+		std::scoped_lock lock(g_decoders_mutex);
+		g_decoders.erase(instance);
+	}
+	Decoder::Destroy(instance);
+	return OK;
+}
+
+static int32_t KYTY_SYSV_ABI Decode(VideodecCtrl* ctrl, const VideodecInputData* input,
+                                    VideodecFrameBuffer* frame_buffer, VideodecPictureInfo* picture) {
+	PRINT_NAME();
+	auto* instance = GetDecoder(ctrl);
+	if (instance == nullptr) {
+		return VIDEODEC_ERROR_HANDLE;
+	}
+	if (input == nullptr || frame_buffer == nullptr || picture == nullptr) {
+		return VIDEODEC_ERROR_ARGUMENT_POINTER;
+	}
+	if (input->this_size != sizeof(VideodecInputData) ||
+	    frame_buffer->this_size != sizeof(VideodecFrameBuffer)) {
+		return VIDEODEC_ERROR_STRUCT_SIZE;
+	}
+	if (input->au_data == nullptr) {
+		return VIDEODEC_ERROR_AU_POINTER;
+	}
+	if (input->au_size == 0) {
+		return VIDEODEC_ERROR_AU_SIZE;
+	}
+	if (frame_buffer->frame_buffer == nullptr) {
+		return VIDEODEC_ERROR_FRAME_BUFFER_POINTER;
+	}
+	Decoder::Output decoded {};
+	const auto      result = Decoder::Decode(
+        instance, {input->au_data, input->au_size, input->pts_data, input->dts_data, input->attached_data},
+        {frame_buffer->frame_buffer, frame_buffer->frame_buffer_size}, &decoded);
+	FillPicture(decoded, picture);
+	return MapResult(result);
+}
+
+static int32_t KYTY_SYSV_ABI Flush(VideodecCtrl* ctrl, VideodecFrameBuffer* frame_buffer,
+                                   VideodecPictureInfo* picture) {
+	PRINT_NAME();
+	auto* instance = GetDecoder(ctrl);
+	if (instance == nullptr) {
+		return VIDEODEC_ERROR_HANDLE;
+	}
+	if (frame_buffer == nullptr || picture == nullptr) {
+		return VIDEODEC_ERROR_ARGUMENT_POINTER;
+	}
+	if (frame_buffer->this_size != sizeof(VideodecFrameBuffer)) {
+		return VIDEODEC_ERROR_STRUCT_SIZE;
+	}
+	if (frame_buffer->frame_buffer == nullptr) {
+		return VIDEODEC_ERROR_FRAME_BUFFER_POINTER;
+	}
+	Decoder::Output decoded {};
+	const auto      result = Decoder::Flush(
+        instance, {frame_buffer->frame_buffer, frame_buffer->frame_buffer_size}, &decoded);
+	FillPicture(decoded, picture);
+	return MapResult(result);
+}
+
+static int32_t KYTY_SYSV_ABI Reset(VideodecCtrl* ctrl) {
+	PRINT_NAME();
+	auto* instance = GetDecoder(ctrl);
+	if (instance == nullptr) {
+		return VIDEODEC_ERROR_HANDLE;
+	}
+	Decoder::Reset(instance);
+	return OK;
+}
+
+// Memory for the decoder's own use: the host decoder needs none.
+static int32_t KYTY_SYSV_ABI MapMemory() {
+	PRINT_NAME();
+	return OK;
+}
+
+LIB_DEFINE(InitVideoDec_1) {
+	LIB_FUNC("leCAscipfFY", QueryResourceInfo);
+	LIB_FUNC("qkgRiwHyheU", CreateDecoder);
+	LIB_FUNC("U0kpGF1cl90", DeleteDecoder);
+	LIB_FUNC("q0W5GJMovMs", Decode);
+	LIB_FUNC("jeigLlKdp5I", Flush);
+	LIB_FUNC("f8AgDv-1X8A", Reset);
+	LIB_FUNC("kg+lH0V61hM", MapMemory);
+}
+
+} // namespace VideoDecPs4
 
 } // namespace Libs

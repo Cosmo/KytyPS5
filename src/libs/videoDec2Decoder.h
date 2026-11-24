@@ -23,6 +23,11 @@ struct Config {
 	int32_t  max_width          = -1;
 	int32_t  max_height         = -1;
 	uint32_t max_pending_frames = 2;
+	// The NV12 frame layout (powers of two): rows aligned to this many bytes, the luma plane padded
+	// to a multiple of this many rows (the padding repeats the last row) and the chroma plane after
+	// it. The PS4 decoder (backward compatibility) pads to 64 bytes and 16 rows.
+	uint32_t pitch_alignment  = 256;
+	uint32_t height_alignment = 1;
 };
 
 struct Input {
