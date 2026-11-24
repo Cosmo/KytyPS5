@@ -393,7 +393,10 @@ Program DecodeFrontProgram(std::span<const uint32_t> front) {
 		result.has_swap_pc |= inst.opcode == Opcode::S_SWAPPC_B64;
 		front_words += inst.word_count;
 		if (inst.opcode == Opcode::S_SETPC_B64) {
-			EXIT_NOT_IMPLEMENTED(inst.src0.kind != OperandKind::Sgpr || inst.src0.reg != 6u);
+			// The merged-stage ABI returns through s[6:7]; a PS4 fetch shader through the pair
+			// its call named.
+			EXIT_NOT_IMPLEMENTED(inst.src0.kind != OperandKind::Sgpr ||
+			                     (inst.src0.reg != 6u && GetGuestIsa() != GuestIsa::Gfx7));
 			break;
 		}
 		EXIT_NOT_IMPLEMENTED(inst.opcode == Opcode::S_ENDPGM);

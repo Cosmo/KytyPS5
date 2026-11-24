@@ -2,11 +2,15 @@
 
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/shader.h"
 
 namespace Libs::Graphics {
 
 bool DrawHasValidVertexShader(const HW::Shader& shaders) {
+	if (ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7) {
+		return shaders.GetVs().vs_regs.data_addr != 0; // PS4 hardware VS
+	}
 	return shaders.GetVs().es_regs.data_addr != 0;
 }
 

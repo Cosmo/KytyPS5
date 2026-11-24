@@ -256,7 +256,8 @@ struct ShaderProgramCache::Impl {
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			options.stage            = input_info.logical_stage;
 			options.input_info.vertex = &input_info;
-			options.user_data_base   = 8;
+			// A PS4 hardware VS has its user SGPRs from s0.
+			options.user_data_base   = input_info.gfx7_vs ? 0 : 8;
 			if (options.stage == ShaderType::Mesh ||
 			    options.stage == ShaderType::TessellationControl) {
 				options.user_data_base = 0;

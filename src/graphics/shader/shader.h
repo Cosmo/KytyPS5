@@ -171,6 +171,9 @@ struct ShaderVertexInputInfo {
 	bool                    indirect_draw       = false;
 	// Attribute-table metadata enables dynamic fetch detection; loads are matched later.
 	bool                    has_dynamic_vertex_fetch = false;
+	// A PS4 (gfx7) hardware vertex shader: user SGPRs from s0, the vertex index in v0 and the
+	// instance index in v1..v3, instead of the NGG layout.
+	bool                    gfx7_vs                  = false;
 };
 
 struct ShaderComputeInputInfo: ShaderWorkgroupInputInfo {
