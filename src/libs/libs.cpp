@@ -6,6 +6,10 @@
 
 namespace Libs {
 
+namespace LibDiscMap {
+LIB_DEFINE(InitDiscMap_1);
+} // namespace LibDiscMap
+
 namespace LibContentDelete {
 LIB_DEFINE(InitContentDelete_1);
 } // namespace LibContentDelete
@@ -120,6 +124,7 @@ void InitAll(Loader::SymbolDatabase* s) {
 	InitAppContent_1(s);
 	Coredump::InitCoredump_1(s);
 	LibContentDelete::InitContentDelete_1(s);
+	LibDiscMap::InitDiscMap_1(s);
 	LibContentExport::InitContentExport_1(s);
 	LibContentSearch::InitContentSearch_1(s);
 	LibC::InitLibC_1(s);
@@ -253,6 +258,51 @@ LIB_DEFINE(InitContentSearch_1) {
 }
 
 } // namespace LibContentSearch
+
+// PS4 disc maps (backward compatibility): games are installed, so no file range is known to be
+// on a disc.
+namespace LibDiscMap {
+
+LIB_NAME("DiscMap", "DiscMap");
+
+constexpr int DISC_MAP_ERROR_NO_BITMAP_INFO = static_cast<int>(0x81100004);
+
+static int KYTY_SYSV_ABI DiscMapGetPackageSize(int64_t /*flags*/, int* /*a*/, int* /*b*/) {
+	PRINT_NAME();
+	return DISC_MAP_ERROR_NO_BITMAP_INFO;
+}
+
+static int KYTY_SYSV_ABI DiscMapIsRequestOnHDD(const char* /*path*/, int64_t /*offset*/,
+                                               int64_t /*size*/, int* /*result*/) {
+	PRINT_NAME();
+	return DISC_MAP_ERROR_NO_BITMAP_INFO;
+}
+
+static int KYTY_SYSV_ABI DiscMapGetRangeFlags(const char* /*path*/, int64_t /*offset*/,
+                                              int64_t /*size*/, int* flags, int* a, int* b) {
+	PRINT_NAME();
+	*flags = 0;
+	*a     = 0;
+	*b     = 0;
+	return 0;
+}
+
+// The same query as DiscMapGetRangeFlags in later SDKs; no disc map either.
+static int KYTY_SYSV_ABI DiscMapGetRangeFlagsNoMap(const char* /*path*/, int64_t /*offset*/,
+                                                   int64_t /*size*/, int* /*flags*/, int* /*a*/,
+                                                   int* /*b*/) {
+	PRINT_NAME();
+	return DISC_MAP_ERROR_NO_BITMAP_INFO;
+}
+
+LIB_DEFINE(InitDiscMap_1) {
+	LIB_FUNC("fl1eoDnwQ4s", DiscMapGetPackageSize);
+	LIB_FUNC("lbQKqsERhtE", DiscMapIsRequestOnHDD);
+	LIB_FUNC("fJgP+wqifno", DiscMapGetRangeFlags);
+	LIB_FUNC("ioKMruft1ek", DiscMapGetRangeFlagsNoMap);
+}
+
+} // namespace LibDiscMap
 
 namespace LibContentDelete {
 
