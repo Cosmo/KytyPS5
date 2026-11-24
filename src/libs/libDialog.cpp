@@ -87,6 +87,12 @@ LIB_DEFINE(InitDialog_1_SaveDataDialog) {
 	LIB_FUNC("YuH2FA7azqQ", SaveDataDialog::SaveDataDialogTerminate);
 	LIB_FUNC("V-uEeFKARJU", SaveDataDialog::SaveDataDialogProgressBarInc);
 	LIB_FUNC("hay1CfTmLyA", SaveDataDialog::SaveDataDialogProgressBarSetValue);
+	// PS4 games (backward compatibility) import the rest from this library too.
+	LIB_FUNC("fH46Lag88XY", SaveDataDialog::SaveDataDialogClose);
+	LIB_FUNC("yEiJ-qqr6Cg", SaveDataDialog::SaveDataDialogGetResult);
+	LIB_FUNC("s9e3+YpRnzw", SaveDataDialog::SaveDataDialogInitialize);
+	LIB_FUNC("en7gNVnh878", SaveDataDialog::SaveDataDialogIsReadyToDisplay);
+	LIB_FUNC("4tPhsP6FpDI", SaveDataDialog::SaveDataDialogOpen);
 }
 
 } // namespace LibSaveDataDialog
@@ -133,6 +139,28 @@ LIB_DEFINE(InitDialog_1_MsgDialog) {
 
 } // namespace LibMsgDialog
 
+// The PS4 library name (backward compatibility) of the same functions.
+namespace LibMsgDialogPs4 {
+
+LIB_NAME("MsgDialog", "MsgDialog");
+
+namespace MsgDialog = Dialog::MsgDialog;
+
+LIB_DEFINE(InitDialog_1_MsgDialogPs4) {
+	LIB_FUNC("HTrcDKlFKuM", MsgDialog::MsgDialogClose);
+	LIB_FUNC("Lr8ovHH9l6A", MsgDialog::MsgDialogGetResult);
+	LIB_FUNC("CWVW78Qc3fI", MsgDialog::MsgDialogGetStatus);
+	LIB_FUNC("lDqxaY1UbEo", MsgDialog::MsgDialogInitialize);
+	LIB_FUNC("b06Hh0DPEaE", MsgDialog::MsgDialogOpen);
+	LIB_FUNC("Gc5k1qcK4fs", MsgDialog::MsgDialogProgressBarInc);
+	LIB_FUNC("6H-71OdrpXM", MsgDialog::MsgDialogProgressBarSetMsg);
+	LIB_FUNC("wTpfglkmv34", MsgDialog::MsgDialogProgressBarSetValue);
+	LIB_FUNC("ePw-kqZmelo", MsgDialog::MsgDialogTerminate);
+	LIB_FUNC("6fIC3XKt2k0", MsgDialog::MsgDialogUpdateStatus);
+}
+
+} // namespace LibMsgDialogPs4
+
 namespace LibErrorDialog {
 
 LIB_NAME("ErrorDialog", "ErrorDialog");
@@ -176,6 +204,7 @@ LIB_DEFINE(InitDialog_1) {
 	LibSaveDataDialog::InitDialog_1_SaveDataDialog(s);
 	LibSaveDataDialogNative::InitDialog_1_SaveDataDialogNative(s);
 	LibMsgDialog::InitDialog_1_MsgDialog(s);
+	LibMsgDialogPs4::InitDialog_1_MsgDialogPs4(s);
 	LibErrorDialog::InitDialog_1_ErrorDialog(s);
 	LibPlayerInvitationDialog::InitDialog_1_PlayerInvitationDialog(s);
 }

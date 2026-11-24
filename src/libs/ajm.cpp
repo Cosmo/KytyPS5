@@ -1095,6 +1095,50 @@ int KYTY_SYSV_ABI AjmBatchJobRunSplit(AjmBatchInfo* info, uint32_t instance, uin
 	return AjmAppendJob(info, 16 * (input_buffers_num + output_buffers_num) + 32, "run-split");
 }
 
+// The PS4 batch API (backward compatibility): jobs are written straight into the batch buffer the
+// game passes, without an AjmBatchInfo. As for the PS5 API, a job runs as soon as it is added.
+void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(uint8_t* buffer, uint32_t instance, uint64_t flags,
+                                                const AjmBuffer* input_buffers,
+                                                size_t           input_buffers_num,
+                                                const AjmBuffer* output_buffers,
+                                                size_t output_buffers_num, void* sideband_output,
+                                                size_t sideband_output_size, const void* return_address) {
+	PRINT_NAME();
+	EXIT_NOT_IMPLEMENTED(buffer == nullptr);
+
+	auto decode_result =
+	    AjmDecodeSplitInstance(instance, input_buffers, input_buffers_num, output_buffers,
+	                           output_buffers_num, (flags & AJM_FLAG_RUN_MULTIPLE_FRAMES) != 0);
+	AjmDecoder*      decoder = nullptr;
+	AjmGaplessState* gapless = nullptr;
+	(void)AjmGetInstanceFormat(instance, nullptr, &decoder, &gapless);
+	AjmWriteSideband(flags, sideband_output, sideband_output_size, decoder, gapless, decode_result);
+
+	// The job's chunks: the job header (8 bytes), a return address buffer when the game names
+	// one (the caller's return address, for its own error reports), the input buffers, the run
+	// flags (8), the output buffers and the sideband buffer, 16 bytes per buffer. The next job goes
+	// after them.
+	const size_t buffers = input_buffers_num + output_buffers_num + 1u + (return_address != nullptr ? 1u : 0u);
+	return buffer + 8u + 8u + 16u * buffers;
+}
+
+int KYTY_SYSV_ABI AjmBatchStartBuffer(uint32_t context, const uint8_t* batch, uint32_t batch_size,
+                                      int priority, AjmBatchError* error, uint32_t* batch_id) {
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(batch_id == nullptr);
+	(void)context;
+	(void)batch;
+	(void)batch_size;
+	(void)priority;
+
+	if (error != nullptr) {
+		std::memset(error, 0, sizeof(AjmBatchError));
+	}
+	*batch_id = g_ajm_next_batch.fetch_add(1, std::memory_order_relaxed);
+	return OK;
+}
+
 const char* KYTY_SYSV_ABI AjmStrError(int error) {
 	PRINT_NAME();
 	LOGF("\t error = %d\n", error);

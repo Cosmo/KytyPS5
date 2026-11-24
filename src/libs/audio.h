@@ -197,6 +197,15 @@ int KYTY_SYSV_ABI AjmBatchJobRun(AjmBatchInfo* info, uint32_t instance, uint64_t
                                  const void* data_input, size_t data_input_size, void* data_output,
                                  size_t data_output_size, void* sideband_output,
                                  size_t sideband_output_size);
+// PS4 batch API (backward compatibility).
+void* KYTY_SYSV_ABI AjmBatchJobRunSplitBufferRa(uint8_t* buffer, uint32_t instance, uint64_t flags,
+                                                const AjmBuffer* input_buffers,
+                                                size_t           input_buffers_num,
+                                                const AjmBuffer* output_buffers,
+                                                size_t output_buffers_num, void* sideband_output,
+                                                size_t sideband_output_size, const void* return_address);
+int KYTY_SYSV_ABI   AjmBatchStartBuffer(uint32_t context, const uint8_t* batch, uint32_t batch_size,
+                                        int priority, AjmBatchError* error, uint32_t* batch_id);
 int KYTY_SYSV_ABI AjmBatchJobRunSplit(AjmBatchInfo* info, uint32_t instance, uint64_t flags,
                                       const AjmBuffer* input_buffers, size_t input_buffers_num,
                                       const AjmBuffer* output_buffers, size_t output_buffers_num,
