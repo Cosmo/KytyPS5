@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 
 #include <algorithm>
 #include <atomic>
@@ -52,7 +53,12 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	r             = {};
 	r.target_slot = rt_slot;
 
-	if (rt.base.addr == 0 || mask == 0) {
+	// A PS4 game leaves an unused slot's address behind with an INVALID format, which turns the
+	// slot off.
+	const bool gfx7_disabled =
+	    ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7 &&
+	    rt.info.format == Prospero::ChannelLayout::kInvalid;
+	if (rt.base.addr == 0 || mask == 0 || gfx7_disabled) {
 		if (graphics_debug_dump_enabled()) {
 			static std::atomic_uint log_count = 0;
 			const auto              log_id    = log_count.fetch_add(1, std::memory_order_relaxed);

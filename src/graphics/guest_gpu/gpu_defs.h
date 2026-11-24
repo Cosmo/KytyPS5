@@ -153,6 +153,7 @@ inline constexpr ColorComponentMapping ColorMappingArgb {0x93u}; // 3, 0, 1, 2
 enum class DepthFormat : uint32_t {
 	kInvalid = 0,
 	kZ16     = 1,
+	kZ24     = 2, // PS4 (gfx7) only: 24-bit unorm depth in 32-bit elements
 	kZ32F    = 3,
 };
 

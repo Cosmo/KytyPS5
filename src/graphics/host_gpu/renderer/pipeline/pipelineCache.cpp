@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
@@ -589,10 +590,16 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	const bool  object_primitive_id = context.HasObjectPrimitiveIdOutput();
 	const auto  write_mask          = context.GetRenderTargetMask() & sh.m_cbShaderMask;
 	uint32_t    color_output_mask   = object_primitive_id ? 1u << 7u : 0;
+	// A PS4 game turns a slot off with an INVALID format and leaves its other registers behind.
+	const bool gfx7 =
+	    ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7;
 	for (uint32_t index = 0; index < RENDER_COLOR_ATTACHMENTS_MAX; index++) {
 		const auto slot = ShaderPixelExportTarget(sh.m_cbShaderMask, index);
 		if (slot >= RENDER_COLOR_ATTACHMENTS_MAX) {
 			break;
+		}
+		if (gfx7 && context.GetRenderTarget(slot).info.format == Prospero::ChannelLayout::kInvalid) {
+			continue;
 		}
 		if (sh.target_output_mode[index] != 0 && render_target_mask_slot(write_mask, slot) != 0) {
 			color_output_mask |= 1u << slot;

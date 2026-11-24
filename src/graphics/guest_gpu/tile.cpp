@@ -846,7 +846,8 @@ bool TileGetDepthSize(uint32_t width, uint32_t height, Prospero::DepthFormat z_f
                       TileSizeAlign& depth_size, uint32_t num_fragments_log2) {
 	// Prospero derives uncompressed depth/stencil as independent 64 KiB block surfaces.
 	if (width > 0 && width <= 16384 && height > 0 && height <= 16384 &&
-	    (z_format == Prospero::DepthFormat::kZ16 || z_format == Prospero::DepthFormat::kZ32F) &&
+	    (z_format == Prospero::DepthFormat::kZ16 || z_format == Prospero::DepthFormat::kZ32F ||
+	     z_format == Prospero::DepthFormat::kZ24) &&
 	    (stencil_format == Prospero::StencilFormat::kInvalid ||
 	     stencil_format == Prospero::StencilFormat::k8UInt) &&
 	    num_fragments_log2 <= 3) {

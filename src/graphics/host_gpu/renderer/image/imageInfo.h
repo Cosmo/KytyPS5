@@ -162,7 +162,7 @@ struct DepthFormatPolicy {
 	std::array<vk::Format, 3> stencil_attachment_formats;
 };
 
-inline constexpr std::array<DepthFormatPolicy, 2> DEPTH_FORMAT_POLICIES {{
+inline constexpr std::array<DepthFormatPolicy, 3> DEPTH_FORMAT_POLICIES {{
     {Prospero::DepthFormat::kZ16,
      Prospero::BufferFormat::k16UNorm,
      2,
@@ -173,6 +173,12 @@ inline constexpr std::array<DepthFormatPolicy, 2> DEPTH_FORMAT_POLICIES {{
      4,
      vk::Format::eD32Sfloat,
      {vk::Format::eD32SfloatS8Uint, vk::Format::eUndefined, vk::Format::eUndefined}},
+    // PS4 Z_24: a 32-bit element; D32 float holds every 24-bit unorm depth exactly.
+    {Prospero::DepthFormat::kZ24,
+     Prospero::BufferFormat::k32UInt,
+     4,
+     vk::Format::eD32Sfloat,
+     {vk::Format::eD32SfloatS8Uint, vk::Format::eD24UnormS8Uint, vk::Format::eUndefined}},
 }};
 
 [[nodiscard]] inline constexpr const DepthFormatPolicy*

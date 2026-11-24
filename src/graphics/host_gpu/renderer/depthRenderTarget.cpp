@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 
 #include <algorithm>
 #include <array>
@@ -146,21 +147,27 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 		           z.depth_view.slice_max);
 	}
 	const auto view = ResolveTargetViewInfo(z.depth_view.slice_start, z.depth_view.slice_max);
+	// PS5 depth buffers are 64 KiB aligned; PS4 ones only to the 256-byte register granularity, and
+	// their HTile too.
+	const bool     gfx7_target =
+	    ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7;
+	const uint64_t base_align_mask = gfx7_target ? 0xffu : 0xffffu;
 	// EXPCLEAR permits an HTile acceleration state; the host attachment is already expanded.
 	if (z.z_info.max_mip_level != 0 || unsupported_shading_rate_encoding || depth_address == 0 ||
-	    (depth_address & 0xffffu) != 0) {
+	    (depth_address & base_align_mask) != 0) {
 		DepthFatal("unsupported depth register state");
 	}
 	if (has_stencil) {
 		if (z.stencil_info.format != Prospero::StencilFormat::k8UInt || stencil_address == 0 ||
-		    (stencil_address & 0xffffu) != 0) {
+		    (stencil_address & base_align_mask) != 0) {
 			DepthFatal("unsupported stencil attachment state");
 		}
 	} else if (z.stencil_read_base_addr != 0 || z.stencil_write_base_addr != 0) {
 		DepthFatal("stencil state without an active stencil attachment");
 	}
 	if (has_htile) {
-		if (z.htile_data_base_addr == 0 || (z.htile_data_base_addr & 0x7fffu) != 0) {
+		if (z.htile_data_base_addr == 0 ||
+		    (z.htile_data_base_addr & (gfx7_target ? 0xffu : 0x7fffu)) != 0) {
 			DepthFatal("invalid HTile metadata address");
 		}
 	}
@@ -282,7 +289,13 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	    // presence alone must not manufacture a depth attachment.
 	    !z.z_info.htile_acceleration && z.shading_rate_encoding == 0 && z.size.x_max == 0 &&
 	    z.size.y_max == 0;
-	if (attachment_unbound) {
+	// A PS4 game leaves the sizes and addresses of an earlier target behind: both formats INVALID
+	// disable the DB surfaces whatever else stays programmed.
+	const bool formats_invalid =
+	    ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7 &&
+	    z.z_info.format == Prospero::DepthFormat::kInvalid &&
+	    z.stencil_info.format == Prospero::StencilFormat::kInvalid;
+	if (attachment_unbound || formats_invalid) {
 		static std::atomic_bool logged = false;
 		if (!logged.exchange(true, std::memory_order_relaxed)) {
 			LOGF("DepthTarget: ignoring enabled depth/stencil state without a bound attachment\n");

@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -590,7 +591,12 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		return {.layout = vk::ImageLayout::eGeneral};
 #endif
 	}
-	const auto alignment = desc.info.DataAlignment();
+	// PS4 tiled textures are aligned to their gfx7 tiles, not to the gfx10 swizzle block that stands
+	// in for them here (small targets sit on 32 KiB boundaries).
+	const auto alignment =
+	    ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7
+	        ? 256u
+	        : desc.info.DataAlignment();
 	EXIT_NOT_IMPLEMENTED(desc.info.data.size == 0 || alignment == 0 ||
 	                     (address & (static_cast<uint64_t>(alignment) - 1u)) != 0);
 	if (storage) {

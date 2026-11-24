@@ -25,11 +25,17 @@ uint32_t DrawColorOutputMask(const HW::Context& registers) {
 	const auto  write_mask  = registers.GetRenderTargetMask() & sh_regs.m_cbShaderMask;
 	// The object and primitive IDs go to RT7.
 	uint32_t    output_mask = registers.HasObjectPrimitiveIdOutput() ? 1u << 7u : 0;
+	// A PS4 game turns a slot off with an INVALID format and leaves its other registers behind.
+	const bool gfx7 =
+	    ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7;
 	for (uint32_t index = 0; index < GuestColorTargetCount; index++) {
 		// Compact color exports: export `index` goes to the slot CB_SHADER_MASK gives it.
 		const auto slot = ShaderPixelExportTarget(sh_regs.m_cbShaderMask, index);
 		if (slot >= GuestColorTargetCount) {
 			break;
+		}
+		if (gfx7 && registers.GetRenderTarget(slot).info.format == Prospero::ChannelLayout::kInvalid) {
+			continue;
 		}
 		if (sh_regs.target_output_mode[index] != 0 && ((write_mask >> (slot * 4u)) & 0x0fu) != 0) {
 			output_mask |= 1u << slot;
