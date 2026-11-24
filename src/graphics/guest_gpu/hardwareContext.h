@@ -43,6 +43,9 @@ struct ColorAttrib2 {
 	uint32_t height         = 0;
 	uint32_t width          = 0;
 	uint32_t num_mip_levels = 0;
+	// gfx7 (PS4): the pitch and height the tiling padded the surface to, in pixels.
+	uint32_t gfx7_pitch     = 0;
+	uint32_t gfx7_height    = 0;
 };
 
 struct ColorAttrib3 {
@@ -67,6 +70,9 @@ struct ColorDccControl {
 
 struct ColorCmask {
 	uint64_t addr = 0;
+	// PS4 (gfx7) CB_COLOR_CMASK_SLICE.TILE_MAX + 1: 128x128-pixel CMASK blocks (128 bytes each) per
+	// slice, 0 when not set.
+	uint32_t gfx7_slice_blocks = 0;
 };
 
 struct ColorFmask {
@@ -175,6 +181,9 @@ struct DepthDepthSizeXY {
 	uint16_t x_max = 0;
 	uint16_t y_max = 0;
 	bool     valid = false;
+	// gfx7 (PS4): the padded size, in pixels.
+	uint16_t gfx7_pitch  = 0;
+	uint16_t gfx7_height = 0;
 };
 
 struct DepthRenderTarget {
@@ -189,6 +198,8 @@ struct DepthRenderTarget {
 	uint64_t stencil_write_base_addr = 0;
 	uint64_t htile_data_base_addr    = 0;
 	uint8_t  shading_rate_encoding   = 0;
+	// gfx7 DB_HTILE_SURFACE (the register gfx10 reused for DB_SHADING_RATE_ENCODING); bit 0 LINEAR.
+	uint32_t gfx7_htile_surface      = 0;
 };
 
 struct RenderControl {
@@ -469,6 +480,9 @@ struct CsStageRegisters {
 
 struct EsStageRegisters {
 	uint64_t data_addr = 0;
+	// SPI_SHADER_PGM_RSRC1/2_ES, written by PS4 (gfx7) games only.
+	uint32_t rsrc1 = 0;
+	uint32_t rsrc2 = 0;
 };
 
 struct LsStageRegisters {
@@ -565,6 +579,8 @@ struct VertexShaderInfo {
 	UserSgprInfo     gs_user_sgpr;
 	VsStageRegisters vs_regs;
 	UserSgprInfo     vs_user_sgpr;
+	// The gfx7 ES stage's user SGPRs (PS4 legacy geometry pipelines).
+	UserSgprInfo     es_user_sgpr;
 };
 
 struct PixelShaderInfo {
@@ -922,6 +938,9 @@ public:
 	void Reset() { *this = Shader(); }
 
 	void SetEsShaderBase(uint64_t addr) { m_vs.es_regs.data_addr = addr; }
+	void SetEsShaderResource1(uint32_t value) { m_vs.es_regs.rsrc1 = value; }
+	void SetEsShaderResource2(uint32_t value) { m_vs.es_regs.rsrc2 = value; }
+	void SetEsUserSgpr(uint32_t id, uint32_t value) { m_vs.es_user_sgpr.value[id] = value; }
 	void SetLsShaderBase(uint64_t addr) { m_vs.ls_regs.data_addr = addr; }
 	void SetHsShaderBase(uint64_t addr) { m_vs.hs_regs.data_addr = addr; }
 	void SetHsUserDataAddress(uint32_t word, uint32_t value) {

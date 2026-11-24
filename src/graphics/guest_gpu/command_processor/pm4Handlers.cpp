@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/frameDump.h"
 #include "graphics/host_gpu/gpuBackend.h"
 #include "graphics/presentation/videoOut.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "libs/agc.h"
 
 #include <algorithm>
@@ -14,6 +15,8 @@
 #include <atomic>
 #include <bit>
 #include <cstring>
+#include <mutex>
+#include <unordered_set>
 
 #define KYTY_HW_SH_PARSER_ARGS                                                                     \
 	[[maybe_unused]] CommandProcessor &cp, uint32_t cmd_id, [[maybe_unused]] uint32_t cmd_offset,  \
@@ -30,6 +33,35 @@
 #define KYTY_CP_OP_PARSER(f) uint32_t f(KYTY_CP_OP_PARSER_ARGS)
 
 namespace Libs::Graphics {
+
+// The running game is a PS4 one (backward compatibility): some registers have gfx7 layouts.
+[[nodiscard]] static bool IsGfx7() {
+	return ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7;
+}
+
+// PS4 games write gfx7 registers the renderer has no use for (CU masks, performance counters...):
+// logged once each and ignored. PS5 games stop at an unknown register.
+static void IgnoreGfx7Register(const char* kind, uint32_t offset, uint32_t value) {
+	static std::mutex                   mutex;
+	static std::unordered_set<uint64_t> logged;
+	const auto key = (static_cast<uint64_t>(static_cast<uint8_t>(kind[0])) << 32u) | offset;
+	std::scoped_lock lock(mutex);
+	if (logged.insert(key).second) {
+		LOGF("PS4: ignoring %s register 0x%03" PRIx32 " = 0x%08" PRIx32 "\n", kind, offset, value);
+	}
+}
+
+// The handler of a register: a PS4 game's own where gfx7 differs, else the shared one.
+template <typename Table>
+static hw_reg_func_t FindRegister(const Table& table, const Table* gfx7_table, uint32_t offset) {
+	if (offset >= std::size(table)) {
+		return nullptr;
+	}
+	if (gfx7_table != nullptr && (*gfx7_table)[offset] != nullptr && IsGfx7()) {
+		return (*gfx7_table)[offset];
+	}
+	return table[offset];
+}
 
 namespace {
 
@@ -341,6 +373,10 @@ static void HwShSetCsRegister(CommandProcessor& cp, uint32_t cmd_offset, uint32_
 		case Pm4::COMPUTE_TMPRING_SIZE:
 		case Pm4::COMPUTE_PACE_ID: break;
 		default:
+			if (IsGfx7()) {
+				IgnoreGfx7Register("compute", cmd_offset, value);
+				return;
+			}
 			EXIT("unsupported compute SH register 0x%08" PRIx32 " = 0x%08" PRIx32 "\n", cmd_offset,
 			     value);
 	}
@@ -465,9 +501,11 @@ KYTY_CP_OP_PARSER(CpOpDispatchDirect) {
 KYTY_CP_OP_PARSER(CpOpDispatchIndirect) {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0011600 && cmd_id != 0xc0021600);
+	// Bit 1 is the compute shader type, set by the PS4 driver's DISPATCH_INDIRECT builders.
+	const auto id = cmd_id & ~2u;
+	EXIT_NOT_IMPLEMENTED(id != 0xc0011600 && id != 0xc0021600);
 
-	if (cmd_id == 0xc0021600) {
+	if (id == 0xc0021600) {
 		cp.DispatchIndirect(buffer[0] | (static_cast<uint64_t>(buffer[1]) << 32u), buffer[2]);
 		return 3;
 	}
@@ -1031,7 +1069,8 @@ KYTY_CP_OP_PARSER(CpOpIndirectCxRegs) {
 			continue;
 		}
 
-		auto pfunc = g_hw_ctx_indirect_func[cmd_offset & (Pm4::CX_NUM - 1)];
+		auto pfunc = FindRegister(g_hw_ctx_indirect_func, &g_hw_ctx_gfx7_func,
+		                          cmd_offset & (Pm4::CX_NUM - 1));
 
 		if (pfunc == nullptr) {
 			if (raw_cmd_offset == 0x24au && value == 0u) {
@@ -1084,7 +1123,7 @@ KYTY_CP_OP_PARSER(CpOpIndirectShRegs) {
 			     cmd_offset, raw_cmd_offset, value);
 		}
 
-		auto pfunc = g_hw_sh_indirect_func[cmd_offset];
+		auto pfunc = FindRegister(g_hw_sh_indirect_func, &g_hw_sh_gfx7_func, cmd_offset);
 
 		if (pfunc == nullptr) {
 			LOGF("unknown indirect SH register: index=%" PRIu32 "/%" PRIu32 ", regs=0x%016" PRIx64
@@ -1199,6 +1238,16 @@ KYTY_CP_OP_PARSER(CpOpPushMarker) {
 KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 	KYTY_PROFILER_FUNCTION();
 
+	if (IsGfx7() && cmd_id == 0xc0054900) {
+		// gfx7: no interrupt context; TC_WB_ACTION_ENA (bit 15) and TC_ACTION_ENA (bit 17) write the
+		// L2 back.
+		cp.ReleaseMem(
+		    (buffer[1] >> 29u) & 0x7u, (buffer[1] >> 24u) & 0x7u,
+		    reinterpret_cast<void*>((buffer[2] & ~0x3u) | (static_cast<uint64_t>(buffer[3]) << 32u)),
+		    buffer[4] | (static_cast<uint64_t>(buffer[5]) << 32u), 0,
+		    (((buffer[0] >> 12u) & 0x3fu) & 0x28u) != 0);
+		return 6;
+	}
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0064900);
 
 	// The event type, cache actions and destination cache only order GPU work, which the renderer's
@@ -1230,17 +1279,23 @@ KYTY_CP_OP_PARSER(CpOpMemSemaphore) {
 
 // Writes each value of a SET_*_REG packet to the next register, as the hardware does.
 template <typename Table>
-static uint32_t SetRegisters(CommandProcessor& cp, const Table& table, uint32_t cmd_id,
-                             uint32_t cmd_offset, const uint32_t* values, uint32_t position) {
+static uint32_t SetRegisters(CommandProcessor& cp, const Table& table, const Table* gfx7_table,
+                             const char* kind, uint32_t cmd_id, uint32_t cmd_offset,
+                             const uint32_t* values, uint32_t position) {
 	const auto num_values = KYTY_PM4_LEN(cmd_id) - 2u;
 	for (uint32_t i = 0; i < num_values; i++) {
 		const auto offset = cmd_offset + i;
-		if (offset >= std::size(table) || table[offset] == nullptr) {
+		const auto func   = FindRegister(table, gfx7_table, offset);
+		if (func == nullptr) {
+			if (IsGfx7()) {
+				IgnoreGfx7Register(kind, offset, values[i]);
+				continue;
+			}
 			EXIT("unknown register\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32
 			     "\n\tcmd_offset = %08" PRIx32 "\n",
 			     position, cmd_id, offset);
 		}
-		table[offset](cp, offset, values[i]);
+		func(cp, offset, values[i]);
 	}
 	return num_values + 1u;
 }
@@ -1254,7 +1309,8 @@ KYTY_CP_OP_PARSER(CpOpSetContextReg) {
 		return 2;
 	}
 
-	return SetRegisters(cp, g_hw_ctx_indirect_func, cmd_id, cmd_offset, buffer + 1, num_dw - dw);
+	return SetRegisters(cp, g_hw_ctx_indirect_func, &g_hw_ctx_gfx7_func, "context", cmd_id,
+	                    cmd_offset, buffer + 1, num_dw - dw);
 }
 
 KYTY_CP_OP_PARSER(CpOpSetShaderReg) {
@@ -1270,7 +1326,8 @@ KYTY_CP_OP_PARSER(CpOpSetShaderReg) {
 	auto pfunc = g_hw_sh_func[cmd_offset];
 
 	if (pfunc == nullptr) {
-		return SetRegisters(cp, g_hw_sh_indirect_func, cmd_id, cmd_offset, buffer + 1, num_dw - dw);
+		return SetRegisters(cp, g_hw_sh_indirect_func, &g_hw_sh_gfx7_func, "shader", cmd_id,
+		                    cmd_offset, buffer + 1, num_dw - dw);
 	}
 
 	auto s = pfunc(cp, cmd_id, cmd_offset, buffer + 1, dw);
@@ -1335,7 +1392,8 @@ KYTY_CP_OP_PARSER(CpOpSetUconfigReg) {
 		return KYTY_PM4_LEN(cmd_id) - 1u;
 	}
 
-	return SetRegisters(cp, g_hw_uc_indirect_func, cmd_id, cmd_offset, buffer + 1, num_dw - dw);
+	return SetRegisters(cp, g_hw_uc_indirect_func, static_cast<decltype(&g_hw_uc_indirect_func)>(nullptr),
+	                    "user config", cmd_id, cmd_offset, buffer + 1, num_dw - dw);
 }
 
 template <typename T>
@@ -2480,6 +2538,152 @@ constinit const std::array<hw_reg_func_t, Pm4::SH_NUM> g_hw_sh_indirect_func =
     MakeShaderIndirectTable();
 constinit const std::array<hw_reg_func_t, Pm4::UC_NUM> g_hw_uc_indirect_func =
     MakeUconfigIndirectTable();
+
+// PS4 surfaces are padded to their tiling (1920x1080 is stored as 1920x1088), and no register gives
+// the real size. The screen scissor is the area the game draws, so that is the size of the target,
+// when tiling alignment explains the difference; otherwise the draw covers part of a larger
+// surface (an emulated VRAM, or a picture between side bars). Stored as gfx10's, minus one.
+static void RefreshGfx7TargetSizes(CommandProcessor& cp) {
+	const auto& vp    = cp.GetCtx().GetScreenViewport();
+	const auto  clamp = [](uint32_t padded, int visible) {
+		return visible > 0 && static_cast<uint32_t>(visible) < padded ? static_cast<uint32_t>(visible)
+		                                                              : padded;
+	};
+	const auto not_padding = [](int visible, uint32_t padded, uint32_t alignment) {
+		return visible > 0 && static_cast<uint32_t>(visible) < padded &&
+		       ((static_cast<uint32_t>(visible) + alignment - 1u) & ~(alignment - 1u)) < padded;
+	};
+	constexpr uint32_t MaxPitchAlignment  = 256u;
+	constexpr uint32_t MaxHeightAlignment = 64u;
+	for (uint32_t slot = 0; slot < 8u; slot++) {
+		auto attrib2 = cp.GetCtx().GetRenderTarget(slot).attrib2;
+		if (attrib2.gfx7_pitch == 0u || attrib2.gfx7_height == 0u) {
+			continue;
+		}
+		const bool keep = not_padding(vp.screen_scissor_right, attrib2.gfx7_pitch, MaxPitchAlignment);
+		const bool keep_height =
+		    keep && not_padding(vp.screen_scissor_bottom, attrib2.gfx7_height, MaxHeightAlignment);
+		attrib2.width  = (keep ? attrib2.gfx7_pitch : clamp(attrib2.gfx7_pitch, vp.screen_scissor_right)) - 1u;
+		attrib2.height = (keep_height ? attrib2.gfx7_height
+		                              : clamp(attrib2.gfx7_height, vp.screen_scissor_bottom)) - 1u;
+		cp.GetCtx().SetColorAttrib2(slot, attrib2);
+	}
+	auto size = cp.GetCtx().GetDepthRenderTarget().size;
+	if (size.gfx7_pitch != 0u && size.gfx7_height != 0u) {
+		const bool keep = not_padding(vp.screen_scissor_right, size.gfx7_pitch, MaxPitchAlignment);
+		const bool keep_height =
+		    keep && not_padding(vp.screen_scissor_bottom, size.gfx7_height, MaxHeightAlignment);
+		size.x_max = static_cast<uint16_t>(
+		    (keep ? size.gfx7_pitch : clamp(size.gfx7_pitch, vp.screen_scissor_right)) - 1u);
+		size.y_max = static_cast<uint16_t>(
+		    (keep_height ? size.gfx7_height : clamp(size.gfx7_height, vp.screen_scissor_bottom)) - 1u);
+		cp.GetCtx().SetDepthDepthSizeXY(size);
+	}
+}
+
+static constexpr auto MakeContextGfx7Table() {
+	std::array<hw_reg_func_t, Pm4::CX_NUM> table {};
+
+	for (uint32_t slot = 0; slot < 8u; slot++) {
+		// Format, number type, swap, fast clear, blend and round bits match gfx10. The PS4 FMASK and
+		// tile bits describe metadata these targets do not use. FAST_CLEAR (bit 13) stays: a CMASK
+		// filled with 0 means the target holds CB_COLOR_CLEAR_WORD.
+		table[Pm4::CB_COLOR0_INFO + slot * 15u] = [](KYTY_HW_REG_ARGS) {
+			g_hw_ctx_indirect_func[cmd_offset](cp, cmd_offset, value & 0x0007bffcu);
+		};
+		// NUM_SAMPLES 14:12, NUM_FRAGMENTS 16:15, FORCE_DST_ALPHA_1 17.
+		table[Pm4::CB_COLOR0_ATTRIB + slot * 15u] = [](KYTY_HW_REG_ARGS) {
+			HW::ColorAttrib attrib;
+			attrib.num_samples             = (value >> 12u) & 7u;
+			attrib.num_fragments           = (value >> 15u) & 3u;
+			attrib.force_dest_alpha_to_one = ((value >> 17u) & 1u) != 0u;
+			cp.GetCtx().SetColorAttrib((cmd_offset - Pm4::CB_COLOR0_ATTRIB) / 15u, attrib);
+		};
+		// gfx7 has no ATTRIB2/ATTRIB3: the size comes from CB_COLORn_PITCH (TILE_MAX, in 8-pixel
+		// units) and CB_COLORn_SLICE (TILE_MAX, in 64-pixel units).
+		table[Pm4::CB_COLOR0_PITCH_GFX7 + slot * 15u] = [](KYTY_HW_REG_ARGS) {
+			const uint32_t index = (cmd_offset - Pm4::CB_COLOR0_PITCH_GFX7) / 15u;
+			auto attrib2         = cp.GetCtx().GetRenderTarget(index).attrib2;
+			attrib2.gfx7_pitch   = ((value & 0x7ffu) + 1u) * 8u;
+			cp.GetCtx().SetColorAttrib2(index, attrib2);
+			HW::ColorAttrib3 attrib3;
+			attrib3.tile_mode = Prospero::TileMode::kRenderTarget;
+			attrib3.dimension = 1u; // 2D
+			cp.GetCtx().SetColorAttrib3(index, attrib3);
+		};
+		table[Pm4::CB_COLOR0_SLICE_GFX7 + slot * 15u] = [](KYTY_HW_REG_ARGS) {
+			const uint32_t index  = (cmd_offset - Pm4::CB_COLOR0_SLICE_GFX7) / 15u;
+			auto           attrib2 = cp.GetCtx().GetRenderTarget(index).attrib2;
+			const uint64_t pixels  = (uint64_t {value & 0x3fffffu} + 1u) * 64u;
+			attrib2.gfx7_height =
+			    attrib2.gfx7_pitch != 0u ? static_cast<uint32_t>(pixels / attrib2.gfx7_pitch) : 0u;
+			cp.GetCtx().SetColorAttrib2(index, attrib2);
+			RefreshGfx7TargetSizes(cp);
+		};
+		table[Pm4::CB_COLOR0_CMASK_SLICE_GFX7 + slot * 15u] = [](KYTY_HW_REG_ARGS) {
+			const uint32_t index = (cmd_offset - Pm4::CB_COLOR0_CMASK_SLICE_GFX7) / 15u;
+			auto           cmask = cp.GetCtx().GetRenderTarget(index).cmask;
+			cmask.gfx7_slice_blocks = (value & 0x3fffu) + 1u;
+			cp.GetCtx().SetColorCmask(index, cmask);
+		};
+	}
+
+	table[Pm4::PA_SC_SCREEN_SCISSOR_BR] = [](KYTY_HW_REG_ARGS) {
+		g_hw_ctx_indirect_func[cmd_offset](cp, cmd_offset, value);
+		RefreshGfx7TargetSizes(cp);
+	};
+
+	// The format, sample count, ALLOW_EXPCLEAR (27) and TILE_SURFACE_ENABLE (29) mean the same as on
+	// gfx10; the tile bits do not. With TILE_SURFACE_ENABLE the target has an HTile, so the game's
+	// HTile fills are depth fast clears.
+	table[Pm4::DB_Z_INFO] = [](KYTY_HW_REG_ARGS) {
+		g_hw_ctx_indirect_func[cmd_offset](cp, cmd_offset, value & 0x2800000fu);
+	};
+	// One format bit; no HTile for PS4 stencil.
+	table[Pm4::DB_STENCIL_INFO] = [](KYTY_HW_REG_ARGS) {
+		g_hw_ctx_indirect_func[cmd_offset](cp, cmd_offset, (value & 1u) | 0x20000000u);
+	};
+	// DB_HTILE_SURFACE: LINEAR, FULL_CACHE and prefetch hints.
+	table[Pm4::DB_SHADING_RATE_ENCODING] = [](KYTY_HW_REG_ARGS) {
+		auto target               = cp.GetCtx().GetDepthRenderTarget();
+		target.gfx7_htile_surface = value;
+		cp.GetCtx().SetDepthRenderTarget(target);
+	};
+	// DB_DEPTH_SIZE: PITCH_TILE_MAX and HEIGHT_TILE_MAX, in 8-pixel units.
+	table[Pm4::DB_DEPTH_SIZE_GFX7] = [](KYTY_HW_REG_ARGS) {
+		HW::DepthDepthSizeXY r;
+		r.gfx7_pitch  = static_cast<uint16_t>(((value & 0x7ffu) + 1u) * 8u);
+		r.gfx7_height = static_cast<uint16_t>((((value >> 11u) & 0x7ffu) + 1u) * 8u);
+		r.valid       = true;
+		cp.GetCtx().SetDepthDepthSizeXY(r);
+		RefreshGfx7TargetSizes(cp);
+	};
+
+	return table;
+}
+
+static constexpr auto MakeShaderGfx7Table() {
+	std::array<hw_reg_func_t, Pm4::SH_NUM> table {};
+
+	// The export shader stage of PS4 legacy geometry pipelines.
+	table[Pm4::SPI_SHADER_PGM_RSRC1_ES_GFX7] = [](KYTY_HW_REG_ARGS) {
+		cp.GetShCtx().SetEsShaderResource1(value);
+	};
+	table[Pm4::SPI_SHADER_PGM_RSRC2_ES_GFX7] = [](KYTY_HW_REG_ARGS) {
+		cp.GetShCtx().SetEsShaderResource2(value);
+	};
+	for (auto offset = Pm4::SPI_SHADER_USER_DATA_ES_0_GFX7;
+	     offset <= Pm4::SPI_SHADER_USER_DATA_ES_15_GFX7; offset++) {
+		table[offset] = [](KYTY_HW_REG_ARGS) {
+			cp.GetShCtx().SetEsUserSgpr(cmd_offset - Pm4::SPI_SHADER_USER_DATA_ES_0_GFX7, value);
+		};
+	}
+
+	return table;
+}
+
+constinit const std::array<hw_reg_func_t, Pm4::CX_NUM> g_hw_ctx_gfx7_func = MakeContextGfx7Table();
+constinit const std::array<hw_reg_func_t, Pm4::SH_NUM> g_hw_sh_gfx7_func  = MakeShaderGfx7Table();
 
 // ---- PS4 (gfx7) packets, for backward compatibility ----
 

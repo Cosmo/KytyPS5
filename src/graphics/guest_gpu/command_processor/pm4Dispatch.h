@@ -20,6 +20,10 @@ extern const std::array<hw_reg_func_t, Pm4::CX_NUM>       g_hw_ctx_indirect_func
 extern const std::array<hw_sh_parser_func_t, Pm4::SH_NUM> g_hw_sh_func;
 extern const std::array<hw_reg_func_t, Pm4::SH_NUM>       g_hw_sh_indirect_func;
 extern const std::array<hw_reg_func_t, Pm4::UC_NUM>       g_hw_uc_indirect_func;
+// PS4 (gfx7) registers: they take the place of the entries above while a PS4 game runs, for the
+// registers that differ from the PS5's or exist only on gfx7.
+extern const std::array<hw_reg_func_t, Pm4::CX_NUM>       g_hw_ctx_gfx7_func;
+extern const std::array<hw_reg_func_t, Pm4::SH_NUM>       g_hw_sh_gfx7_func;
 extern const std::array<cp_op_parser_func_t, 256>         g_cp_op_func;
 extern const std::array<cp_op_parser_func_t, Pm4::R_NUM>  g_cp_op_custom_func;
 // Draw, state and command-buffer control packets keep the draw window; every other packet may
