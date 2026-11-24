@@ -1313,6 +1313,44 @@ static uint32_t SetRegisters(CommandProcessor& cp, const Table& table, const Tab
 	return num_values + 1u;
 }
 
+static void RefreshGfx7TargetSizes(CommandProcessor& cp);
+
+// PS4 (gfx7): the registers give a colour or depth buffer's padded pitch and slice, not its size.
+// The PS4 graphics driver follows the setup with a NOP holding the real size (width | height << 16),
+// which shadPS4 reads the same way (Liverpool's last_cb_extent and last_db_extent): after the
+// CB_COLORn_BASE registers (11, 13 or 14 of them), after CB_COLORn_CMASK (4) and 12 dwords after
+// the 8 DB registers from DB_Z_INFO. `values` are the packet's register values, `available` the
+// dwords from them on.
+static void ReadGfx7ExtentHint(CommandProcessor& cp, uint32_t cmd_offset, uint32_t values,
+                               const uint32_t* payload, uint32_t available) {
+	constexpr uint32_t NopHeader = 0xc0001000u;
+	const auto hint_at = [&](uint32_t at) {
+		const uint32_t hint = at + 1u < available && payload[at] == NopHeader ? payload[at + 1u] : 0u;
+		return hint;
+	};
+	if (cmd_offset >= Pm4::CB_COLOR0_BASE && cmd_offset < Pm4::CB_COLOR0_BASE + 8u * 15u) {
+		const uint32_t slot     = (cmd_offset - Pm4::CB_COLOR0_BASE) / 15u;
+		const uint32_t register_ = (cmd_offset - Pm4::CB_COLOR0_BASE) % 15u;
+		auto           attrib2  = cp.GetCtx().GetRenderTarget(slot).attrib2;
+		if (register_ == 0u) {
+			attrib2.gfx7_extent = values == 14u || values == 13u || values == 11u ? hint_at(values) : 0u;
+		} else if (cmd_offset - slot * 15u == Pm4::CB_COLOR0_CMASK && values == 4u) {
+			if (const auto hint = hint_at(values); hint != 0u) {
+				attrib2.gfx7_extent = hint;
+			}
+		} else {
+			return;
+		}
+		cp.GetCtx().SetColorAttrib2(slot, attrib2);
+		RefreshGfx7TargetSizes(cp);
+	} else if (cmd_offset == Pm4::DB_Z_INFO) {
+		auto size        = cp.GetCtx().GetDepthRenderTarget().size;
+		size.gfx7_extent = values == 8u ? hint_at(20u) : 0u;
+		cp.GetCtx().SetDepthDepthSizeXY(size);
+		RefreshGfx7TargetSizes(cp);
+	}
+}
+
 KYTY_CP_OP_PARSER(CpOpSetContextReg) {
 	KYTY_PROFILER_FUNCTION();
 
@@ -1322,8 +1360,12 @@ KYTY_CP_OP_PARSER(CpOpSetContextReg) {
 		return 2;
 	}
 
-	return SetRegisters(cp, g_hw_ctx_indirect_func, &g_hw_ctx_gfx7_func, "context", cmd_id,
-	                    cmd_offset, buffer + 1, num_dw - dw);
+	const auto size = SetRegisters(cp, g_hw_ctx_indirect_func, &g_hw_ctx_gfx7_func, "context",
+	                               cmd_id, cmd_offset, buffer + 1, num_dw - dw);
+	if (IsGfx7()) {
+		ReadGfx7ExtentHint(cp, cmd_offset, KYTY_PM4_LEN(cmd_id) - 2u, buffer + 1, dw - 2u);
+	}
+	return size;
 }
 
 KYTY_CP_OP_PARSER(CpOpSetShaderReg) {
@@ -2576,6 +2618,12 @@ static void RefreshGfx7TargetSizes(CommandProcessor& cp) {
 		if (attrib2.gfx7_pitch == 0u || attrib2.gfx7_height == 0u) {
 			continue;
 		}
+		if (attrib2.gfx7_extent != 0u) {
+			attrib2.width  = (attrib2.gfx7_extent & 0xffffu) - 1u;
+			attrib2.height = (attrib2.gfx7_extent >> 16u) - 1u;
+			cp.GetCtx().SetColorAttrib2(slot, attrib2);
+			continue;
+		}
 		const bool keep =
 		    !origin && not_padding(vp.screen_scissor_right, attrib2.gfx7_pitch, MaxPitchAlignment);
 		const bool keep_height =
@@ -2586,7 +2634,11 @@ static void RefreshGfx7TargetSizes(CommandProcessor& cp) {
 		cp.GetCtx().SetColorAttrib2(slot, attrib2);
 	}
 	auto size = cp.GetCtx().GetDepthRenderTarget().size;
-	if (size.gfx7_pitch != 0u && size.gfx7_height != 0u) {
+	if (size.gfx7_extent != 0u && size.gfx7_pitch != 0u) {
+		size.x_max = static_cast<uint16_t>((size.gfx7_extent & 0xffffu) - 1u);
+		size.y_max = static_cast<uint16_t>((size.gfx7_extent >> 16u) - 1u);
+		cp.GetCtx().SetDepthDepthSizeXY(size);
+	} else if (size.gfx7_pitch != 0u && size.gfx7_height != 0u) {
 		const bool keep = not_padding(vp.screen_scissor_right, size.gfx7_pitch, MaxPitchAlignment);
 		const bool keep_height =
 		    keep && not_padding(vp.screen_scissor_bottom, size.gfx7_height, MaxHeightAlignment);
@@ -2675,7 +2727,7 @@ static constexpr auto MakeContextGfx7Table() {
 	};
 	// DB_DEPTH_SIZE: PITCH_TILE_MAX and HEIGHT_TILE_MAX, in 8-pixel units.
 	table[Pm4::DB_DEPTH_SIZE_GFX7] = [](KYTY_HW_REG_ARGS) {
-		HW::DepthDepthSizeXY r;
+		auto r        = cp.GetCtx().GetDepthRenderTarget().size;
 		r.gfx7_pitch  = static_cast<uint16_t>(((value & 0x7ffu) + 1u) * 8u);
 		r.gfx7_height = static_cast<uint16_t>((((value >> 11u) & 0x7ffu) + 1u) * 8u);
 		r.valid       = true;

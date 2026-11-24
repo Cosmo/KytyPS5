@@ -43,9 +43,11 @@ struct ColorAttrib2 {
 	uint32_t height         = 0;
 	uint32_t width          = 0;
 	uint32_t num_mip_levels = 0;
-	// gfx7 (PS4): the pitch and height the tiling padded the surface to, in pixels.
+	// gfx7 (PS4): the pitch and height the tiling padded the surface to, in pixels, and the real
+	// size the PS4 graphics driver puts in a NOP after the setup (width | height << 16, 0: none).
 	uint32_t gfx7_pitch     = 0;
 	uint32_t gfx7_height    = 0;
+	uint32_t gfx7_extent    = 0;
 };
 
 struct ColorAttrib3 {
@@ -181,9 +183,10 @@ struct DepthDepthSizeXY {
 	uint16_t x_max = 0;
 	uint16_t y_max = 0;
 	bool     valid = false;
-	// gfx7 (PS4): the padded size, in pixels.
+	// gfx7 (PS4): the padded size, in pixels, and the real size from the driver's NOP (as above).
 	uint16_t gfx7_pitch  = 0;
 	uint16_t gfx7_height = 0;
+	uint32_t gfx7_extent = 0;
 };
 
 struct DepthRenderTarget {
