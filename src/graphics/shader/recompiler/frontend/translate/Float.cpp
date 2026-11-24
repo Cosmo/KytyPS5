@@ -119,6 +119,17 @@ void Translator::FloatUnary(const Decoder::Instruction& inst, IR::ValueOpcode op
 	WriteOperand(DestinationOperand(inst), ir.Emit(opcode, {ReadOperand(inst.src0, type)}));
 }
 
+void Translator::FloatUnaryClamped(const Decoder::Instruction& inst, IR::ValueOpcode opcode,
+                                   bool legacy) {
+	const auto result    = IR::F32(ir.Emit(opcode, {ReadOperand(inst.src0, IR::Type::F32)}));
+	const auto bits      = ir.BitCastU32(result);
+	const auto sign      = ir.BitwiseAnd(bits, IR::U32(IR::Value(0x80000000u)));
+	const auto magnitude = ir.BitwiseAnd(bits, IR::U32(IR::Value(0x7fffffffu)));
+	const auto infinite  = ir.IEqual(magnitude, IR::U32(IR::Value(0x7f800000u)));
+	const auto clamped   = legacy ? sign : ir.BitwiseOr(sign, IR::U32(IR::Value(0x7f7fffffu)));
+	WriteOperand(DestinationOperand(inst), ir.BitCastF32(ir.Select(infinite, clamped, bits)));
+}
+
 void Translator::V_FRACT(const Decoder::Instruction& inst, IR::Type type) {
 	// x - floor(x) rounds to 1.0 for a tiny negative x; v_fract returns the largest value below
 	// one instead. The ordered compare lets NaN through.
@@ -154,6 +165,40 @@ void Translator::FloatBinary(const Decoder::Instruction& inst, IR::ValueOpcode o
 		args[index]        = ReadOperand(operand, IR::ArgTypeOf(opcode, index));
 	}
 	WriteOperand(DestinationOperand(inst), ir.Emit(opcode, {args[0], args[1]}));
+}
+
+void Translator::LegacyFloatMinMax(const Decoder::Instruction& inst, bool max) {
+	const auto a    = IR::F32(ReadOperand(SourceAt(inst, 0), IR::Type::F32));
+	const auto b    = IR::F32(ReadOperand(SourceAt(inst, 1), IR::Type::F32));
+	// Ordered compares: a NaN in either operand selects S1.
+	const auto pick = max ? IR::U1(ir.Emit(IR::ValueOpcode::FPOrdGreaterThanEqual32, {a, b}))
+	                      : IR::U1(ir.Emit(IR::ValueOpcode::FPOrdLessThan32, {a, b}));
+	WriteOperand(DestinationOperand(inst),
+	             ir.BitCastF32(ir.Select(pick, ir.BitCastU32(a), ir.BitCastU32(b))));
+}
+
+void Translator::LegacyFloatMultiply(const Decoder::Instruction& inst, bool accumulate,
+                                     bool addend_src2) {
+	// DX9 "legacy" rule: if either factor is +-0 the product is +0, even for inf or NaN.
+	const auto a        = IR::F32(ReadOperand(SourceAt(inst, 0), IR::Type::F32));
+	const auto b        = IR::F32(ReadOperand(SourceAt(inst, 1), IR::Type::F32));
+	const auto abs_mask = IR::U32(IR::Value(0x7fffffffu));
+	const auto zero_u32 = IR::U32(IR::Value(0u));
+	const auto a_zero   = ir.IEqual(ir.BitwiseAnd(ir.BitCastU32(a), abs_mask), zero_u32);
+	const auto b_zero   = ir.IEqual(ir.BitwiseAnd(ir.BitCastU32(b), abs_mask), zero_u32);
+	IR::U32    full;
+	IR::U32    zero_case;
+	if (accumulate) {
+		// V_MAC_LEGACY adds the destination, V_MAD_LEGACY its third source.
+		const auto c = IR::F32(ReadOperand(addend_src2 ? SourceAt(inst, 2) : inst.dst, IR::Type::F32));
+		full      = ir.BitCastU32(IR::F32(ir.Emit(IR::ValueOpcode::FPFma32, {a, b, c})));
+		zero_case = ir.BitCastU32(c);
+	} else {
+		full      = ir.BitCastU32(IR::F32(ir.Emit(IR::ValueOpcode::FPMul32, {a, b})));
+		zero_case = zero_u32;
+	}
+	const auto result = ir.Select(a_zero, zero_case, ir.Select(b_zero, zero_case, full));
+	WriteOperand(DestinationOperand(inst), ir.BitCastF32(result));
 }
 
 void Translator::FloatTernary(const Decoder::Instruction& inst, IR::ValueOpcode opcode,

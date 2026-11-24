@@ -178,8 +178,16 @@ private:
 	void Float16Ternary(const Decoder::Instruction& inst, IR::ValueOpcode opcode, bool accumulator,
 	                    bool mix);
 	void FloatUnary(const Decoder::Instruction& inst, IR::ValueOpcode opcode);
+	// PS4 (gfx7) V_*_CLAMP_F32 and V_*_LEGACY_F32: `opcode`, then an infinite result becomes +-max
+	// float (clamp) or +-0 (legacy).
+	void FloatUnaryClamped(const Decoder::Instruction& inst, IR::ValueOpcode opcode, bool legacy);
 	void V_FRACT(const Decoder::Instruction& inst, IR::Type type);
 	void FloatBinary(const Decoder::Instruction& inst, IR::ValueOpcode opcode, bool reverse);
+	// PS4 (gfx7) V_MUL_LEGACY_F32 and V_MAC_LEGACY_F32: a +-0 factor gives +0 (or the addend).
+	void LegacyFloatMultiply(const Decoder::Instruction& inst, bool accumulate,
+	                         bool addend_src2 = false);
+	// PS4 (gfx7) V_MIN_LEGACY_F32 / V_MAX_LEGACY_F32: S0 < S1 ? S0 : S1 / S0 >= S1 ? S0 : S1.
+	void LegacyFloatMinMax(const Decoder::Instruction& inst, bool max);
 	void FloatTernary(const Decoder::Instruction& inst, IR::ValueOpcode opcode, bool accumulator,
 	                  bool mix);
 	void V_FREXP_MANT_F32(const Decoder::Instruction& inst);

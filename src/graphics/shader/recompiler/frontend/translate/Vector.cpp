@@ -458,6 +458,13 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 		case O::V_EXP_F32: return FloatUnary(inst, IR::ValueOpcode::FPExp2);
 		case O::V_LOG_F32: return FloatUnary(inst, IR::ValueOpcode::FPLog2);
 		case O::V_RSQ_F32: return FloatUnary(inst, IR::ValueOpcode::FPRecipSqrt32);
+		case O::V_LOG_CLAMP_F32: return FloatUnaryClamped(inst, IR::ValueOpcode::FPLog2, false);
+		case O::V_RCP_CLAMP_F32: return FloatUnaryClamped(inst, IR::ValueOpcode::FPRecip32, false);
+		case O::V_RCP_LEGACY_F32: return FloatUnaryClamped(inst, IR::ValueOpcode::FPRecip32, true);
+		case O::V_RSQ_CLAMP_F32:
+			return FloatUnaryClamped(inst, IR::ValueOpcode::FPRecipSqrt32, false);
+		case O::V_RSQ_LEGACY_F32:
+			return FloatUnaryClamped(inst, IR::ValueOpcode::FPRecipSqrt32, true);
 		case O::V_SQRT_F32: return FloatUnary(inst, IR::ValueOpcode::FPSqrt);
 		case O::V_SIN_F32: return FloatUnary(inst, IR::ValueOpcode::FPSin);
 		case O::V_COS_F32: return FloatUnary(inst, IR::ValueOpcode::FPCos);
@@ -465,6 +472,8 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 		case O::V_SUB_F32: return FloatBinary(inst, IR::ValueOpcode::FPSub32, false);
 		case O::V_SUBREV_F32: return FloatBinary(inst, IR::ValueOpcode::FPSub32, true);
 		case O::V_MUL_F32: return FloatBinary(inst, IR::ValueOpcode::FPMul32, false);
+		case O::V_MUL_LEGACY_F32: return LegacyFloatMultiply(inst, false);
+		case O::V_FMAC_LEGACY_F32: return LegacyFloatMultiply(inst, true);
 		case O::V_ADD_F64: return FloatBinary(inst, IR::ValueOpcode::FPAdd64, false);
 		case O::V_MUL_F64: return FloatBinary(inst, IR::ValueOpcode::FPMul64, false);
 		case O::V_MIN_F64: return FloatBinary(inst, IR::ValueOpcode::FPMin64, false);
@@ -476,6 +485,9 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 		case O::V_MADMK_F32:
 		case O::V_MADAK_F32:
 		case O::V_MAD_F32: return FloatTernary(inst, IR::ValueOpcode::FPMad32, false, true);
+		case O::V_MAD_LEGACY_F32: return LegacyFloatMultiply(inst, true, true);
+		case O::V_MIN_LEGACY_F32: return LegacyFloatMinMax(inst, false);
+		case O::V_MAX_LEGACY_F32: return LegacyFloatMinMax(inst, true);
 		case O::V_FMAC_F32: return FloatTernary(inst, IR::ValueOpcode::FPFma32, true, true);
 		case O::V_FMAMK_F32:
 		case O::V_FMAAK_F32:

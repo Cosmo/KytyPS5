@@ -53,10 +53,21 @@ uint32_t Vop2AsVop3(uint32_t opcode) {
 	}
 }
 
-// gfx7 VOP2 opcodes with no counterpart here yet (legacy min/max, PKACCUM).
+// gfx7 VOP2 opcodes with no counterpart here yet (PKACCUM).
 bool Vop2Unsupported(uint32_t opcode) {
-	return opcode == 0x0du || opcode == 0x0eu || opcode == 0x2cu;
+	return opcode == 0x2cu;
 }
+
+// gfx7 VOP2 opcodes gfx10 dropped (the VOP3 form adds 0x100): their operation. They decode in the
+// shape of V_MIN_F32 (VOP2 0x0f), two floats in and one out as they are.
+Opcode Vop2LegacyOperation(uint32_t opcode) {
+	switch (opcode) {
+		case 0x0du: return Opcode::V_MIN_LEGACY_F32;
+		case 0x0eu: return Opcode::V_MAX_LEGACY_F32;
+		default: return Opcode::UNKNOWN;
+	}
+}
+constexpr uint32_t Vop2MinF32 = 0x0fu;
 
 // VOP3B in gfx7: SDST at bits 14:8 and no clamp.
 bool IsVop3b(uint32_t opcode) {
@@ -90,6 +101,20 @@ uint32_t Vop3Opcode(uint32_t opcode) {
 	return opcode;
 }
 
+// gfx7 VOP1 opcodes gfx10 dropped (the VOP3 form adds 0x180): their operation. They decode in the
+// shape of V_RCP_F32 (VOP1 0x2a), which takes and writes one float as they do.
+Opcode Vop1LegacyOperation(uint32_t opcode) {
+	switch (opcode) {
+		case 0x26u: return Opcode::V_LOG_CLAMP_F32;
+		case 0x28u: return Opcode::V_RCP_CLAMP_F32;
+		case 0x29u: return Opcode::V_RCP_LEGACY_F32;
+		case 0x2cu: return Opcode::V_RSQ_CLAMP_F32;
+		case 0x2du: return Opcode::V_RSQ_LEGACY_F32;
+		default: return Opcode::UNKNOWN;
+	}
+}
+constexpr uint32_t Vop1RcpF32 = 0x2au;
+
 void Restore(Instruction& inst, std::span<const uint32_t> code, uint32_t word_index,
              uint32_t word_count, uint32_t opcode) {
 	SetRawWords(inst, code, word_index, word_count);
@@ -119,6 +144,15 @@ void DecodeVop3Gfx7(uint32_t pc, std::span<const uint32_t> code, uint32_t word_i
 	                               : (word0 & 0x7ffu) | (((word0 >> 11u) & 1u) << 15u);
 	uint32_t word1  = WordAt(code, word_index + 1u);
 	uint32_t opcode10 = gfx10;
+	auto legacy =
+	    opcode >= 0x180u && opcode < 0x200u ? Vop1LegacyOperation(opcode - 0x180u) : Opcode::UNKNOWN;
+	if (legacy != Opcode::UNKNOWN) {
+		opcode10 = 0x180u + Vop1RcpF32;
+	} else if (opcode >= 0x100u && opcode < 0x140u &&
+	           Vop2LegacyOperation(opcode - 0x100u) != Opcode::UNKNOWN) {
+		legacy   = Vop2LegacyOperation(opcode - 0x100u);
+		opcode10 = 0x100u + Vop2MinF32;
+	}
 	if (opcode >= 0x161u && opcode <= 0x163u) {
 		// V_LSHL_B64, V_LSHR_B64, V_ASHR_I64 exist in gfx10 only as the *REV forms (0x2ff-0x301):
 		// swap src0/src1 with their abs and neg bits.
@@ -133,6 +167,9 @@ void DecodeVop3Gfx7(uint32_t pc, std::span<const uint32_t> code, uint32_t word_i
 	const std::array<uint32_t, 3> words {low | (opcode10 << 16u) | Vop3Prefix, word1, 0u};
 	DecodeVop3(pc, words, 0, inst);
 	Restore(inst, code, word_index, 2, opcode);
+	if (legacy != Opcode::UNKNOWN) {
+		inst.opcode = legacy;
+	}
 	// V_CMPX in VOP3 form: gfx7 writes SDST too (gfx10 drops it); the translator writes dst2.
 	if (inst.dst.kind == OperandKind::ExecLo && opcode < 0x100u) {
 		DecodeScalarDestination(word0 & 0xffu, pc, inst.dst2);
@@ -159,6 +196,13 @@ bool DecodeVop2Gfx7(uint32_t pc, std::span<const uint32_t> code, uint32_t word_i
 		inst.pc = pc;
 		SetRawWords(inst, code, word_index, words_used);
 		SetUnsupported(inst, Family::VOP2, opcode, "gfx7 VOP2 opcode is not implemented");
+		return true;
+	}
+	if (const auto legacy = Vop2LegacyOperation(opcode); legacy != Opcode::UNKNOWN) {
+		const std::array<uint32_t, 2> words {(word & ~(0x3fu << 25u)) | (Vop2MinF32 << 25u), literal};
+		DecodeVop2(pc, words, 0, inst);
+		Restore(inst, code, word_index, words_used, opcode);
+		inst.opcode = legacy;
 		return true;
 	}
 	const uint32_t vop3 = Vop2AsVop3(opcode);
@@ -336,8 +380,21 @@ bool DecodeGfx7Instruction(std::span<const uint32_t> code, uint32_t word_index, 
 	const uint32_t word = code[word_index];
 	const uint32_t pc   = word_index * sizeof(uint32_t);
 	if ((word & 0x80000000u) == 0u) {
-		if (((word >> 25u) & 0x3fu) >= 0x3eu) {
-			return false; // VOPC, VOP1
+		if (((word >> 25u) & 0x3fu) == 0x3fu) {
+			// VOP1: the operations gfx10 dropped decode in V_RCP_F32's shape.
+			const auto legacy = Vop1LegacyOperation((word >> 9u) & 0xffu);
+			if (legacy == Opcode::UNKNOWN) {
+				return false;
+			}
+			const uint32_t literal = WordAt(code, word_index + 1u);
+			const std::array<uint32_t, 2> words {(word & ~(0xffu << 9u)) | (Vop1RcpF32 << 9u), literal};
+			DecodeVop1(pc, words, 0, inst);
+			Restore(inst, code, word_index, inst.word_count, (word >> 9u) & 0xffu);
+			inst.opcode = legacy;
+			return true;
+		}
+		if (((word >> 25u) & 0x3fu) == 0x3eu) {
+			return false; // VOPC
 		}
 		return DecodeVop2Gfx7(pc, code, word_index, inst);
 	}

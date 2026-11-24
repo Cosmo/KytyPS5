@@ -31,6 +31,8 @@ constexpr Vop2OpcodeInfo VOP2_OPCODE_LIST[] = {
     {0x03u, Opcode::V_ADD_F32, Vop2SdwaProfile::Float32},
     {0x04u, Opcode::V_SUB_F32, Vop2SdwaProfile::Float32},
     {0x05u, Opcode::V_SUBREV_F32},
+    {0x06u, Opcode::V_FMAC_LEGACY_F32},
+    {0x07u, Opcode::V_MUL_LEGACY_F32, Vop2SdwaProfile::Float32},
     {0x08u, Opcode::V_MUL_F32, Vop2SdwaProfile::Float32},
     {0x09u, Opcode::V_MUL_I32_I24, Vop2SdwaProfile::IntegerPartialDestination},
     {0x0au, Opcode::V_MUL_HI_I32_I24, Vop2SdwaProfile::IntegerPartialDestination},
@@ -249,6 +251,7 @@ constexpr VopcOpcodeInfo VOPC_OPCODE_LIST[] = {
 constexpr auto VOPC_OPS = Detail::MakeOpcodeTable<0x100>(VOPC_OPCODE_LIST);
 
 constexpr OpcodeMap VOP3_OPCODE_LIST[] = {
+    {0x140u, Opcode::V_MAD_LEGACY_F32},
     {0x141u, Opcode::V_MAD_F32},
     {0x142u, Opcode::V_MAD_I32_I24},
     {0x143u, Opcode::V_MAD_U32_U24},
@@ -772,6 +775,8 @@ bool IsVop2FloatOpcode(Opcode opcode) {
 		case Opcode::V_ADD_F32:
 		case Opcode::V_SUB_F32:
 		case Opcode::V_SUBREV_F32:
+		case Opcode::V_MUL_LEGACY_F32:
+		case Opcode::V_FMAC_LEGACY_F32:
 		case Opcode::V_MUL_F32:
 		case Opcode::V_MIN_F32:
 		case Opcode::V_MAX_F32:
@@ -1349,12 +1354,17 @@ bool SupportsNativeVop3SourceModifiers(Opcode opcode) {
 		case Opcode::V_ADD_F32:
 		case Opcode::V_SUB_F32:
 		case Opcode::V_SUBREV_F32:
+		case Opcode::V_MUL_LEGACY_F32:
+		case Opcode::V_FMAC_LEGACY_F32:
 		case Opcode::V_MUL_F32:
 		case Opcode::V_MIN_F32:
 		case Opcode::V_MAX_F32:
 		case Opcode::V_MAC_F32:
 		case Opcode::V_FMAC_F32:
 		case Opcode::V_MAD_F32:
+		case Opcode::V_MAD_LEGACY_F32:
+		case Opcode::V_MIN_LEGACY_F32:
+		case Opcode::V_MAX_LEGACY_F32:
 		case Opcode::V_ADD_F64:
 		case Opcode::V_MUL_F64:
 		case Opcode::V_MIN_F64:
@@ -1385,12 +1395,17 @@ bool SupportsNativeVop3ResultModifiers(Opcode opcode) {
 		case Opcode::V_ADD_F32:
 		case Opcode::V_SUB_F32:
 		case Opcode::V_SUBREV_F32:
+		case Opcode::V_MUL_LEGACY_F32:
+		case Opcode::V_FMAC_LEGACY_F32:
 		case Opcode::V_MUL_F32:
 		case Opcode::V_MIN_F32:
 		case Opcode::V_MAX_F32:
 		case Opcode::V_MAC_F32:
 		case Opcode::V_FMAC_F32:
 		case Opcode::V_MAD_F32:
+		case Opcode::V_MAD_LEGACY_F32:
+		case Opcode::V_MIN_LEGACY_F32:
+		case Opcode::V_MAX_LEGACY_F32:
 		case Opcode::V_FMA_F32:
 		case Opcode::V_FMA_F16:
 		case Opcode::V_MIN3_F16:

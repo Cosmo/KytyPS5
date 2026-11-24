@@ -207,6 +207,12 @@ enum class Opcode {
 	V_EXP_F32,
 	V_LOG_F32,
 	V_RSQ_F32,
+	// PS4 (gfx7) only: results that would be infinite are clamped to +-max (CLAMP) or 0 (LEGACY).
+	V_LOG_CLAMP_F32,
+	V_RCP_CLAMP_F32,
+	V_RCP_LEGACY_F32,
+	V_RSQ_CLAMP_F32,
+	V_RSQ_LEGACY_F32,
 	V_SQRT_F32,
 	V_RCP_F16,
 	V_SQRT_F16,
@@ -231,6 +237,8 @@ enum class Opcode {
 	V_SUB_F32,
 	V_SUBREV_F32,
 	V_MUL_F32,
+	V_MUL_LEGACY_F32,  // PS4 (gfx7) shaders
+	V_FMAC_LEGACY_F32, // PS4 (gfx7) shaders, V_MAC_LEGACY_F32 there
 	V_MAC_F32,
 	V_MADMK_F32,
 	V_MADAK_F32,
@@ -239,6 +247,8 @@ enum class Opcode {
 	V_FMAAK_F32,
 	V_MIN_F32,
 	V_MAX_F32,
+	V_MIN_LEGACY_F32, // PS4 (gfx7) only: S0 < S1 ? S0 : S1
+	V_MAX_LEGACY_F32, // PS4 (gfx7) only: S0 >= S1 ? S0 : S1
 	V_ADD_F16,
 	V_SUB_F16,
 	V_SUBREV_F16,
@@ -259,6 +269,7 @@ enum class Opcode {
 	V_CVT_PKRTZ_F16_F32,
 	V_CVT_PK_U8_F32,
 	V_MAD_F32,
+	V_MAD_LEGACY_F32,
 	V_MAD_I16,
 	V_MAD_U16,
 	V_MAD_I32_I24,

@@ -358,6 +358,10 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
 // PS4 (gfx7) shaders come without AGC metadata: their code ends at the "OrbShdr" footer Gnm puts
 // after it. 0 when no footer is found in the first 256 KiB.
 uint32_t Gfx7ShaderCodeWords(uint64_t addr);
+// Whether the GPU sees guest memory mapped at [vaddr, vaddr + size): bounds the PS4 shader scans.
+// Callable on the GPU thread (the kernel's memory lock may be held by a thread waiting for it).
+using ShaderMappedRangeCheck = bool (*)(uint64_t vaddr, uint64_t size);
+void ShaderSetMappedRangeCheck(ShaderMappedRangeCheck check);
 uint32_t ShaderPixelExportTarget(uint32_t shader_mask, uint32_t export_index);
 
 void     ShaderDbgDumpInputInfo(const ShaderVertexInputInfo& info);

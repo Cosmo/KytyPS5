@@ -76,6 +76,8 @@ void Initialize() {
 	auto& video_out = VideoOut::VideoOutInit(width, height, presenter);
 	g_renderer      = &presenter.Renderer();
 	g_renderer->InitializeGpu(&video_out);
+	ShaderSetMappedRangeCheck(
+	    [](uint64_t vaddr, uint64_t size) { return g_renderer->IsMapped(vaddr, size); });
 	// Native driver module startup reserves its DMEM before the guest can allocate it.
 	EXIT_IF(AgcDriver::Initialize() != OK);
 	ShaderInit();

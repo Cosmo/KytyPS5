@@ -94,19 +94,35 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	(*g_shader_map)[addr] = {mapped, hash};
 }
 
+static std::atomic<ShaderMappedRangeCheck> g_mapped_range_check {nullptr};
+
+void ShaderSetMappedRangeCheck(ShaderMappedRangeCheck check) {
+	g_mapped_range_check.store(check, std::memory_order_release);
+}
+
+// The end of the mapped memory from `addr` on, looking at most `limit` bytes ahead, page by page.
+static uint64_t MappedEnd(uint64_t addr, uint64_t limit) {
+	const auto check = g_mapped_range_check.load(std::memory_order_acquire);
+	EXIT_IF(check == nullptr);
+	constexpr uint64_t PageSize = 0x1000;
+	uint64_t           end      = addr;
+	while (end < addr + limit) {
+		const auto page_end = std::min((end & ~(PageSize - 1u)) + PageSize, addr + limit);
+		if (!check(end, page_end - end)) {
+			break;
+		}
+		end = page_end;
+	}
+	return end;
+}
+
 uint32_t Gfx7ShaderCodeWords(uint64_t addr) {
 	if (addr == 0 || (addr & 3u) != 0) {
 		return 0;
 	}
-	// The scan stays inside the mapping that holds the shader.
-	LibKernel::Memory::VirtualQueryInfo info {};
-	if (LibKernel::Memory::KernelVirtualQuery(reinterpret_cast<const void*>(addr), 0, &info,
-	                                          sizeof(info)) != OK ||
-	    info.end <= addr) {
-		return 0;
-	}
+	// The scan stays inside the memory mapped from the shader on.
 	constexpr uint64_t         Limit = 256u * 1024u;
-	const uint64_t             end   = std::min<uint64_t>(info.end, addr + Limit);
+	const uint64_t             end   = MappedEnd(addr, Limit);
 	std::array<uint32_t, 1024> block {};
 	for (uint64_t offset = 0; addr + offset + 8u <= end;) {
 		const auto bytes = std::min<uint64_t>(sizeof(block), end - (addr + offset)) & ~uint64_t {3};
@@ -636,13 +652,9 @@ static void PrepareGfx7FetchCall(const HW::VertexShaderInfo& regs, uint32_t user
 		                   (static_cast<uint64_t>(regs.vs_user_sgpr.value[pair + 1u]) << 32u);
 		EXIT_NOT_IMPLEMENTED(fetch == 0 || (fetch & 3u) != 0);
 		// The fetch shader ends at its S_SETPC_B64; the decoder looks at most 4 KiB ahead, inside
-		// the fetch shader's mapping.
-		LibKernel::Memory::VirtualQueryInfo mapping {};
-		EXIT_NOT_IMPLEMENTED(LibKernel::Memory::KernelVirtualQuery(reinterpret_cast<const void*>(fetch),
-		                                                           0, &mapping, sizeof(mapping)) != OK ||
-		                     mapping.end <= fetch);
-		const auto fetch_words =
-		    static_cast<uint32_t>(std::min<uint64_t>(mapping.end - fetch, 4096u) / 4u);
+		// the memory mapped from the fetch shader on.
+		const auto fetch_words = static_cast<uint32_t>((MappedEnd(fetch, 4096u) - fetch) / 4u);
+		EXIT_NOT_IMPLEMENTED(fetch_words == 0);
 		params.back_code = code.subspan(word);
 		params.code      = std::span {reinterpret_cast<const uint32_t*>(fetch), fetch_words};
 		const auto front = Decoder::DecodeFrontProgram(params.code);
