@@ -2554,10 +2554,13 @@ constinit const std::array<hw_reg_func_t, Pm4::UC_NUM> g_hw_uc_indirect_func =
 
 // PS4 surfaces are padded to their tiling (1920x1080 is stored as 1920x1088), and no register gives
 // the real size. The screen scissor is the area the game draws, so that is the size of the target,
-// when tiling alignment explains the difference; otherwise the draw covers part of a larger
-// surface (an emulated VRAM, or a picture between side bars). Stored as gfx10's, minus one.
+// when tiling alignment explains the difference, or when the scissor starts at the surface's origin
+// (a smaller picture in a larger allocation, as the steps of a downsampling chain that share one
+// buffer, which the game then samples at that size). A scissor away from the origin covers part of
+// a larger surface (a picture between side bars). Stored as gfx10's, minus one.
 static void RefreshGfx7TargetSizes(CommandProcessor& cp) {
-	const auto& vp    = cp.GetCtx().GetScreenViewport();
+	const auto& vp     = cp.GetCtx().GetScreenViewport();
+	const bool  origin = vp.screen_scissor_left == 0 && vp.screen_scissor_top == 0;
 	const auto  clamp = [](uint32_t padded, int visible) {
 		return visible > 0 && static_cast<uint32_t>(visible) < padded ? static_cast<uint32_t>(visible)
 		                                                              : padded;
@@ -2573,7 +2576,8 @@ static void RefreshGfx7TargetSizes(CommandProcessor& cp) {
 		if (attrib2.gfx7_pitch == 0u || attrib2.gfx7_height == 0u) {
 			continue;
 		}
-		const bool keep = not_padding(vp.screen_scissor_right, attrib2.gfx7_pitch, MaxPitchAlignment);
+		const bool keep =
+		    !origin && not_padding(vp.screen_scissor_right, attrib2.gfx7_pitch, MaxPitchAlignment);
 		const bool keep_height =
 		    keep && not_padding(vp.screen_scissor_bottom, attrib2.gfx7_height, MaxHeightAlignment);
 		attrib2.width  = (keep ? attrib2.gfx7_pitch : clamp(attrib2.gfx7_pitch, vp.screen_scissor_right)) - 1u;
@@ -2604,13 +2608,21 @@ static constexpr auto MakeContextGfx7Table() {
 		table[Pm4::CB_COLOR0_INFO + slot * 15u] = [](KYTY_HW_REG_ARGS) {
 			g_hw_ctx_indirect_func[cmd_offset](cp, cmd_offset, value & 0x0007bffcu);
 		};
-		// NUM_SAMPLES 14:12, NUM_FRAGMENTS 16:15, FORCE_DST_ALPHA_1 17.
+		// TILE_MODE_INDEX 4:0, NUM_SAMPLES 14:12, NUM_FRAGMENTS 16:15, FORCE_DST_ALPHA_1 17. Tile index
+		// 8 is a linear target (the CPU reads some, as a game's 1x1 average luminance); the other
+		// colour tilings are kept as render target tiling.
 		table[Pm4::CB_COLOR0_ATTRIB + slot * 15u] = [](KYTY_HW_REG_ARGS) {
+			const uint32_t  index = (cmd_offset - Pm4::CB_COLOR0_ATTRIB) / 15u;
 			HW::ColorAttrib attrib;
 			attrib.num_samples             = (value >> 12u) & 7u;
 			attrib.num_fragments           = (value >> 15u) & 3u;
 			attrib.force_dest_alpha_to_one = ((value >> 17u) & 1u) != 0u;
-			cp.GetCtx().SetColorAttrib((cmd_offset - Pm4::CB_COLOR0_ATTRIB) / 15u, attrib);
+			cp.GetCtx().SetColorAttrib(index, attrib);
+			auto attrib3      = cp.GetCtx().GetRenderTarget(index).attrib3;
+			attrib3.tile_mode = (value & 0x1fu) == 8u ? Prospero::TileMode::kLinear
+			                                          : Prospero::TileMode::kRenderTarget;
+			attrib3.dimension = 1u; // 2D
+			cp.GetCtx().SetColorAttrib3(index, attrib3);
 		};
 		// gfx7 has no ATTRIB2/ATTRIB3: the size comes from CB_COLORn_PITCH (TILE_MAX, in 8-pixel
 		// units) and CB_COLORn_SLICE (TILE_MAX, in 64-pixel units).
@@ -2619,10 +2631,6 @@ static constexpr auto MakeContextGfx7Table() {
 			auto attrib2         = cp.GetCtx().GetRenderTarget(index).attrib2;
 			attrib2.gfx7_pitch   = ((value & 0x7ffu) + 1u) * 8u;
 			cp.GetCtx().SetColorAttrib2(index, attrib2);
-			HW::ColorAttrib3 attrib3;
-			attrib3.tile_mode = Prospero::TileMode::kRenderTarget;
-			attrib3.dimension = 1u; // 2D
-			cp.GetCtx().SetColorAttrib3(index, attrib3);
 		};
 		table[Pm4::CB_COLOR0_SLICE_GFX7 + slot * 15u] = [](KYTY_HW_REG_ARGS) {
 			const uint32_t index  = (cmd_offset - Pm4::CB_COLOR0_SLICE_GFX7) / 15u;
