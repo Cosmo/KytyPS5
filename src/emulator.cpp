@@ -153,7 +153,12 @@ void Run(const RunOptions& options) {
 		EXIT("ELF is required\n");
 	}
 
-	const auto         param_json = options.app0_dir / "sce_sys" / "param.json";
+	// PS5 games carry param.json; PS4 games carry the binary param.sfo.
+	auto param_json = options.app0_dir / "sce_sys" / "param.json";
+	if (!Common::File::IsFileExisting(param_json) &&
+	    Common::File::IsFileExisting(options.app0_dir / "sce_sys" / "param.sfo")) {
+		param_json = options.app0_dir / "sce_sys" / "param.sfo";
+	}
 	Common::Subsystems subsystems(true);
 	Init(options.config, param_json, subsystems);
 

@@ -55,6 +55,7 @@ private:
 	};
 
 	void   OpenJson(const std::filesystem::path& file_name);
+	void   OpenSfo(const std::filesystem::path& file_name);
 	void   AddParamString(const std::string& name, const std::string& value);
 	void   AddParamInt(const std::string& name, int32_t value);
 	Param* FindParam(const char* name);
@@ -108,7 +109,67 @@ void Psf::Open(const std::filesystem::path& file_name) {
 
 	Close();
 
-	OpenJson(file_name);
+	if (file_name.extension() == ".sfo") {
+		OpenSfo(file_name);
+	} else {
+		OpenJson(file_name);
+	}
+}
+
+// PS4 games describe themselves in a binary PSF (sce_sys/param.sfo): a key table and a data table
+// indexed by 16-byte entries. Strings (format 0x0204, or 0x0004 without terminator) and 32-bit
+// integers (0x0404) keep their PSF key names, which are the names the PS5 JSON is mapped to.
+void Psf::OpenSfo(const std::filesystem::path& file_name) {
+	Common::File f;
+	f.Open(file_name, Common::File::Mode::Read);
+	if (f.IsInvalid()) {
+		LOGF("Can't open %s\n", Common::PathToString(file_name).c_str());
+		return;
+	}
+	const auto buf = f.ReadWholeBuffer();
+	f.Close();
+
+	const auto read32 = [&](size_t offset) {
+		uint32_t value = 0;
+		std::memcpy(&value, buf.data() + offset, sizeof(value));
+		return value;
+	};
+	const auto read16 = [&](size_t offset) {
+		uint16_t value = 0;
+		std::memcpy(&value, buf.data() + offset, sizeof(value));
+		return value;
+	};
+	if (buf.size() < 20 || read32(0) != 0x46535000u) {
+		LOGF("invalid sfo file: %s\n", Common::PathToString(file_name).c_str());
+		return;
+	}
+	const auto key_table  = read32(8);
+	const auto data_table = read32(12);
+	const auto count      = read32(16);
+	if (count > 1024 || 20ull + count * 16ull > buf.size() || key_table > buf.size() ||
+	    data_table > buf.size()) {
+		LOGF("invalid sfo file: %s\n", Common::PathToString(file_name).c_str());
+		return;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		const size_t entry  = 20 + size_t {i} * 16;
+		const size_t key    = key_table + read16(entry);
+		const auto   format = read16(entry + 2);
+		const auto   length = read32(entry + 4);
+		const size_t data   = data_table + size_t {read32(entry + 12)};
+		if (key >= buf.size() || data > buf.size() || length > buf.size() - data) {
+			continue;
+		}
+		const auto* key_begin = reinterpret_cast<const char*>(buf.data() + key);
+		const auto  name      = std::string(key_begin, strnlen(key_begin, buf.size() - key));
+		if (format == 0x0404 && length >= 4) {
+			AddParamInt(name, static_cast<int32_t>(read32(data)));
+		} else if (format == 0x0204 || format == 0x0004) {
+			const auto* text = reinterpret_cast<const char*>(buf.data() + data);
+			AddParamString(name, std::string(text, strnlen(text, length)));
+		}
+	}
+	m_opened = true;
 }
 
 void Psf::OpenJson(const std::filesystem::path& file_name) {
