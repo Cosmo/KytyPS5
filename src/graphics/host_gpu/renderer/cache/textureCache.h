@@ -68,8 +68,8 @@ public:
 	void                        UpdateImage(ImageId id);
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);
-	// PS4 (backward compatibility): the layout of a tiled render target (or GPU-written image) of
-	// this size at `address`, for a texture that samples it in a layout gfx10 has no swizzle for.
+	// PS4 (backward compatibility): the layout of a render target (or GPU-written image) of this size
+	// at `address`, for a texture that samples it in a layout gfx10 has no swizzle for.
 	[[nodiscard]] bool FindTargetInfoAt(uint64_t address, uint32_t width, uint32_t height,
 	                                    ImageInfo* info);
 	[[nodiscard]] ImageViewHandle FindTexture(ImageId id, const ImageDesc& desc);

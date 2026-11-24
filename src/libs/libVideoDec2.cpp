@@ -2,6 +2,7 @@
 #include "common/alignment.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
+#include "kernel/memory.h"
 #include "libs/videoDec2Decoder.h"
 #include "loader/symbolDatabase.h"
 
@@ -799,6 +800,10 @@ static void FillPicture(const Decoder::Output& decoded, VideodecPictureInfo* pic
 	VideodecPictureInfo out {};
 	out.this_size = picture->this_size;
 	if (decoded.valid) {
+		// The host wrote the picture into guest memory: the GPU's copies of it are stale.
+		const uint64_t rows = (decoded.height + 15u) & ~15u;
+		LibKernel::Memory::InvalidateMemory(reinterpret_cast<uint64_t>(decoded.buffer),
+		                                    uint64_t {decoded.pitch_in_bytes} * (rows + (rows + 1u) / 2u));
 		Decoder::PictureInfo info {};
 		(void)Decoder::GetPictureInfo(decoded.buffer, &info);
 		const auto width  = (decoded.width + 15u) & ~15u;

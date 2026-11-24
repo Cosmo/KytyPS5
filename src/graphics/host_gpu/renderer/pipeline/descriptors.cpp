@@ -627,20 +627,21 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 			desc.info.gfx7_micro_pitch = gfx7_pitch;
 			desc.info.gfx7_micro_pow2  = gfx7_pow2;
 			desc.info.data.size        = std::max(desc.info.data.size, desc.info.Gfx7MicroSize());
-			// A render target in that mode is sampled as what the GPU drew, not from guest memory.
-			ImageInfo target {};
-			if (texture_cache.FindTargetInfoAt(address, width, height, &target) &&
-			    target.type == desc.info.type &&
-			    target.resources.layers >= desc.info.resources.layers &&
-			    target.resources.levels >= desc.info.resources.levels) {
-				desc.info = target;
-			}
 		} else if (gfx7_tile == 19u && volume) {
 			// 1D-thick volume: 8x8x4 micro tiles in raster order.
 			desc.info.gfx7_micro_pitch = gfx7_pitch;
 			desc.info.gfx7_micro_pow2  = gfx7_pow2;
 			desc.info.gfx7_micro_thick = true;
 			desc.info.data.size        = desc.info.Gfx7MicroSize();
+		}
+		// A linear or 1D-thin render target is sampled as what the GPU drew, not from guest memory
+		// (a video's frames, converted to RGB on the GPU, then drawn to the screen).
+		ImageInfo target {};
+		if ((gfx7_tile == 8u || gfx7_tile == 13u) &&
+		    texture_cache.FindTargetInfoAt(address, width, height, &target) &&
+		    target.type == desc.info.type && target.resources.layers >= desc.info.resources.layers &&
+		    target.resources.levels >= desc.info.resources.levels) {
+			desc.info = target;
 		}
 	}
 	desc.view_info = TextureViewInfo(resource, descriptor, view_format, surface_format, storage,

@@ -1059,7 +1059,7 @@ bool TextureCache::FindTargetInfoAt(uint64_t address, uint32_t width, uint32_t h
 	bool             found = false;
 	ForEachImageWithAddress(address, [&](ImageId /*id*/, Image& image) {
 		if (!found && image.info.data.address == address && image.info.extent.width == width &&
-		    image.info.extent.height == height && image.info.IsTiled() &&
+		    image.info.extent.height == height && image.info.gfx7_micro_pitch == 0 &&
 		    (image.binding.is_target || image.IsGpuModified())) {
 			*info = image.info;
 			found = true;
