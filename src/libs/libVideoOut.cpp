@@ -41,6 +41,8 @@ LIB_DEFINE(InitVideoOut_1) {
 	LIB_FUNC("Mt4QHHkxkOc", VideoOut::VideoOutGetEventCount);
 	LIB_FUNC("j6RaAUlaLv0", VideoOut::VideoOutWaitVblank);
 	LIB_FUNC("utPrVdxio-8", VideoOut::VideoOutGetOutputStatus);
+	LIB_FUNC("6kPnj51T62Y", VideoOut::VideoOutGetResolutionStatus); // PS4
+	LIB_FUNC("8XGijEoThE0", VideoOut::VideoOutGetResolutionStatus); // PS4 Sys variant
 	LIB_FUNC("5tRaBjtdTzY", VideoOut::VideoOutVrrPegToFixedRate);
 	LIB_FUNC("T4ucGB8CsnM", VideoOut::VideoOutVrrUnpegFromFixedRate);
 	LIB_FUNC("+I4K03i3EL0", VideoOut::VideoOutInitializeOutputOptions);

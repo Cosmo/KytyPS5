@@ -188,6 +188,20 @@ struct VideoOutOutputOptions {
 	uint32_t internalData[16] = {};
 };
 
+// sceVideoOutGetResolutionStatus (PS4 API).
+struct VideoOutResolutionStatus {
+	int32_t  fullWidth        = 0;
+	int32_t  fullHeight       = 0;
+	int32_t  paneWidth        = 0;
+	int32_t  paneHeight       = 0;
+	uint64_t refreshRate      = 0;
+	float    screenSizeInInch = 0.0f;
+	uint16_t flags            = 0;
+	uint16_t reserved0        = 0;
+	uint32_t reserved1[3]     = {};
+};
+static_assert(sizeof(VideoOutResolutionStatus) == 0x30);
+
 struct VideoOutColorSettings {
 	float    gamma       = 1.0f;
 	uint32_t reserved[3] = {};
@@ -1907,6 +1921,27 @@ KYTY_SYSV_ABI int VideoOutWaitVblank(int handle) {
 		ctx->vblank_cond.Wait(&ctx->mutex);
 	}
 
+	return OK;
+}
+
+// PS4 games (backward compatibility) ask for the output resolution: the base PS4's 1080p at most.
+KYTY_SYSV_ABI int VideoOutGetResolutionStatus(int handle, VideoOutResolutionStatus* status) {
+	PRINT_NAME();
+
+	if (status == nullptr) {
+		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+	}
+	auto& driver = DriverState();
+	if (driver.Get(handle) == nullptr) {
+		return VIDEO_OUT_ERROR_INVALID_HANDLE;
+	}
+	*status                  = {};
+	status->fullWidth        = static_cast<int32_t>(std::min(driver.width, 1920u));
+	status->fullHeight       = static_cast<int32_t>(std::min(driver.height, 1080u));
+	status->paneWidth        = status->fullWidth;
+	status->paneHeight       = status->fullHeight;
+	status->refreshRate      = VIDEO_OUT_REFRESH_RATE_59_94HZ;
+	status->screenSizeInInch = 50.0f;
 	return OK;
 }
 

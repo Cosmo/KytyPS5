@@ -1989,6 +1989,116 @@ int KYTY_SYSV_ABI sigprocmask(int how, const void* set, uint64_t* old_set) {
 	return 0;
 }
 
+// POSIX sysctl, which the PS4 libc and games use (backward compatibility). sysctlbyname in the PS4
+// libc looks the name up first with MIB {0, 3} (name2oid), then asks for the MIB it got. The names
+// PS4 games ask for get MIBs of their own here, as in shadPS4.
+namespace SysctlMib {
+constexpr int Unspec = 0, Name2Oid = 3;
+constexpr int Kern = 1, Hw = 6, MachDep = 7;
+constexpr int HwMachine = 1, HwModel = 2, HwNcpu = 3, HwByteOrder = 4, HwPhysMem = 5, HwUserMem = 6,
+              HwPageSize = 7, HwFloatingPoint = 9, HwMachineArch = 10, HwRealMem = 11;
+constexpr int TscFreq = 1, CpuFreq = 2, BasePs4Mode = 3;
+constexpr int NeoMode = 100, ProcPtc = 102;
+} // namespace SysctlMib
+
+static int SysctlCopyOut(void* oldp, size_t* oldlenp, const void* src, size_t src_len) {
+	if (oldlenp == nullptr) {
+		return 0;
+	}
+	if (oldp != nullptr) {
+		std::memcpy(oldp, src, std::min(*oldlenp, src_len));
+	}
+	*oldlenp = src_len;
+	return 0;
+}
+
+int KYTY_SYSV_ABI sysctl(const int* name, uint32_t namelen, void* oldp, size_t* oldlenp,
+                         const void* newp, size_t newlen) {
+	PRINT_NAME();
+	namespace Mib = SysctlMib;
+	if (name == nullptr || namelen < 2) {
+		*GetErrorAddr() = POSIX_EINVAL;
+		return -1;
+	}
+	const auto value32 = [&](int32_t value) { return SysctlCopyOut(oldp, oldlenp, &value, 4); };
+	const auto value64 = [&](uint64_t value) { return SysctlCopyOut(oldp, oldlenp, &value, 8); };
+	const auto text    = [&](const char* value) {
+		return SysctlCopyOut(oldp, oldlenp, value, std::strlen(value) + 1u);
+	};
+	if (name[0] == Mib::Unspec && name[1] == Mib::Name2Oid && newp != nullptr) {
+		const std::string requested(static_cast<const char*>(newp),
+		                            strnlen(static_cast<const char*>(newp), newlen));
+		struct Known {
+			const char* name;
+			int         mib[2];
+		};
+		static constexpr Known known[] = {
+		    {"machdep.tsc_freq", {Mib::MachDep, Mib::TscFreq}},
+		    {"dev.cpu.0.freq", {Mib::MachDep, Mib::CpuFreq}},
+		    {"machdep.bootparams.base_ps4_mode", {Mib::MachDep, Mib::BasePs4Mode}},
+		    {"kern.neomode", {Mib::Kern, Mib::NeoMode}},
+		    {"kern.proc.ptc", {Mib::Kern, Mib::ProcPtc}},
+		    {"hw.ncpu", {Mib::Hw, Mib::HwNcpu}},
+		    {"hw.pagesize", {Mib::Hw, Mib::HwPageSize}},
+		    {"hw.physmem", {Mib::Hw, Mib::HwPhysMem}},
+		    {"hw.usermem", {Mib::Hw, Mib::HwUserMem}},
+		    {"hw.realmem", {Mib::Hw, Mib::HwRealMem}},
+		    {"hw.machine", {Mib::Hw, Mib::HwMachine}},
+		    {"hw.model", {Mib::Hw, Mib::HwModel}},
+		    {"hw.machine_arch", {Mib::Hw, Mib::HwMachineArch}},
+		};
+		for (const auto& entry: known) {
+			if (requested == entry.name) {
+				return SysctlCopyOut(oldp, oldlenp, entry.mib, sizeof(entry.mib));
+			}
+		}
+		LOGF("\t sysctl: unknown name %s\n", requested.c_str());
+		*GetErrorAddr() = POSIX_ENOENT;
+		return -1;
+	}
+	switch (name[0]) {
+		case Mib::Hw:
+			switch (name[1]) {
+				case Mib::HwMachine:
+				case Mib::HwMachineArch: return text("amd64");
+				case Mib::HwModel: return text("PlayStation 4");
+				case Mib::HwNcpu: return value32(8);
+				case Mib::HwByteOrder: return value32(1234);
+				case Mib::HwPhysMem:
+				case Mib::HwRealMem: return value64(8ull << 30u);
+				case Mib::HwUserMem: return value64(5ull << 30u);
+				case Mib::HwPageSize: return value32(16384);
+				case Mib::HwFloatingPoint: return value32(1);
+				default: break;
+			}
+			break;
+		case Mib::MachDep:
+			switch (name[1]) {
+				// The game reads the host's TSC: its frequency, not the PS4's 1.6 GHz.
+				case Mib::TscFreq: return value64(LibKernel::KernelGetTscFrequency());
+				case Mib::CpuFreq: return value32(1594);
+				case Mib::BasePs4Mode: return value32(1);
+				default: break;
+			}
+			break;
+		case Mib::Kern:
+			switch (name[1]) {
+				case Mib::NeoMode: return value32(0);
+				case Mib::ProcPtc: {
+					// The process time counter when the process started.
+					static const uint64_t start = LibKernel::KernelReadTsc();
+					return value64(start);
+				}
+				default: break;
+			}
+			break;
+		default: break;
+	}
+	LOGF("\t sysctl: unknown MIB %d.%d\n", name[0], name[1]);
+	*GetErrorAddr() = POSIX_ENOENT;
+	return -1;
+}
+
 int KYTY_SYSV_ABI sigfillset(uint64_t* set) {
 	PRINT_NAME();
 	if (set == nullptr) {
@@ -2458,6 +2568,7 @@ LIB_DEFINE(InitLibKernel_1_Posix) {
 	LIB_FUNC_POSIX_KERNEL("YQOfxL4QfeU", LibKernel::Memory::KernelMprotect);
 	LIB_FUNC_POSIX_KERNEL("UqDGjXA5yUM", LibKernel::Memory::KernelMunmap);
 	LIB_FUNC_POSIX_KERNEL("BPE9s9vQQXo", Posix::mmap);
+	LIB_FUNC_POSIX_KERNEL("DFmMT80xcNI", Posix::sysctl); // PS4
 	LIB_FUNC("AqBioC2vF3I", LibKernel::read);
 	LIB_FUNC_POSIX_KERNEL("TU-d9PfIHPM", Posix::socket);
 	LIB_FUNC_POSIX_KERNEL("KuOmgKoqCdY", Posix::bind);

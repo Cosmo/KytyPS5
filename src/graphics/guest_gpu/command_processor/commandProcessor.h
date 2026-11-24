@@ -98,6 +98,8 @@ public:
 	void WaitFlipDone(const uint64_t* label);
 	void ProcessPssr(const Pssr::Request& request);
 	void TriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address = 0);
+	// PS4 (gfx7): an occlusion counter dump with the base PS4's 8 depth blocks.
+	void DumpOcclusionCountersGfx7(uint64_t address);
 
 	void WaitForRewind(bool valid);
 

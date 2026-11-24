@@ -16,6 +16,7 @@
 #include "graphics/host_gpu/renderer/sync.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/shader.h"
 #include "kernel/memory.h"
 #include "libs/errno.h"
@@ -488,6 +489,26 @@ void GuestGpu::ThreadRun(void* data) {
 						break;
 					}
 				}
+				// A PS4 game (backward compatibility) flips from the CPU once the end-of-pipe interrupt
+				// says a frame is done, and its next command buffer may already wait on the GPU until
+				// that flip happens. The CPU flip must not queue behind that wait.
+				bool cpu_flip_ahead = false;
+				if (selected_queue < 0 && ShaderRecompiler::Decoder::GetGuestIsa() ==
+				                              ShaderRecompiler::Decoder::GuestIsa::Gfx7) {
+					auto& graphics = gpu->m_queues[0];
+					if (!graphics.empty() && graphics.front().blocked) {
+						const auto flip =
+						    std::find_if(graphics.begin() + 1, graphics.end(), [](const Submission& s) {
+							    return s.type == SubmissionType::FlipPreparation;
+						    });
+						if (flip != graphics.end()) {
+							submission = std::move(*flip);
+							graphics.erase(flip);
+							selected_queue = 0;
+							cpu_flip_ahead = true;
+						}
+					}
+				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
 					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
@@ -498,9 +519,11 @@ void GuestGpu::ThreadRun(void* data) {
 					}
 					continue;
 				}
-				auto& queue = gpu->m_queues[static_cast<uint32_t>(selected_queue)];
-				submission  = std::move(queue.front());
-				queue.pop_front();
+				if (!cpu_flip_ahead) {
+					auto& queue = gpu->m_queues[static_cast<uint32_t>(selected_queue)];
+					submission  = std::move(queue.front());
+					queue.pop_front();
+				}
 				gpu->m_submission_count--;
 				gpu->m_next_queue = (static_cast<uint32_t>(selected_queue) + 1) % QueueCount;
 				gpu->m_processing = true;
@@ -843,15 +866,20 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 		case 0x01: {
 			EXIT_NOT_IMPLEMENTED(address == nullptr);
 			m_renderer.GetOcclusionQueries().Publish();
-			// One begin/end pair per DB; bit 63 marks each counter ready.
+			// One begin/end pair per DB; bit 63 marks each counter ready. A PS4 game (backward
+			// compatibility) has the 8 DBs of the base PS4 in its result block.
 			constexpr uint64_t ready_bit = 1ull << 63u;
 			const auto* results = reinterpret_cast<const volatile uint64_t*>(address);
-			for (uint32_t db = 0; db < 16u; db++) {
+			const uint32_t db_count = ShaderRecompiler::Decoder::GetGuestIsa() ==
+			                                  ShaderRecompiler::Decoder::GuestIsa::Gfx7
+			                              ? 8u
+			                              : 16u;
+			for (uint32_t db = 0; db < db_count; db++) {
 				const auto begin = results[db * 2u];
 				const auto end   = results[db * 2u + 1u];
 				if ((begin & end & ready_bit) == 0) {
 					if (FrameDump::LogActive()) {
-						LogGuestRead("set-predication, occlusion counters", reinterpret_cast<uint64_t>(address), 16u * 2u * sizeof(uint64_t),
+						LogGuestRead("set-predication, occlusion counters", reinterpret_cast<uint64_t>(address), db_count * 2u * sizeof(uint64_t),
 						             fmt::format("the counter of DB {} is not ready (wait_op {}) -> {}", db, wait_op, wait_op == 0 ? "wait for it (the processing is suspended)" : "run the packets that follow"));
 					}
 					if (wait_op == 0) {
@@ -1153,8 +1181,16 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 
 	// GuestGpu::Process's end-of-slice flush submits the work this interrupt waits on.
 	if (interrupt) {
+		// PS4 games (backward compatibility) wait for graphics end-of-pipe interrupts as event 0x40
+		// (sceGnmAddEqEvent's kEqEventGfxEop); AGC uses 0 for the graphics queue.
+		constexpr int Gfx7GraphicsEopEvent = 0x40;
+		const int     event_id =
+		    m_interrupt_event_id == 0 &&
+		            ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7
+		        ? Gfx7GraphicsEopEvent
+		        : m_interrupt_event_id;
 		GetScheduler().DeferPriorityOperation(
-		    [&renderer = m_renderer, event_id = m_interrupt_event_id, interrupt_context_id] {
+		    [&renderer = m_renderer, event_id, interrupt_context_id] {
 			    renderer.TriggerInterrupt(event_id, interrupt_context_id);
 		    });
 	}
@@ -1244,6 +1280,22 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 		default:
 			EXIT("unknown event type: 0x%08" PRIx32 ", 0x%08" PRIx32 "\n", event_type, event_index);
 	}
+}
+
+void CommandProcessor::DumpOcclusionCountersGfx7(uint64_t address) {
+	EXIT_NOT_IMPLEMENTED(address == 0 || (address & 0x7u) != 0);
+	// The always-visible result of the PS5 path, in the PS4 layout: one interleaved begin/end
+	// pair per DB, 8 DBs on the base console, bit 63 marking a result ready. Host occlusion queries
+	// use the PS5 layout and are not used for PS4 games.
+	constexpr uint64_t ready_bit    = 1ull << 63u;
+	constexpr uint64_t counter_mask = ready_bit - 1u;
+	constexpr uint32_t Ps4Dbs       = 8;
+	auto*              results      = reinterpret_cast<volatile uint64_t*>(address);
+	const auto         value        = ready_bit | m_synthetic_occlusion_counter;
+	for (uint32_t db = 0; db < Ps4Dbs; db++) {
+		results[db * 2u] = value;
+	}
+	m_synthetic_occlusion_counter = (m_synthetic_occlusion_counter + 1u) & counter_mask;
 }
 
 void CommandProcessor::Flip(int handle, int index, int flip_mode, int64_t flip_arg) {

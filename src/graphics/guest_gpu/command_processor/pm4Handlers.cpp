@@ -923,6 +923,13 @@ KYTY_CP_OP_PARSER(CpOpEventWrite) {
 		EXIT_NOT_IMPLEMENTED(packet_size_dw != 4u);
 		event_address = buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u);
 	}
+	// PS4 (gfx7) occlusion counters: the same PIXEL_PIPE_STAT_DUMP, into a result block sized for
+	// the base PS4's depth blocks.
+	if (event_type == 0x39u && IsGfx7()) {
+		EXIT_NOT_IMPLEMENTED(event_index != 1u);
+		cp.DumpOcclusionCountersGfx7(event_address);
+		return packet_size_dw - 1u;
+	}
 
 	cp.TriggerEvent(event_type, event_index, event_address);
 
