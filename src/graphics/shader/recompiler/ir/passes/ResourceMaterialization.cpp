@@ -4,6 +4,8 @@
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/HostShaderFeatures.h"
+#include "graphics/shader/recompiler/frontend/decode/Gfx7Ops.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/shaderBindings.h"
@@ -1703,7 +1705,11 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 				return false;
 			}
 		}
-		auto&                descriptor_value = snapshot.buffers[i];
+		auto& descriptor_value = snapshot.buffers[i];
+		// A PS4 game's V# has the gfx7 layout: converted to the gfx10 one the bindings read.
+		if (Decoder::GetGuestIsa() == Decoder::GuestIsa::Gfx7) {
+			Decoder::Gfx7BufferSharpToGfx10(descriptor_value.dwords.data());
+		}
 		ShaderBufferResource descriptor;
 		if (!DecodeBufferDescriptor(descriptor_value, descriptor)) {
 			return SpecializationFail(fmt::format("buffer descriptor {} has invalid width", i));
@@ -1757,6 +1763,25 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			if (!MaterializeIndirectDescriptor(
 			        program, image.source, i, 8u, image.r128 ? 4u : 8u, observed, snapshot, snapshot.images,
 			        specialization.images, [&](DescriptorValue& value) {
+				        // Table entries are guest T#s too: a PS4 one needs the same conversion as a
+				        // directly loaded descriptor. A stale record can name an address no PS4
+				        // mapping has (above 40 bits) or reserved swizzle selectors: it reads null.
+				        if (Decoder::GetGuestIsa() == Decoder::GuestIsa::Gfx7 &&
+				            !NullImageDescriptor(value)) {
+					        Decoder::Gfx7TextureSharpToGfx10(value.dwords.data());
+					        const uint64_t address =
+					            ((static_cast<uint64_t>(value.dwords[1] & 0xffu) << 32u) |
+					             value.dwords[0])
+					            << 8u;
+					        bool reserved_swizzle = false;
+					        for (uint32_t component = 0; component < 4u; ++component) {
+						        const uint32_t selector = (value.dwords[3] >> (3u * component)) & 7u;
+						        reserved_swizzle |= selector == 2u || selector == 3u;
+					        }
+					        if (address == 0u || address >= (1ull << 40u) || reserved_swizzle) {
+						        value.dwords.fill(0u);
+					        }
+				        }
 				        // A broad heap also contains resources for other typed image operations.
 				        // A sample of a T# whose channels all select 0 reads 0 at any address.
 				        if (NullImageDescriptor(value) || !ValidImageDescriptor(value, image.r128) ||
@@ -1771,6 +1796,10 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		} else {
 			if (!evaluate(image.source, snapshot.images[i])) {
 				return false;
+			}
+			// A PS4 game's T# has the gfx7 layout: converted to the gfx10 one.
+			if (Decoder::GetGuestIsa() == Decoder::GuestIsa::Gfx7) {
+				Decoder::Gfx7TextureSharpToGfx10(snapshot.images[i].dwords.data());
 			}
 			// An image listed only by unreached blocks reads zero, not its source's descriptor.
 			if (!WalkedImageActive(program, i) ||
