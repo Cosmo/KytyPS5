@@ -5,6 +5,7 @@
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/host_gpu/frameDump.h"
 #include "graphics/host_gpu/gpuBackend.h"
+#include "graphics/presentation/videoOut.h"
 #include "libs/agc.h"
 
 #include <algorithm>
@@ -2449,5 +2450,138 @@ constinit const std::array<hw_reg_func_t, Pm4::SH_NUM> g_hw_sh_indirect_func =
     MakeShaderIndirectTable();
 constinit const std::array<hw_reg_func_t, Pm4::UC_NUM> g_hw_uc_indirect_func =
     MakeUconfigIndirectTable();
+
+// ---- PS4 (gfx7) packets, for backward compatibility ----
+
+// EVENT_WRITE_EOP: an end-of-pipe label write and interrupt, RELEASE_MEM's gfx7 form.
+KYTY_CP_OP_PARSER(CpOpEventWriteEop) {
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(KYTY_PM4_LEN(cmd_id) != 6);
+
+	const auto cache_action = (buffer[0] >> 12u) & 0x3fu;
+	auto       data_sel     = (buffer[2] >> 29u) & 0x7u;
+	const auto int_sel      = (buffer[2] >> 24u) & 0x3u;
+	// gfx7 DATA_SEL 4 is the GPU clock counter; both clocks read the reference clock here.
+	if (data_sel == 4) {
+		data_sel = 3;
+	}
+	EXIT_NOT_IMPLEMENTED(data_sel > 3);
+	// TC_WB_ACTION_ENA (bit 3) and TC_ACTION_ENA (bit 5) write the L2 back.
+	cp.ReleaseMem(
+	    data_sel, int_sel,
+	    reinterpret_cast<void*>((buffer[1] & ~0x3u) | (static_cast<uint64_t>(buffer[2] & 0xffffu) << 32u)),
+	    buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u), 0, (cache_action & 0x28u) != 0);
+
+	return 5;
+}
+
+// EVENT_WRITE_EOS: an end-of-shader write of a 32-bit value or of GDS dwords.
+KYTY_CP_OP_PARSER(CpOpEventWriteEos) {
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(KYTY_PM4_LEN(cmd_id) != 5);
+
+	const auto command = (buffer[2] >> 29u) & 0x7u;
+	auto*      address = reinterpret_cast<void*>((buffer[1] & ~0x3u) |
+	                                             (static_cast<uint64_t>(buffer[2] & 0xffffu) << 32u));
+	switch (command) {
+		case 1: cp.ReleaseMem(5, 0, address, buffer[3], 0, false); break; // GDS index and size
+		case 2: cp.ReleaseMem(1, 0, address, buffer[3], 0, false); break; // 32-bit data
+		default: EXIT("unsupported EVENT_WRITE_EOS command %" PRIu32 "\n", command);
+	}
+
+	return 4;
+}
+
+KYTY_CP_OP_PARSER(CpOpWriteConstRam) {
+	KYTY_PROFILER_FUNCTION();
+
+	const auto dw_num = KYTY_PM4_LEN(cmd_id) - 2u;
+	cp.WriteConstRam(buffer[0] & 0xffffu, buffer + 1, dw_num);
+
+	return 1 + dw_num;
+}
+
+KYTY_CP_OP_PARSER(CpOpDumpConstRam) {
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(KYTY_PM4_LEN(cmd_id) != 5);
+
+	auto* dst = reinterpret_cast<uint32_t*>((buffer[2] & ~0x3u) | (static_cast<uint64_t>(buffer[3]) << 32u));
+	cp.DumpConstRam(dst, buffer[0] & 0xffffu, buffer[1] & 0x7fffu);
+
+	return 4;
+}
+
+KYTY_CP_OP_PARSER(CpOpIncrementCeCounter) {
+	KYTY_PROFILER_FUNCTION();
+
+	cp.IncrementCeCounter();
+
+	return KYTY_PM4_LEN(cmd_id) - 1u;
+}
+
+KYTY_CP_OP_PARSER(CpOpIncrementDeCounter) {
+	KYTY_PROFILER_FUNCTION();
+
+	cp.IncrementDeCounter();
+
+	return KYTY_PM4_LEN(cmd_id) - 1u;
+}
+
+KYTY_CP_OP_PARSER(CpOpWaitOnCeCounter) {
+	KYTY_PROFILER_FUNCTION();
+
+	cp.WaitOnCeCounter();
+
+	return KYTY_PM4_LEN(cmd_id) - 1u;
+}
+
+KYTY_CP_OP_PARSER(CpOpWaitOnDeCounterDiff) {
+	KYTY_PROFILER_FUNCTION();
+
+	cp.WaitOnDeCounterDiff(buffer[0]);
+
+	return KYTY_PM4_LEN(cmd_id) - 1u;
+}
+
+// The GNM driver's flip: handle, buffer index, flip mode and the 64-bit flip argument. As the AGC
+// flip, it marks a shown buffer's label until the buffer leaves the screen.
+KYTY_CP_OP_PARSER(CpOpGnmFlip) {
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(KYTY_PM4_LEN(cmd_id) != 6);
+
+	const auto handle = static_cast<int>(buffer[0]);
+	const auto index  = static_cast<int32_t>(buffer[1]);
+	cp.WriteBackImages();
+	cp.Flip(handle, index, static_cast<int>(buffer[2]),
+	        static_cast<int64_t>(buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u)));
+	int   bus    = 0;
+	auto* labels = VideoOut::VideoOutGetBufferLabels(handle, &bus);
+	if (labels != nullptr && index >= 0 && index < 16) {
+		cp.ReleaseMem(2, 0, labels + index, 1, 0, false);
+	}
+
+	return 5;
+}
+
+// The GNM driver's wait until a buffer is no longer shown.
+KYTY_CP_OP_PARSER(CpOpGnmWaitFlipDone) {
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_NOT_IMPLEMENTED(KYTY_PM4_LEN(cmd_id) != 7);
+
+	const auto handle = static_cast<int>(buffer[0]);
+	const auto index  = static_cast<int32_t>(buffer[1]);
+	int        bus    = 0;
+	auto*      labels = VideoOut::VideoOutGetBufferLabels(handle, &bus);
+	if (labels != nullptr && index >= 0 && index < 16) {
+		cp.WaitFlipDone(labels + index);
+	}
+
+	return 6;
+}
 
 } // namespace Libs::Graphics

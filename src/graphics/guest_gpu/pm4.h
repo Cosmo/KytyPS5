@@ -69,6 +69,17 @@ constexpr uint32_t IT_GET_LOD_STATS             = 0x8E;
 constexpr uint32_t IT_WAIT_REG_MEM_64           = 0x93;
 constexpr uint32_t IT_SET_CONTEXT_REG_INDIRECT  = 0x9F;
 
+/* PS4 (gfx7) packets: the constant engine and the end-of-pipe/shader events (backward compatibility) */
+
+constexpr uint32_t IT_EVENT_WRITE_EOP         = 0x47;
+constexpr uint32_t IT_EVENT_WRITE_EOS         = 0x48;
+constexpr uint32_t IT_WRITE_CONST_RAM         = 0x81;
+constexpr uint32_t IT_DUMP_CONST_RAM          = 0x83;
+constexpr uint32_t IT_INCREMENT_CE_COUNTER    = 0x84;
+constexpr uint32_t IT_INCREMENT_DE_COUNTER    = 0x85;
+constexpr uint32_t IT_WAIT_ON_CE_COUNTER      = 0x86;
+constexpr uint32_t IT_WAIT_ON_DE_COUNTER_DIFF = 0x88;
+
 /* Custom codes. Implemented via IT_NOP */
 
 constexpr uint32_t R_ZERO          = 0x00;
@@ -76,6 +87,9 @@ constexpr uint32_t R_PUSH_MARKER   = 0x0B;
 constexpr uint32_t R_POP_MARKER    = 0x0C;
 constexpr uint32_t R_CONTEXT_STATE = 0x1A;
 constexpr uint32_t R_PSSR          = 0x1B;
+// Written by the PS4 GNM driver over the flip request and wait-flip-done slots of a command buffer.
+constexpr uint32_t R_GNM_WAIT_FLIP_DONE = 0x06;
+constexpr uint32_t R_GNM_FLIP           = 0x17;
 
 constexpr uint32_t R_NUM = 0x3F + 1;
 

@@ -33,7 +33,9 @@ public:
 	void               SendCommandSync(Common::UniqueFunction<void>&& command);
 
 	// Submitted command memory is borrowed and must remain valid until GPU execution completes.
-	void Submit(std::span<const uint32_t> commands);
+	// PS4 graphics submissions (backward compatibility) may add a constant command buffer.
+	void Submit(std::span<const uint32_t> commands,
+	            std::span<const uint32_t> constant_commands = {});
 	void SubmitCompute(uint32_t queue, std::span<const uint32_t> commands);
 	void SubmitFlipPreparation(uint64_t request_id);
 	// Insert an ordered graphics drain; only a previous suspend point can block the caller.
@@ -60,11 +62,18 @@ private:
 		Pm4Execution              execution;
 		bool                      blocked         = false;
 		uint64_t                  flip_request_id = 0;
+		// PS4 constant command buffer.
+		std::span<const uint32_t> constant_commands;
+		Pm4Execution              constant_execution;
+		bool                      started           = false;
+		bool                      command_complete  = false;
+		bool                      constant_complete = false;
 	};
 
 	void              Enqueue(Submission submission);
 	void              ProcessCommands();
 	bool              Process(Submission& submission);
+	bool              ProcessWithConstantEngine(CommandProcessor& cp, Submission& submission);
 	static void       ThreadRun(void* data);
 	CommandProcessor& GetProcessor(uint32_t queue_id);
 

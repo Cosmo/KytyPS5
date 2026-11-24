@@ -81,6 +81,14 @@ constexpr auto MakeOpcodeDispatchTable() {
 	table[Pm4::IT_SET_UCONFIG_REG_INDIRECT]  = CpOpIndirectUcRegs;
 	table[Pm4::IT_GET_LOD_STATS]             = CpOpGetLodStats;
 	table[Pm4::IT_WAIT_REG_MEM_64]           = CpOpWaitRegMem64;
+	table[Pm4::IT_EVENT_WRITE_EOP]           = CpOpEventWriteEop;
+	table[Pm4::IT_EVENT_WRITE_EOS]           = CpOpEventWriteEos;
+	table[Pm4::IT_WRITE_CONST_RAM]           = CpOpWriteConstRam;
+	table[Pm4::IT_DUMP_CONST_RAM]            = CpOpDumpConstRam;
+	table[Pm4::IT_INCREMENT_CE_COUNTER]      = CpOpIncrementCeCounter;
+	table[Pm4::IT_INCREMENT_DE_COUNTER]      = CpOpIncrementDeCounter;
+	table[Pm4::IT_WAIT_ON_CE_COUNTER]        = CpOpWaitOnCeCounter;
+	table[Pm4::IT_WAIT_ON_DE_COUNTER_DIFF]   = CpOpWaitOnDeCounterDiff;
 
 	return table;
 }
@@ -96,7 +104,9 @@ constexpr auto MakeKeepsDrawWindowTable() {
 	      Pm4::IT_NUM_INSTANCES, Pm4::IT_DRAW_INDEX_AUTO, Pm4::IT_INDIRECT_BUFFER,
 	      Pm4::IT_SET_CONTEXT_REG, Pm4::IT_SET_SH_REG, Pm4::IT_SET_UCONFIG_REG,
 	      Pm4::IT_SET_UCONFIG_REG_INDEX, Pm4::IT_SET_CONTEXT_REG_INDIRECT,
-	      Pm4::IT_SET_SH_REG_INDIRECT, Pm4::IT_SET_UCONFIG_REG_INDIRECT}) {
+	      Pm4::IT_SET_SH_REG_INDIRECT, Pm4::IT_SET_UCONFIG_REG_INDIRECT, Pm4::IT_WRITE_CONST_RAM,
+	      Pm4::IT_INCREMENT_CE_COUNTER, Pm4::IT_INCREMENT_DE_COUNTER, Pm4::IT_WAIT_ON_CE_COUNTER,
+	      Pm4::IT_WAIT_ON_DE_COUNTER_DIFF}) {
 		table[opcode] = true;
 	}
 
@@ -110,6 +120,8 @@ constexpr auto MakeCustomOpcodeDispatchTable() {
 	table[Pm4::R_POP_MARKER]    = CpOpPopMarker;
 	table[Pm4::R_CONTEXT_STATE] = CpOpContextState;
 	table[Pm4::R_PSSR]          = CpOpPssr;
+	table[Pm4::R_GNM_FLIP]           = CpOpGnmFlip;
+	table[Pm4::R_GNM_WAIT_FLIP_DONE] = CpOpGnmWaitFlipDone;
 
 	return table;
 }

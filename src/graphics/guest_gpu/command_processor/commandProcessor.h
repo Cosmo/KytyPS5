@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/gpuBackend.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -100,6 +101,17 @@ public:
 
 	void WaitForRewind(bool valid);
 
+	// PS4 constant engine (backward compatibility): a graphics submission may carry a constant
+	// command buffer, run beside the draw commands and synchronized with them by two counters.
+	void ResetConstantEngine();
+	void SetConstantEngineComplete(bool complete) { m_ce_complete = complete; }
+	void WaitOnCeCounter();
+	void WaitOnDeCounterDiff(uint32_t diff);
+	void IncrementCeCounter() { m_ce_count++; }
+	void IncrementDeCounter() { m_de_count++; }
+	void WriteConstRam(uint32_t offset, const uint32_t* src, uint32_t dw_num);
+	void DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_num);
+
 	template <typename T>
 	void WaitRegMem(uint32_t func, const T* addr, T ref, T mask, uint32_t wait_op);
 	void MemSemaphore(uint64_t* counter, bool signal, bool write);
@@ -150,6 +162,13 @@ private:
 	uint32_t       m_draws                       = 0; // Since the buffer start or CountDraw's flush
 	uint64_t       m_synthetic_occlusion_counter = 0;
 	bool           m_predicate_skip              = false;
+
+	// PS4 constant engine: 48 KB of constant RAM, allocated on first use.
+	static constexpr uint32_t   ConstRamDwords = 0x3000;
+	std::unique_ptr<uint32_t[]> m_const_ram;
+	uint32_t                    m_ce_count    = 0;
+	uint32_t                    m_de_count    = 0;
+	bool                        m_ce_complete = true;
 };
 
 } // namespace Libs::Graphics

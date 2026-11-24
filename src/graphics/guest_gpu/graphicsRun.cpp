@@ -110,14 +110,16 @@ void GuestGpu::SendCommandSync(Common::UniqueFunction<void>&& command) {
 	done.acquire();
 }
 
-void GuestGpu::Submit(std::span<const uint32_t> commands) {
-	if (commands.empty()) {
+void GuestGpu::Submit(std::span<const uint32_t> commands,
+                      std::span<const uint32_t> constant_commands) {
+	if (commands.empty() && constant_commands.empty()) {
 		return;
 	}
 	Submission submission;
-	submission.type     = SubmissionType::Commands;
-	submission.queue_id = 0;
-	submission.commands = commands;
+	submission.type              = SubmissionType::Commands;
+	submission.queue_id          = 0;
+	submission.commands          = commands;
+	submission.constant_commands = constant_commands;
 	Enqueue(std::move(submission));
 }
 
@@ -239,6 +241,43 @@ void CommandProcessor::WaitForRewind(bool valid) {
 	if (!valid) {
 		SuspendPm4();
 	}
+}
+
+void CommandProcessor::ResetConstantEngine() {
+	m_ce_count    = 0;
+	m_de_count    = 0;
+	m_ce_complete = false;
+}
+
+void CommandProcessor::WaitOnCeCounter() {
+	// The draw engine waits until the constant engine is ahead of it.
+	if (m_ce_count <= m_de_count && !m_ce_complete) {
+		SuspendPm4();
+	}
+}
+
+void CommandProcessor::WaitOnDeCounterDiff(uint32_t diff) {
+	// The constant engine waits while it is `diff` or more increments ahead of the draw engine.
+	if (m_ce_count > m_de_count && m_ce_count - m_de_count >= diff) {
+		SuspendPm4();
+	}
+}
+
+void CommandProcessor::WriteConstRam(uint32_t offset, const uint32_t* src, uint32_t dw_num) {
+	EXIT_NOT_IMPLEMENTED((offset & 0x3u) != 0 || offset / 4u + dw_num > ConstRamDwords);
+	if (m_const_ram == nullptr) {
+		m_const_ram = std::make_unique<uint32_t[]>(ConstRamDwords);
+	}
+	std::memcpy(m_const_ram.get() + offset / 4u, src, static_cast<size_t>(dw_num) * 4u);
+}
+
+void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_num) {
+	EXIT_NOT_IMPLEMENTED((offset & 0x3u) != 0 || offset / 4u + dw_num > ConstRamDwords);
+	EXIT_IF(dst == nullptr);
+	if (m_const_ram == nullptr) {
+		m_const_ram = std::make_unique<uint32_t[]>(ConstRamDwords);
+	}
+	std::memcpy(dst, m_const_ram.get() + offset / 4u, static_cast<size_t>(dw_num) * 4u);
 }
 
 bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t func) {
@@ -513,6 +552,44 @@ void GuestGpu::ThreadRun(void* data) {
 	}
 }
 
+// PS4 graphics submissions (backward compatibility) with a constant command buffer: the constant
+// and draw engines run in turns until both finish or neither can go on.
+bool GuestGpu::ProcessWithConstantEngine(CommandProcessor& cp, Submission& submission) {
+	if (!submission.started) {
+		submission.started = true;
+		cp.ResetConstantEngine();
+	}
+	bool progressed = false;
+	for (;;) {
+		bool round_progress = false;
+		if (!submission.constant_complete) {
+			submission.constant_complete =
+			    cp.Process(submission.constant_execution, submission.constant_commands) ==
+			    Pm4ProcessResult::Complete;
+			round_progress |= submission.constant_execution.MadeProgress();
+		}
+		cp.SetConstantEngineComplete(submission.constant_complete);
+		if (!submission.command_complete) {
+			submission.command_complete =
+			    submission.commands.empty() ||
+			    cp.Process(submission.execution, submission.commands) == Pm4ProcessResult::Complete;
+			round_progress |= submission.execution.MadeProgress();
+		}
+		progressed |= round_progress;
+		if ((submission.command_complete && submission.constant_complete) || !round_progress) {
+			break;
+		}
+	}
+	if (progressed) {
+		cp.BufferFlush();
+	}
+	const bool complete = submission.command_complete && submission.constant_complete;
+	if (complete) {
+		cp.SetConstantEngineComplete(true);
+	}
+	return complete;
+}
+
 bool GuestGpu::Process(Submission& submission) {
 	auto& cp = GetProcessor(submission.queue_id);
 
@@ -521,6 +598,10 @@ bool GuestGpu::Process(Submission& submission) {
 
 	switch (submission.type) {
 		case SubmissionType::Commands:
+			if (!submission.constant_commands.empty()) {
+				complete = ProcessWithConstantEngine(cp, submission);
+				break;
+			}
 			complete =
 			    cp.Process(submission.execution, submission.commands) == Pm4ProcessResult::Complete;
 			if (submission.execution.MadeProgress()) {
