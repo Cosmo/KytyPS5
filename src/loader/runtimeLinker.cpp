@@ -1336,9 +1336,26 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 	}
 #endif
 
-	// The runtime automatically loads libc; other PRXs are requested by the application.
+	// The runtime automatically loads libc; other PRXs are requested by the application. PS4
+	// executables also get the modules they import that the game ships in sce_module (Fios2,
+	// NpToolkit...): the PS4 system loads those at startup.
 	const auto libc_path = Libs::LibKernel::FileSystem::GetRealFilename("/app0/sce_module/libc.prx");
 	auto* libc = Common::File::IsFileExisting(libc_path) ? LoadProgram(libc_path) : nullptr;
+	std::vector<Program*> shipped_modules;
+	if (auto* main_program = m_programs.empty() ? nullptr : m_programs.front();
+	    main_program != nullptr && main_program->elf != nullptr && !main_program->elf->IsNextGen() &&
+	    main_program->dynamic_info != nullptr) {
+		for (const auto& module: main_program->dynamic_info->import_modules) {
+			if (module.name.empty() || module.name == "libc") {
+				continue;
+			}
+			const auto path = Libs::LibKernel::FileSystem::GetRealFilename("/app0/sce_module/" +
+			                                                               module.name + ".prx");
+			if (Common::File::IsFileExisting(path)) {
+				shipped_modules.push_back(LoadProgram(path));
+			}
+		}
+	}
 	RelocateAll();
 
 	if (!game_patch.empty()) {
@@ -1349,8 +1366,37 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 	}
 	CreateThreadTls();
 	Common::WriteFpEnv(Common::GuestFpEnv);
+	// The PS4 libc has no DT_INIT: its startup (heap, the game's malloc replacement) sits in
+	// DT_PREINIT_ARRAY, which the PS4 dynamic linker runs before anything else. PS5 modules are
+	// left as they were.
+	const auto run_preinit = [](Program* program) {
+		if (program == nullptr || program->elf == nullptr || program->elf->IsNextGen()) {
+			return;
+		}
+		const auto& info = *program->dynamic_info;
+		for (uint64_t i = 0; info.preinit_array_vaddr != 0 && i < info.preinit_array_size / 8; i++) {
+			const auto func = *reinterpret_cast<const uint64_t*>(program->base_vaddr + info.preinit_array_vaddr + i * 8);
+			if (func == 0 || func == ~uint64_t {0}) {
+				continue;
+			}
+			LOGF("--- Preinit: %s [%" PRIu64 "] = 0x%016" PRIx64 "\n", Common::PathToString(program->file_name).c_str(), i,
+			     func);
+#if !defined(__x86_64__) && !defined(_M_X64)
+			Cpu::CpuBackend::Instance()->RunModuleInit(func, 0, nullptr, nullptr);
+#else
+			reinterpret_cast<module_ini_fini_func_t>(func)(0, nullptr, nullptr);
+#endif
+		}
+	};
+	run_preinit(libc);
 	if (libc != nullptr && libc->dynamic_info->init_vaddr != 0) {
 		StartModule(libc, 0, nullptr, nullptr);
+	}
+	for (auto* module: shipped_modules) {
+		run_preinit(module);
+		if (module != nullptr && module->dynamic_info->init_vaddr != 0) {
+			StartModule(module, 0, nullptr, nullptr);
+		}
 	}
 
 	LOGF_COLOR(Log::Color::BrightYellow, "---\n--- Execute: %s\n---\n", "Main");
@@ -1424,11 +1470,14 @@ void RuntimeLinker::Resolve(const std::string& name, SymbolType type, Program* p
 	const ModuleId*  m = FindModule(*program, ids.at(2));
 	EXIT_IF(l == nullptr || m == nullptr);
 
-	auto find = [&](const SymbolResolve& key) {
+	auto find_hle = [&](const SymbolResolve& key) {
 		if (const auto* rec = m_symbols->Find(key); rec != nullptr) {
 			*out_info = *rec;
 			return true;
 		}
+		return false;
+	};
+	auto find_in_programs = [&](const SymbolResolve& key) {
 		for (auto* p: m_programs) {
 			if (const auto* rec = p->export_symbols->Find(key); rec != nullptr) {
 				*out_info = *rec;
@@ -1439,6 +1488,17 @@ void RuntimeLinker::Resolve(const std::string& name, SymbolType type, Program* p
 			}
 		}
 		return false;
+	};
+	// PS4 executables (backward compatibility) run the system modules they ship, as on a PS4:
+	// libc.prx's own startup sets up its heap and the game's malloc replacement, which the HLE
+	// libc written for PS5 games would bypass. HLE covers what no module exports. Keyed on the
+	// main executable so PS5 games keep HLE first even for PS4-built modules.
+	const auto* main_program  = m_programs.empty() ? nullptr : m_programs.front();
+	const bool  modules_first = main_program != nullptr && main_program->elf != nullptr &&
+	                           !main_program->elf->IsNextGen();
+	auto find = [&](const SymbolResolve& key) {
+		return modules_first ? (find_in_programs(key) || find_hle(key))
+		                     : (find_hle(key) || find_in_programs(key));
 	};
 
 	const SymbolResolve sr {ids.at(0), l->name, m->name, type};

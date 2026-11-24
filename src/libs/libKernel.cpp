@@ -1645,6 +1645,8 @@ int KYTY_SYSV_ABI KernelGetModuleInfoForUnwind(uint64_t addr, int flags,
 	return OK;
 }
 
+// Fills SceKernelModuleInfoEx: name, id, TLS, init/fini, unwind tables and segments. The PS4 libc
+// reads all of it (PS5 games only looked at the id).
 static int KYTY_SYSV_ABI KernelGetModuleInfoFromAddr(uint64_t addr, int n, ModuleInfo* r) {
 	PRINT_NAME();
 
@@ -1652,7 +1654,7 @@ static int KYTY_SYSV_ABI KernelGetModuleInfoFromAddr(uint64_t addr, int n, Modul
 	     "\tn = %d\n",
 	     addr, n);
 
-	EXIT_NOT_IMPLEMENTED(n != 2);
+	EXIT_NOT_IMPLEMENTED(n != 1 && n != 2);
 	EXIT_NOT_IMPLEMENTED(r == nullptr);
 
 	auto* rt = Common::Singleton<Loader::RuntimeLinker>::Instance();
@@ -1665,9 +1667,53 @@ static int KYTY_SYSV_ABI KernelGetModuleInfoFromAddr(uint64_t addr, int n, Modul
 		return -1;
 	}
 
-	r->handle = p->unique_id;
+	// Fill a full copy and hand back only what the caller's st_size covers: a smaller buffer
+	// (an older SDK's structure) must not be overrun.
+	ModuleInfo info {};
+	auto*      bytes = reinterpret_cast<uint8_t*>(&info);
+	const auto put32 = [&](size_t offset, uint32_t value) { std::memcpy(bytes + offset, &value, 4); };
+	const auto put64 = [&](size_t offset, uint64_t value) { std::memcpy(bytes + offset, &value, 8); };
 
-	LOGF("\thandle: %d\n", r->handle);
+	ModuleInfoForUnwind unwind {};
+	unwind.st_size = sizeof(unwind);
+	if (KernelGetModuleInfoForUnwind(addr, 0, &unwind) == OK) {
+		std::memcpy(bytes + 8, unwind.name, sizeof(unwind.name));
+		put64(328, unwind.eh_frame_hdr_addr);
+		put64(336, unwind.eh_frame_addr);
+		put32(348, static_cast<uint32_t>(unwind.eh_frame_size));
+	}
+	info.handle = p->unique_id;
+	put32(268, static_cast<uint32_t>(p->unique_id));
+	put64(272, p->tls.image_vaddr);
+	put32(280, static_cast<uint32_t>(p->tls.init_size));
+	put32(284, static_cast<uint32_t>(p->tls.image_size));
+	put32(288, static_cast<uint32_t>(p->tls.image_size)); // the TCB follows the TLS image
+	put32(292, 16);
+	if (p->dynamic_info != nullptr) {
+		if (p->dynamic_info->init_vaddr != 0) put64(296, p->dynamic_info->init_vaddr + p->base_vaddr);
+		if (p->dynamic_info->fini_vaddr != 0) put64(304, p->dynamic_info->fini_vaddr + p->base_vaddr);
+	}
+	const auto* ehdr = p->elf != nullptr ? p->elf->GetEhdr() : nullptr;
+	const auto* phdr = p->elf != nullptr ? p->elf->GetPhdr() : nullptr;
+	uint32_t    segments = 0;
+	for (int i = 0; ehdr != nullptr && phdr != nullptr && i < ehdr->e_phnum && segments < 4; i++) {
+		if (phdr[i].p_type != Loader::PT_LOAD || phdr[i].p_memsz == 0) {
+			continue;
+		}
+		const size_t entry = 352 + segments * 16;
+		put64(entry, p->base_vaddr + phdr[i].p_vaddr);
+		put32(entry + 8, static_cast<uint32_t>(phdr[i].p_memsz));
+		put32(entry + 12, phdr[i].p_flags & 7u);
+		segments++;
+	}
+	put32(416, segments);
+
+	const uint64_t size = r->size >= 8 + sizeof(info.info) + sizeof(info.handle) && r->size < sizeof(ModuleInfo)
+	                          ? r->size
+	                          : sizeof(ModuleInfo);
+	std::memcpy(reinterpret_cast<uint8_t*>(r) + 8, bytes + 8, size - 8);
+
+	LOGF("\tst_size: %" PRIu64 ", handle: %d\n", r->size, r->handle);
 
 	return 0;
 }
@@ -1931,6 +1977,74 @@ namespace Posix {
 
 LIB_NAME("Posix", "libkernel");
 
+// The PS4 libc masks signals around its own locks. Guest signals are never delivered
+// asynchronously here, so there is no mask to keep; report an empty one.
+int KYTY_SYSV_ABI sigprocmask(int how, const void* set, uint64_t* old_set) {
+	PRINT_NAME();
+	(void)how;
+	(void)set;
+	if (old_set != nullptr) {
+		old_set[0] = old_set[1] = 0;
+	}
+	return 0;
+}
+
+int KYTY_SYSV_ABI sigfillset(uint64_t* set) {
+	PRINT_NAME();
+	if (set == nullptr) {
+		*GetErrorAddr() = POSIX_EINVAL;
+		return -1;
+	}
+	set[0] = set[1] = ~uint64_t {0};
+	return 0;
+}
+
+// POSIX mmap, which the PS4 libc uses for its heap: anonymous and stack mappings are flexible
+// memory, MAP_VOID reserves address space. File mappings are not supported yet.
+void* KYTY_SYSV_ABI mmap(void* addr, size_t len, int prot, int flags, int fd, int64_t offset) {
+	PRINT_NAME();
+	constexpr int MapSharing = 0x0003; // MAP_SHARED | MAP_PRIVATE
+	constexpr int MapFixed   = 0x10;
+	constexpr int MapVoid    = 0x100;
+	constexpr int MapStack   = 0x400;
+	constexpr int MapAnon    = 0x1000;
+	auto* const   failed     = reinterpret_cast<void*>(-1);
+
+	LOGF("\t addr = %p, len = 0x%" PRIx64 ", prot = 0x%x, flags = 0x%x, fd = %d, offset = 0x%" PRIx64 "\n",
+	     addr, static_cast<uint64_t>(len), prot, flags, fd, static_cast<uint64_t>(offset));
+	if (len == 0) {
+		*GetErrorAddr() = POSIX_EINVAL;
+		return failed;
+	}
+	const size_t aligned = (len + 0x3fffu) & ~size_t {0x3fff};
+	void*        out     = addr;
+	int          result  = OK;
+	if ((flags & MapVoid) != 0) {
+		result = LibKernel::Memory::KernelReserveVirtualRange(&out, aligned, flags & MapFixed, 0);
+	} else if ((flags & (MapAnon | MapStack)) != 0) {
+		result = LibKernel::Memory::KernelMapFlexibleMemory(&out, aligned, prot,
+		                                                    flags & ~(MapSharing | MapAnon | MapStack));
+	} else {
+		LOGF("\t file mappings are not supported (fd = %d)\n", fd);
+		*GetErrorAddr() = POSIX_ENODEV;
+		return failed;
+	}
+	if (result != OK) {
+		*GetErrorAddr() = LibKernel::KernelToPosix(result);
+		return failed;
+	}
+	return out;
+}
+
+// Guest memory is ordinary host memory and file mappings are written through: nothing to flush.
+int KYTY_SYSV_ABI msync(void* addr, size_t len, int flags) {
+	PRINT_NAME();
+	(void)addr;
+	(void)len;
+	(void)flags;
+	return 0;
+}
+
 int KYTY_SYSV_ABI getpagesize() {
 	PRINT_NAME();
 
@@ -2062,20 +2176,6 @@ int KYTY_SYSV_ABI fsync(int d) {
 	PRINT_NAME();
 
 	return POSIX_CALL(LibKernel::FileSystem::KernelFsync(d));
-}
-
-void* KYTY_SYSV_ABI mmap(void* addr, size_t len, int prot, int flags, int fd, int64_t offset) {
-	PRINT_NAME();
-
-	constexpr int GUEST_MAP_SHARING = 0x0003; // MAP_SHARED | MAP_PRIVATE
-	constexpr int GUEST_MAP_ANON    = 0x1000;
-
-	// Anonymous memory is flexible memory; the length rounds up to whole pages.
-	EXIT_NOT_IMPLEMENTED((flags & GUEST_MAP_ANON) == 0 || fd != -1 || offset != 0);
-	const int result = POSIX_CALL(LibKernel::Memory::KernelMapFlexibleMemory(
-	    &addr, (len + 0x3fff) & ~size_t {0x3fff}, prot,
-	    flags & ~(GUEST_MAP_SHARING | GUEST_MAP_ANON)));
-	return result == 0 ? addr : reinterpret_cast<void*>(-1);
 }
 
 int KYTY_SYSV_ABI socket(int family, int type, int protocol) {
@@ -2253,6 +2353,9 @@ int KYTY_SYSV_ABI UmtxOp(volatile void* address, int operation, uint64_t value,
 }
 
 LIB_DEFINE(InitLibKernel_1_Posix) {
+	LIB_FUNC("aPcyptbOiZs", sigprocmask);
+	LIB_FUNC("tZY4+SZNFhA", msync);
+	LIB_FUNC("VkTAsrZDcJ0", sigfillset);
 	LIB_FUNC("k+AXqu2-eBc", getpagesize);
 	LIB_FUNC("lLMT9vJAck0", clock_gettime);
 	LIB_FUNC("smIj7eqzZE8", clock_getres);
@@ -3469,6 +3572,9 @@ LIB_DEFINE(InitLibKernel_1_Pthread) {
 
 LIB_DEFINE(InitLibKernel_1) {
 	LIB_FUNC("04AjkP0jO9U", Posix::UmtxOp);
+	LIB_FUNC("aPcyptbOiZs", Posix::sigprocmask);
+	LIB_FUNC("tZY4+SZNFhA", Posix::msync);
+	LIB_FUNC("VkTAsrZDcJ0", Posix::sigfillset);
 	InitLibKernel_1_FS(s);
 	InitLibKernel_1_Mem(s);
 	InitLibKernel_1_Equeue(s);

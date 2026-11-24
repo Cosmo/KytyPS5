@@ -1306,7 +1306,8 @@ struct Ngs2VoiceInternal {
 					state = Ngs2VoicePlayState::Playing;
 				}
 				break;
-			default: EXIT("unknown event_id: 0x%08" PRIx32 "\n", id);
+			// PS4 games send events (such as 0) that change nothing here.
+			default: LOGF("ignored voice event 0x%08" PRIx32 "\n", id); break;
 		}
 	}
 };
@@ -1478,6 +1479,26 @@ int KYTY_SYSV_ABI Ngs2SystemResetOption(Ngs2SystemOption* option) {
 	return OK;
 }
 
+// The first SDK's system option (PS4 games): a 16-byte name, no job scheduler options, flags and
+// grain/rate fields right after. Converted to the layout used here; PS5 options pass through.
+static const Ngs2SystemOption* Ngs2NativeSystemOption(const Ngs2SystemOption* option, Ngs2SystemOption* out) {
+	constexpr size_t Ps4FieldsEnd = 40;
+	if (option == nullptr || option->size >= sizeof(Ngs2SystemOption) || option->size < Ps4FieldsEnd) {
+		return option;
+	}
+	const auto* raw = reinterpret_cast<const uint8_t*>(option);
+	*out            = {};
+	out->size       = sizeof(Ngs2SystemOption);
+	std::memcpy(out->name, raw + 8, 16);
+	uint32_t fields[4] = {};
+	std::memcpy(fields, raw + 24, sizeof(fields));
+	out->flags             = fields[0];
+	out->max_grain_samples = fields[1];
+	out->num_grain_samples = fields[2];
+	out->sample_rate       = fields[3];
+	return out;
+}
+
 static Ngs2Internal* Ngs2CreateSystemInternal(const Ngs2SystemOption*      option,
                                               const Ngs2ContextBufferInfo* buffer_info) {
 	auto* ngs = new (buffer_info->host_buffer) Ngs2Internal;
@@ -1514,6 +1535,8 @@ int KYTY_SYSV_ABI Ngs2SystemQueryBufferSize(const Ngs2SystemOption* option,
 		option = &default_option;
 		LOGF("\t option            = nullptr, using reset defaults\n");
 	}
+	Ngs2SystemOption native_option {};
+	option = Ngs2NativeSystemOption(option, &native_option);
 
 	EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2SystemOption));
 
@@ -1537,6 +1560,8 @@ int KYTY_SYSV_ABI Ngs2SystemCreate(const Ngs2SystemOption*      option,
 		option = &default_option;
 		LOGF("\t option            = nullptr, using reset defaults\n");
 	}
+	Ngs2SystemOption native_option {};
+	option = Ngs2NativeSystemOption(option, &native_option);
 
 	EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2SystemOption));
 
@@ -1651,6 +1676,31 @@ static int Ngs2CheckRackOption(uint32_t rack_id, const Ngs2RackOption& option) {
 	                                                  : OK;
 }
 
+// PS4 games (backward compatibility) pass the first SDK's rack option: a 16-byte name, no voice or
+// output channel counts and 128 bytes in all, followed by the rack's own fields. Converts it to the
+// layout used here; PS5 options are larger and pass through untouched.
+static const Ngs2RackOption* Ngs2NativeRackOption(const Ngs2RackOption* option, Ngs2RackOptionUnion* out) {
+	constexpr size_t Ps4CommonSize = 128;
+	if (option == nullptr || option->size >= sizeof(Ngs2RackOption) || option->size < Ps4CommonSize) {
+		return option;
+	}
+	const auto* raw    = reinterpret_cast<const uint8_t*>(option);
+	auto*       common = &out->common;
+	std::memcpy(common->name, raw + 8, 16);
+	uint32_t fields[6] = {};
+	std::memcpy(fields, raw + 24, sizeof(fields));
+	common->flags                  = fields[0];
+	common->max_grain_samples      = fields[1];
+	common->max_voices             = fields[2];
+	common->max_input_delay_blocks = fields[3];
+	common->max_matrices           = fields[4];
+	common->max_ports              = fields[5];
+	const size_t tail = std::min(option->size - Ps4CommonSize, sizeof(*out) - sizeof(Ngs2RackOption));
+	std::memcpy(reinterpret_cast<uint8_t*>(out) + sizeof(Ngs2RackOption), raw + Ps4CommonSize, tail);
+	common->size = sizeof(Ngs2RackOption) + tail;
+	return common;
+}
+
 int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption* option,
                                           Ngs2ContextBufferInfo* buffer_info) {
 	PRINT_NAME();
@@ -1663,6 +1713,8 @@ int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption
 		option = &default_option.common;
 		LOGF("\t option     = nullptr, using reset defaults for rack_id 0x%" PRIx32 "\n", rack_id);
 	}
+	Ngs2RackOptionUnion native_option {};
+	option = Ngs2NativeRackOption(option, &native_option);
 
 	LOGF("\t rack_id    = 0x%" PRIx32 "\n"
 	     "\t max_voices = %u\n",
@@ -1694,6 +1746,8 @@ int KYTY_SYSV_ABI Ngs2SystemCreateWithAllocator(const Ngs2SystemOption*    optio
 		option = &default_option;
 		LOGF("\t option            = nullptr, using reset defaults\n");
 	}
+	Ngs2SystemOption native_option {};
+	option = Ngs2NativeSystemOption(option, &native_option);
 
 	EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2SystemOption));
 
@@ -1898,6 +1952,8 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id,
 		     "\n",
 		     rack_id);
 	}
+	Ngs2RackOptionUnion native_option {};
+	option = Ngs2NativeRackOption(option, &native_option);
 
 	EXIT_NOT_IMPLEMENTED(option->size < sizeof(Ngs2RackOption));
 	const auto result = Ngs2CheckRackOption(rack_id, *option);
@@ -2023,6 +2079,8 @@ int KYTY_SYSV_ABI Ngs2RackCreateWithAllocator(uintptr_t system_handle, uint32_t 
 		     "\n",
 		     rack_id);
 	}
+	Ngs2RackOptionUnion native_option {};
+	option = Ngs2NativeRackOption(option, &native_option);
 
 	EXIT_NOT_IMPLEMENTED(option->size < sizeof(Ngs2RackOption));
 
