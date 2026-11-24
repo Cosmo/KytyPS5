@@ -900,6 +900,12 @@ struct Program {
 };
 
 // Code spans are trusted to contain complete instructions, valid branch targets, and 32-bit PCs.
+// The shader ISA of the running game: gfx10 for PS5 games, gfx7 for PS4 ones (backward
+// compatibility). Set once, before the first shader is decoded.
+enum class GuestIsa : uint8_t { Gfx10, Gfx7 };
+void                   SetGuestIsa(GuestIsa isa);
+[[nodiscard]] GuestIsa GetGuestIsa();
+
 Family GetInstructionFamily(uint32_t word);
 // The output object must be freshly initialized.
 void DecodeInstruction(std::span<const uint32_t> code, uint32_t word_index, Instruction& inst);

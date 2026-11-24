@@ -2,11 +2,14 @@
 
 #include "common/assert.h"
 #include "graphics/shader/recompiler/frontend/decode/ExportOps.h"
+#include "graphics/shader/recompiler/frontend/decode/Gfx7Ops.h"
 #include "graphics/shader/recompiler/frontend/decode/ImageOps.h"
 #include "graphics/shader/recompiler/frontend/decode/MemoryOps.h"
 #include "graphics/shader/recompiler/frontend/decode/ScalarAluOps.h"
 #include "graphics/shader/recompiler/frontend/decode/VectorAluOps.h"
 
+#include <atomic>
+#include <cstdio>
 #include <algorithm>
 #include <bit>
 #include <fmt/format.h>
@@ -340,7 +343,22 @@ Family GetInstructionFamily(uint32_t word) {
 	}
 }
 
+namespace {
+std::atomic<GuestIsa> g_guest_isa {GuestIsa::Gfx10};
+} // namespace
+
+void SetGuestIsa(GuestIsa isa) {
+	g_guest_isa.store(isa, std::memory_order_relaxed);
+}
+
+GuestIsa GetGuestIsa() {
+	return g_guest_isa.load(std::memory_order_relaxed);
+}
+
 void DecodeInstruction(std::span<const uint32_t> code, uint32_t word_index, Instruction& inst) {
+	if (GetGuestIsa() == GuestIsa::Gfx7 && DecodeGfx7Instruction(code, word_index, inst)) {
+		return;
+	}
 	const uint32_t pc = word_index * sizeof(uint32_t);
 	switch (GetInstructionFamily(code[word_index])) {
 		case Family::SOP1: DecodeSop1(pc, code, word_index, inst); return;

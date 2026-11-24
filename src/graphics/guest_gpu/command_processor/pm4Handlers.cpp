@@ -2307,6 +2307,36 @@ static constexpr auto MakeShaderIndirectTable() {
 		cp.GetShCtx().SetEsShaderBase(base);
 	};
 
+	// The gfx7 hardware vertex shader (PS4 games).
+	table[Pm4::SPI_SHADER_PGM_LO_VS] = [](KYTY_HW_REG_ARGS) {
+		auto base = cp.GetShCtx().GetVs().vs_regs.data_addr;
+		base &= 0xFFFFFF00000000FFull;
+		base |= static_cast<uint64_t>(value) << 8u;
+		cp.GetShCtx().SetVsShaderBase(base);
+	};
+
+	table[Pm4::SPI_SHADER_PGM_HI_VS] = [](KYTY_HW_REG_ARGS) {
+		auto base = cp.GetShCtx().GetVs().vs_regs.data_addr;
+		base &= 0xFFFF00FFFFFFFFFFull;
+		base |= (static_cast<uint64_t>(value) & 0xffu) << 40u;
+		cp.GetShCtx().SetVsShaderBase(base);
+	};
+
+	table[Pm4::SPI_SHADER_PGM_RSRC1_VS] = [](KYTY_HW_REG_ARGS) {
+		cp.GetShCtx().SetVsShaderResource1(value);
+	};
+
+	table[Pm4::SPI_SHADER_PGM_RSRC2_VS] = [](KYTY_HW_REG_ARGS) {
+		cp.GetShCtx().SetVsShaderResource2(value);
+	};
+
+	for (auto offset = Pm4::SPI_SHADER_USER_DATA_VS_0; offset <= Pm4::SPI_SHADER_USER_DATA_VS_15;
+	     offset++) {
+		table[offset] = [](KYTY_HW_REG_ARGS) {
+			cp.GetShCtx().SetVsUserSgpr(cmd_offset - Pm4::SPI_SHADER_USER_DATA_VS_0, value);
+		};
+	}
+
 	table[Pm4::SPI_SHADER_PGM_LO_GS] = [](KYTY_HW_REG_ARGS) {
 		auto base = cp.GetShCtx().GetVs().gs_regs.data_addr;
 		base &= 0xFFFFFF00000000FFull;

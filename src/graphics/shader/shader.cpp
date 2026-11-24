@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstdio>
 #include <cstring>
@@ -91,6 +92,36 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	    ShaderReadVertexMetadata(data, HW::UserSgprInfo::SGPRS_MAX, mapped.vertex);
 	std::scoped_lock lock(g_shader_map_mutex);
 	(*g_shader_map)[addr] = {mapped, hash};
+}
+
+uint32_t Gfx7ShaderCodeWords(uint64_t addr) {
+	if (addr == 0 || (addr & 3u) != 0) {
+		return 0;
+	}
+	// The scan stays inside the mapping that holds the shader.
+	LibKernel::Memory::VirtualQueryInfo info {};
+	if (LibKernel::Memory::KernelVirtualQuery(reinterpret_cast<const void*>(addr), 0, &info,
+	                                          sizeof(info)) != OK ||
+	    info.end <= addr) {
+		return 0;
+	}
+	constexpr uint64_t         Limit = 256u * 1024u;
+	const uint64_t             end   = std::min<uint64_t>(info.end, addr + Limit);
+	std::array<uint32_t, 1024> block {};
+	for (uint64_t offset = 0; addr + offset + 8u <= end;) {
+		const auto bytes = std::min<uint64_t>(sizeof(block), end - (addr + offset)) & ~uint64_t {3};
+		LibKernel::Memory::ReadGuestMemory(addr + offset, block.data(), bytes);
+		const auto words = static_cast<size_t>(bytes / sizeof(uint32_t));
+		for (size_t i = 0; i + 1u < words; i++) {
+			// "OrbShdr": 'O' 'r' 'b' 'S', then 'h' 'd' 'r'.
+			if (block[i] == 0x5362724fu && (block[i + 1u] & 0x00ffffffu) == 0x00726468u) {
+				return static_cast<uint32_t>(offset / sizeof(uint32_t) + i);
+			}
+		}
+		// The next block starts at the last word, so a footer across blocks is found.
+		offset += (words - 1u) * sizeof(uint32_t);
+	}
+	return 0;
 }
 
 static ShaderMapEntry ShaderGetMappedData(uint64_t addr, const char* label) {

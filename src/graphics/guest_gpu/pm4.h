@@ -690,6 +690,16 @@ constexpr uint32_t SPI_SHADER_PGM_RSRC2_PS_SHARED_VGPR_CNT_SHIFT        = 28;
 constexpr uint32_t SPI_SHADER_PGM_RSRC2_PS_SHARED_VGPR_CNT_MASK         = 0xF;
 
 constexpr uint32_t SPI_SHADER_USER_DATA_PS_0  = 0xC;
+
+// The gfx7 hardware vertex shader (PS4 backward compatibility).
+constexpr uint32_t SPI_SHADER_PGM_LO_VS       = 0x48;
+constexpr uint32_t SPI_SHADER_PGM_HI_VS       = 0x49;
+constexpr uint32_t SPI_SHADER_PGM_RSRC1_VS    = 0x4A;
+constexpr uint32_t SPI_SHADER_PGM_RSRC2_VS    = 0x4B;
+constexpr uint32_t SPI_SHADER_USER_DATA_VS_0  = 0x4C;
+constexpr uint32_t SPI_SHADER_USER_DATA_VS_15 = 0x5B;
+constexpr uint32_t SPI_SHADER_USER_DATA_PS_15 = 0x1B;
+constexpr uint32_t SPI_SHADER_USER_DATA_PS_31 = 0x2B;
 constexpr uint32_t SPI_SHADER_USER_ACCUM_PS_0 = 0x32;
 
 constexpr uint32_t SPI_SHADER_PACE_ID_GS = 0x80;

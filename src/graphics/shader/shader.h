@@ -352,6 +352,9 @@ struct ShaderMappedData {
 
 void ShaderInit();
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
+// PS4 (gfx7) shaders come without AGC metadata: their code ends at the "OrbShdr" footer Gnm puts
+// after it. 0 when no footer is found in the first 256 KiB.
+uint32_t Gfx7ShaderCodeWords(uint64_t addr);
 uint32_t ShaderPixelExportTarget(uint32_t shader_mask, uint32_t export_index);
 
 void     ShaderDbgDumpInputInfo(const ShaderVertexInputInfo& info);

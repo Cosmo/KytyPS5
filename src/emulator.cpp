@@ -13,6 +13,7 @@
 #include "common/systemInfo.h"
 #include "common/threads.h"
 #include "graphics/presentation/systemOverlay.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/presentation/window.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
@@ -121,6 +122,10 @@ static void LoadElf(const std::filesystem::path& elf, bool dbg_print_reloc = fal
 
 	auto* program = rt->LoadProgram(
 	    Libs::LibKernel::FileSystem::GetRealFilename(Common::PathToGenericString(elf)));
+	if (rt->MainProgramIsPs4()) {
+		Libs::Graphics::ShaderRecompiler::Decoder::SetGuestIsa(
+		    Libs::Graphics::ShaderRecompiler::Decoder::GuestIsa::Gfx7);
+	}
 
 	if (dbg_print_reloc) {
 		program->dbg_print_reloc = true;
