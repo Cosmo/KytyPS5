@@ -107,6 +107,9 @@ struct Program {
 	uint64_t                     base_size_aligned = 0;
 	uint64_t                     mapped_size       = 0;
 	uint64_t                     flexible_size     = 0;
+	// Start of the mapping. Equal to base_vaddr, except for executables at a fixed address,
+	// whose base_vaddr is 0 because their headers hold absolute addresses.
+	uint64_t                     map_vaddr         = 0;
 	uint64_t instruction_trampoline_size = 0;
 	std::unique_ptr<SymbolDatabase> export_symbols;
 	std::unique_ptr<SymbolDatabase> import_symbols;

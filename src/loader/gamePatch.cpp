@@ -101,7 +101,7 @@ bool LoadPlan(const std::filesystem::path& path, Plan* plan, std::string* error)
 }
 
 bool ValidateGame(const Plan& plan, const Program* main_program, std::string* error) {
-	if (main_program == nullptr || main_program->base_vaddr == 0) {
+	if (main_program == nullptr || main_program->map_vaddr == 0) {
 		return Fail(error, "main executable is not loaded");
 	}
 	std::string title_id;

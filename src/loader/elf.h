@@ -45,6 +45,7 @@ constexpr int EV_CURRENT = 1;
 
 constexpr char ELFOSABI_FREEBSD = 9; // FreeBSD operating system
 
+constexpr Elf64_Half ET_SCE_EXEC = 0xfe00; // Executable at a fixed address (early PS4 SDKs)
 constexpr Elf64_Half ET_DYNEXEC = 0xfe10; // Executable file
 constexpr Elf64_Half ET_DYNAMIC = 0xfe18; // Shared
 
@@ -263,6 +264,8 @@ public:
 	[[nodiscard]] bool IsValid() const;
 	[[nodiscard]] bool IsShared() const;
 	[[nodiscard]] bool IsNextGen() const;
+	// PS4 executables from early SDKs (ET_SCE_EXEC) load at the addresses in their headers.
+	bool IsFixedAddress() const;
 
 	void LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size);
 

@@ -1452,7 +1452,7 @@ void RuntimeLinker::Resolve(const std::string& name, SymbolType type, Program* p
 
 uint64_t RuntimeLinker::ReadFromElf(Program* program, uint64_t vaddr) {
 	EXIT_IF(program == nullptr);
-	EXIT_IF(program->base_vaddr == 0 || program->base_size == 0);
+	EXIT_IF(program->map_vaddr == 0 || program->base_size == 0);
 	EXIT_IF(program->elf == nullptr);
 
 	uint64_t ret = 0;
@@ -1646,8 +1646,8 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 
 	bool is_shared   = program->elf->IsShared();
 	bool is_next_gen = program->elf->IsNextGen();
-
-	EXIT_NOT_IMPLEMENTED(!is_shared && !is_next_gen);
+	// PS4 executables (backward compatibility) are not next-gen; early SDKs also fix their address.
+	const bool is_fixed = program->elf->IsFixedAddress();
 
 	const auto* ehdr = program->elf->GetEhdr();
 	const auto* phdr = program->elf->GetPhdr();
@@ -1676,10 +1676,28 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		program->mapped_size += INSTRUCTION_TRAMPOLINE_SIZE;
 	}
 
-	program->base_vaddr = Libs::LibKernel::Memory::AllocateProgramMemory(
-	    g_desired_base_addr, program->mapped_size, Common::VirtualMemory::Mode::ExecuteReadWrite,
-	    Common::PathToString(program->file_name.filename()).c_str());
-	EXIT_IF(program->base_vaddr == 0);
+	if (is_fixed) {
+		// Map from the first loaded segment; addresses in the headers are absolute.
+		uint64_t first = UINT64_MAX;
+		for (Elf64_Half i = 0; i < ehdr->e_phnum; i++) {
+			if (phdr[i].p_memsz != 0 && (phdr[i].p_type == PT_LOAD || phdr[i].p_type == PT_OS_RELRO)) {
+				first = std::min(first, phdr[i].p_vaddr & ~(GUEST_PAGE_SIZE - 1));
+			}
+		}
+		EXIT_IF(first == UINT64_MAX || first >= program->base_size_aligned);
+		program->mapped_size -= first;
+		program->map_vaddr = Libs::LibKernel::Memory::AllocateProgramMemoryAt(
+		    first, program->mapped_size, Common::VirtualMemory::Mode::ExecuteReadWrite,
+		    Common::PathToString(program->file_name.filename()).c_str());
+		EXIT_IF(program->map_vaddr != first);
+		program->base_vaddr = 0;
+	} else {
+		program->base_vaddr = Libs::LibKernel::Memory::AllocateProgramMemory(
+		    g_desired_base_addr, program->mapped_size, Common::VirtualMemory::Mode::ExecuteReadWrite,
+		    Common::PathToString(program->file_name.filename()).c_str());
+		EXIT_IF(program->base_vaddr == 0);
+		program->map_vaddr = program->base_vaddr;
+	}
 	program->flexible_size = CalcFlexibleMemorySize(phdr, ehdr->e_phnum);
 	Libs::LibKernel::Memory::ChargeFlexibleMemory(program->flexible_size);
 
@@ -1687,11 +1705,13 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		const auto trampoline_addr           = program->base_vaddr + program->base_size_aligned;
 		program->instruction_trampoline_size = INSTRUCTION_TRAMPOLINE_SIZE;
 		RegisterGuestInstructionPatchModule(
-		    reinterpret_cast<void*>(program->base_vaddr), program->base_size_aligned,
+		    reinterpret_cast<void*>(program->map_vaddr), program->base_size_aligned - (program->map_vaddr - program->base_vaddr),
 		    reinterpret_cast<void*>(trampoline_addr), program->instruction_trampoline_size);
 	}
 
-	g_desired_base_addr += CODE_BASE_INCR * (1 + program->mapped_size / CODE_BASE_INCR);
+	if (!is_fixed) {
+		g_desired_base_addr += CODE_BASE_INCR * (1 + program->mapped_size / CODE_BASE_INCR);
+	}
 
 	EXIT_IF(program->base_size_aligned < program->base_size);
 	LOGF("base_vaddr             = 0x%016" PRIx64 "\n"
@@ -1879,13 +1899,13 @@ void RuntimeLinker::DeleteProgram(Program* p) {
 		}
 	}
 
-	if (program->base_vaddr != 0 || program->mapped_size != 0) {
-		EXIT_IF(program->base_vaddr == 0 || program->mapped_size == 0);
+	if (program->map_vaddr != 0 || program->mapped_size != 0) {
+		EXIT_IF(program->map_vaddr == 0 || program->mapped_size == 0);
 		if (program->instruction_trampoline_size != 0) {
-			UnregisterGuestInstructionPatchModule(reinterpret_cast<void*>(program->base_vaddr));
+			UnregisterGuestInstructionPatchModule(reinterpret_cast<void*>(program->map_vaddr));
 		}
 		EXIT_IF(
-		    !Libs::LibKernel::Memory::FreeGuestMemory(program->base_vaddr, program->mapped_size));
+		    !Libs::LibKernel::Memory::FreeGuestMemory(program->map_vaddr, program->mapped_size));
 		Libs::LibKernel::Memory::ReleaseFlexibleMemory(program->flexible_size);
 	}
 }

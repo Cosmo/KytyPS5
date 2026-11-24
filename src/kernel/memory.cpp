@@ -3213,6 +3213,11 @@ static std::string GuestPrivateMemorySummary() {
 	return g_virtual_ranges != nullptr ? g_virtual_ranges->SummarizePrivate() : std::string {};
 }
 
+uint64_t AllocateProgramMemoryAt(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode,
+                                 const char* name) {
+	return AllocateGuestRuntimeMemory(vaddr, size, mode, name, VirtualRangeType::Code, true);
+}
+
 uint64_t AllocateProgramMemory(uint64_t search_addr, uint64_t size, VirtualMemory::Mode mode,
                                const char* name) {
 	return AllocateGuestRuntimeMemory(search_addr, size, mode, name, VirtualRangeType::Code, false);
