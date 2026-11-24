@@ -795,9 +795,7 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		}
 		// Equal pitch does not imply equal mip placement: a changed extent can move
 		// a level into or out of the mip tail. These are separate guest layouts.
-		const bool gfx7_layout_changed = requested.gfx7_micro_pitch != cached.info.gfx7_micro_pitch ||
-		                                 requested.gfx7_linear != cached.info.gfx7_linear ||
-		                                 requested.gfx7_micro_thick != cached.info.gfx7_micro_thick;
+		const bool gfx7_layout_changed = !(requested.gfx7 == cached.info.gfx7);
 		if (requested.tile_mode != cached.info.tile_mode || gfx7_layout_changed ||
 		    (requested.resources == cached.info.resources &&
 		     !std::equal(requested.mip_layout.begin(),
@@ -848,7 +846,7 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		}
 		// PS4 (backward compatibility): a texture in a gfx7 layout of another size at this address
 		// is new data the game loaded where an old texture was: the old image is simply stale.
-		if (requested.gfx7_micro_pitch != 0 && !cached.IsGpuModified() &&
+		if (requested.gfx7.Valid() && !cached.IsGpuModified() &&
 		    (requested.extent != cached.info.extent || requested.data.size != cached.info.data.size)) {
 			FreeImage(cached_id);
 			return {merged_id};
@@ -917,7 +915,7 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId source_id) {
 bool TextureCache::CanDownload(const Image& image) const {
 	const auto& info = image.info;
 	// PS4 (backward compatibility): a gfx7 layout the tiler cannot write back.
-	if (info.gfx7_micro_pitch != 0) {
+	if (info.gfx7.Valid()) {
 		return false;
 	}
 	// Low quality: a reduced host image has no finest levels, so it cannot give the guest's memory its contents back.
@@ -944,116 +942,31 @@ bool TextureCache::CanDownload(const Image& image) const {
 	       info.LinearSize() != 0;
 }
 
-// PS4 (backward compatibility): decodes a texture in a gfx7 layout on the CPU, from guest memory.
-// 1D-thin: 8x8 micro tiles in raster order, blocks inside a tile in the thin order (x0, y0, x1, y1,
-// x2, y2), each level after the previous one. Also linear rows of the T#'s pitch, and 1D-thick
-// volumes. Ported from CapyPS5.
-void TextureCache::UploadGfx7MicroTiled(Image& image) {
-	const auto&    info  = image.info;
-	const uint32_t bytes = info.bytes_per_block;
-	const uint32_t tw    = info.tiling.texel_width;
-	const uint32_t th    = info.tiling.texel_height;
-	std::vector<uint8_t> guest(info.data.size);
-	LibKernel::Memory::ReadGuestMemory(info.data.address, guest.data(), guest.size());
-	uint64_t linear_size = 0;
-	for (uint32_t level = 0; level < info.resources.levels; level++) {
-		const auto active = info.MipExtent(level);
-		linear_size += uint64_t {(active.width + tw - 1u) / tw} * ((active.height + th - 1u) / th) *
-		               bytes * active.depth;
-	}
-	auto staging = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::Upload, 0,
-	                                        vk::BufferUsageFlagBits::eTransferSrc, linear_size);
-	auto*                            out        = staging->Mapped().data();
-	uint64_t                         out_offset = 0;
-	uint64_t                         in_offset  = 0;
+// PS4 (backward compatibility): a texture in a PS4 tile mode, detiled on the GPU from the guest data
+// with shadPS4's tiling shaders (a linear one is copied as it is); each level then sits at its guest
+// offset with its padded pitch and height, as shadPS4's TextureCache::RefreshImage copies it.
+void TextureCache::UploadGfx7(Image& image, Buffer& source, uint64_t source_offset) {
+	const auto& info   = image.info;
+	const auto& layout = info.gfx7;
+	const auto  linear = layout.Tiled() ? m_tiler.DetileGfx7(source.Handle(), source_offset, info)
+	                                    : TileManager::Result {source.Handle(), source_offset, layout.guest_size};
 	std::vector<vk::BufferImageCopy> copies;
 	for (uint32_t level = 0; level < info.resources.levels; level++) {
-		const auto active    = info.MipExtent(level);
-		const auto layout    = info.Gfx7MicroLevelLayout(level);
-		const auto columns   = (active.width + tw - 1u) / tw;
-		const auto rows      = (active.height + th - 1u) / th;
-		const auto per_row   = layout.pitch / 8u;
-		const auto tile_size = uint64_t {64u} * bytes;
-		if (info.gfx7_micro_thick) {
-			// 8x8x4 micro tiles; the bit order inside one follows the texel size (AMD addrlib
-			// ComputePixelIndexWithinMicroTile).
-			const auto          thick_tile = tile_size * 4u;
-			vk::BufferImageCopy copy {};
-			copy.bufferOffset      = out_offset;
-			copy.bufferRowLength   = columns * tw;
-			copy.bufferImageHeight = rows * th;
-			copy.imageSubresource  = {vk::ImageAspectFlagBits::eColor, level, 0, 1};
-			copy.imageExtent       = vk::Extent3D {active.width, active.height, active.depth};
-			copies.push_back(copy);
-			for (uint32_t z = 0; z < active.depth; z++) {
-				for (uint32_t y = 0; y < rows; y++) {
-					for (uint32_t x = 0; x < columns; x++) {
-						const auto bit = [](uint32_t value, uint32_t index) { return (value >> index) & 1u; };
-						const uint32_t x0 = bit(x, 0), x1 = bit(x, 1), y0 = bit(y, 0), y1 = bit(y, 1);
-						const uint32_t z0 = bit(z, 0), z1 = bit(z, 1);
-						uint32_t       low = 0;
-						if (bytes <= 2u) {
-							low = x0 | (y0 << 1u) | (x1 << 2u) | (y1 << 3u) | (z0 << 4u) | (z1 << 5u);
-						} else if (bytes == 4u) {
-							low = x0 | (y0 << 1u) | (x1 << 2u) | (z0 << 3u) | (y1 << 4u) | (z1 << 5u);
-						} else {
-							low = x0 | (y0 << 1u) | (z0 << 2u) | (x1 << 3u) | (y1 << 4u) | (z1 << 5u);
-						}
-						const uint32_t element = low | (bit(x, 2) << 6u) | (bit(y, 2) << 7u);
-						const uint64_t source  = in_offset + uint64_t {z / 4u} * layout.size +
-						                        ((y / 8u) * uint64_t {per_row} + x / 8u) * thick_tile +
-						                        uint64_t {element} * bytes;
-						if (source + bytes <= guest.size()) {
-							std::memcpy(out + out_offset, guest.data() + source, bytes);
-						}
-						out_offset += bytes;
-					}
-				}
-			}
-			in_offset += layout.size * layout.groups;
-			continue;
-		}
-		// The level's array layers, or its depth slices for a volume (MipExtent's depth is either).
-		const bool volume = info.IsVolume();
-		for (uint32_t layer = 0; layer < active.depth; layer++) {
-			const uint64_t      slice = in_offset + layer * layout.size;
-			vk::BufferImageCopy copy {};
-			copy.bufferOffset      = out_offset;
-			copy.bufferRowLength   = columns * tw;
-			copy.bufferImageHeight = rows * th;
-			copy.imageSubresource  = {vk::ImageAspectFlagBits::eColor, level, volume ? 0u : layer, 1};
-			copy.imageOffset       = vk::Offset3D {0, 0, volume ? static_cast<int32_t>(layer) : 0};
-			copy.imageExtent       = vk::Extent3D {active.width, active.height, 1};
-			copies.push_back(copy);
-			if (info.gfx7_linear) {
-				for (uint32_t y = 0; y < rows; y++) {
-					const uint64_t source = slice + uint64_t {y} * layout.pitch * bytes;
-					if (source + uint64_t {columns} * bytes <= guest.size()) {
-						std::memcpy(out + out_offset, guest.data() + source, uint64_t {columns} * bytes);
-					}
-					out_offset += uint64_t {columns} * bytes;
-				}
-				continue;
-			}
-			for (uint32_t y = 0; y < rows; y++) {
-				const uint32_t row_element = ((y & 1u) << 1u) | ((y & 2u) << 2u) | ((y & 4u) << 3u);
-				const uint64_t row_tiles   = slice + (y / 8u) * uint64_t {per_row} * tile_size;
-				for (uint32_t x = 0; x < columns; x++) {
-					const uint32_t element = (x & 1u) | ((x & 2u) << 1u) | ((x & 4u) << 2u) | row_element;
-					const uint64_t source  = row_tiles + (x / 8u) * tile_size + uint64_t {element} * bytes;
-					if (source + bytes <= guest.size()) {
-						std::memcpy(out + out_offset, guest.data() + source, bytes);
-					}
-					out_offset += bytes;
-				}
-			}
-		}
-		in_offset += layout.size * info.Gfx7MicroSlots(level);
+		const auto& mip    = layout.mips[level];
+		const auto  active = info.MipExtent(level);
+		vk::BufferImageCopy copy {};
+		copy.bufferOffset      = linear.offset + mip.offset;
+		copy.bufferRowLength   = mip.pitch;
+		copy.bufferImageHeight = mip.height;
+		copy.imageSubresource  = {vk::ImageAspectFlagBits::eColor, level, 0,
+		                          info.IsVolume() ? 1u : info.resources.layers};
+		copy.imageExtent       = vk::Extent3D {std::min<uint32_t>(active.width, mip.pitch),
+		                                       std::min<uint32_t>(active.height, mip.height),
+		                                       info.IsVolume() ? active.depth : 1u};
+		copies.push_back(copy);
 	}
-	staging->Flush(0, linear_size);
-	image.Upload(copies, staging->Handle(), 0, linear_size);
-	Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureUploadBytes, linear_size);
-	m_scheduler.DeferOperation([old = std::move(staging)]() mutable { old.reset(); });
+	image.Upload(copies, linear.buffer, linear.offset, linear.size);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureUploadBytes, linear.size);
 }
 
 bool TextureCache::FindTargetInfoAt(uint64_t address, uint32_t width, uint32_t height,
@@ -1062,7 +975,7 @@ bool TextureCache::FindTargetInfoAt(uint64_t address, uint32_t width, uint32_t h
 	bool             found = false;
 	ForEachImageWithAddress(address, [&](ImageId /*id*/, Image& image) {
 		if (!found && image.info.data.address == address && image.info.extent.width == width &&
-		    image.info.extent.height == height && image.info.gfx7_micro_pitch == 0 &&
+		    image.info.extent.height == height && !image.info.gfx7.Valid() &&
 		    (image.binding.is_target || image.IsGpuModified())) {
 			*info = image.info;
 			found = true;
@@ -1072,8 +985,8 @@ bool TextureCache::FindTargetInfoAt(uint64_t address, uint32_t width, uint32_t h
 }
 
 void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_offset) {
-	if (image.info.gfx7_micro_pitch != 0u) {
-		UploadGfx7MicroTiled(image);
+	if (image.info.gfx7.Valid()) {
+		UploadGfx7(image, source, source_offset);
 		return;
 	}
 	auto& destination = image.depth_id ? m_slot_images[image.depth_id] : image;
@@ -2370,11 +2283,11 @@ void TextureCache::RunGarbageCollector() {
 	}
 }
 
-void TextureCache::ProcessDownloadImages() {
+bool TextureCache::ProcessDownloadImages() {
 	if (!m_readback_linear_images && !m_readback_tiled_images) {
-		return;
+		return false;
 	}
-	(void)DownloadQueuedImages();
+	return DownloadQueuedImages();
 }
 
 bool TextureCache::WriteBackImages() {

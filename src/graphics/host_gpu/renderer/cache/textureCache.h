@@ -97,7 +97,8 @@ public:
 	[[nodiscard]] bool TouchMeta(uint64_t address, uint32_t slice, bool is_clear);
 
 	void UnmapMemory(uint64_t address, uint64_t size);
-	void ProcessDownloadImages();
+	// Returns whether GPU work to download images was recorded.
+	bool ProcessDownloadImages();
 	// With storage readback, a GL2 writeback makes GPU-written images visible to the CPU; returns
 	// whether a download was recorded.
 	[[nodiscard]] bool WriteBackImages();
@@ -255,7 +256,7 @@ private:
 	void                        InitializeImage(ImageId id);
 	[[nodiscard]] bool          CanDownload(const Image& image) const;
 	void UploadImage(Image& image, Buffer& source, uint64_t source_offset);
-	void UploadGfx7MicroTiled(Image& image);
+	void UploadGfx7(Image& image, Buffer& source, uint64_t source_offset);
 	void DownloadImage(Image& image, Buffer& destination, uint64_t destination_offset,
 	                   uint64_t destination_size, uint32_t levels);
 	void DownloadDepth(Image& image, Buffer& destination, uint64_t destination_offset);

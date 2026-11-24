@@ -611,6 +611,11 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	device_features.shaderFloat64 =
 	    supported2.features.shaderFloat64 && float_controls.shaderSignedZeroInfNanPreserveFloat64;
 
+	// The PS4 tiling shaders (gfx7_tiling.comp): scalar uniform layout and 8/16-bit texels.
+	features12.scalarBlockLayout = supported12.scalarBlockLayout;
+	features12.shaderInt8        = supported12.shaderInt8;
+	device_features.shaderInt16  = supported2.features.shaderInt16;
+
 	auto features13                = WindowContext::RequiredVulkan13Features();
 	features13.robustImageAccess   = supported13.robustImageAccess;
 	features13.subgroupSizeControl = graphics.compute_subgroup_size_control_enabled;

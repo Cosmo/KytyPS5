@@ -6,6 +6,18 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "gpu_tiler_shaders/gfx7_tiling_macro_128_spv.h"
+#include "gpu_tiler_shaders/gfx7_tiling_macro_16_spv.h"
+#include "gpu_tiler_shaders/gfx7_tiling_macro_32_spv.h"
+#include "gpu_tiler_shaders/gfx7_tiling_macro_64_spv.h"
+#include "gpu_tiler_shaders/gfx7_tiling_macro_8_spv.h"
+#include "gpu_tiler_shaders/gfx7_tiling_macro_96_spv.h"
+#include "gpu_tiler_shaders/gfx7_tiling_micro_128_spv.h"
+#include "gpu_tiler_shaders/gfx7_tiling_micro_16_spv.h"
+#include "gpu_tiler_shaders/gfx7_tiling_micro_32_spv.h"
+#include "gpu_tiler_shaders/gfx7_tiling_micro_64_spv.h"
+#include "gpu_tiler_shaders/gfx7_tiling_micro_8_spv.h"
+#include "gpu_tiler_shaders/gfx7_tiling_micro_96_spv.h"
 
 #include <algorithm>
 #include <array>
@@ -55,6 +67,9 @@ TileManager::~TileManager() {
 	}
 	for (auto pipeline: {m_d16_to_d24, m_d16_to_d32, m_d24_to_d16, m_d32_to_d16, m_color_transform,
 	                     m_color_clear}) {
+		m_graphics.device.destroyPipeline(pipeline, nullptr);
+	}
+	for (const auto& [key, pipeline]: m_gfx7_pipelines) {
 		m_graphics.device.destroyPipeline(pipeline, nullptr);
 	}
 	m_graphics.device.destroyPipelineLayout(m_pipeline_layout, nullptr);
@@ -193,6 +208,139 @@ TileManager::Result TileManager::Detile(vk::Buffer tiled, uint64_t tiled_offset,
 	auto scratch = GetScratchBuffer(linear_capacity, tiled);
 	Record(tiled, tiled_offset, info.data.size, scratch.buffer, 0, scratch.size, tiling);
 	return {scratch.buffer, 0, linear_capacity};
+}
+
+// The uniform block of gfx7_tiling.comp (scalar layout).
+struct Gfx7TilingInfo {
+	uint32_t      bank_swizzle;
+	uint32_t      micro_tiled_mips;
+	uint32_t      num_mips;
+	Gfx7::MipInfo mips[Gfx7::MAX_MIPS];
+	uint32_t      num_texels;
+};
+static_assert(sizeof(Gfx7::MipInfo) == 12 && sizeof(Gfx7TilingInfo) == 12 + 16 * 12 + 4);
+
+// shadPS4's TileManager::GetTilingPipeline: the shader of the texel size, specialised for the tile mode.
+vk::Pipeline TileManager::GetGfx7Pipeline(const ImageInfo& info, bool tiler) {
+	const auto& layout = info.gfx7;
+	const auto  key    = uint32_t {layout.tile} | (layout.num_bits << 8u) | (tiler ? 1u << 24u : 0u);
+	if (const auto it = m_gfx7_pipelines.find(key); it != m_gfx7_pipelines.end()) {
+		return it->second;
+	}
+	const auto mode     = Gfx7::TileMode(layout.tile);
+	const auto array    = Gfx7::GetArrayMode(mode);
+	const auto micro    = Gfx7::GetMicroTileMode(mode);
+	const bool is_macro = Gfx7::IsMacroTiled(array);
+	std::array<uint32_t, 12> spec {1u, uint32_t(micro), Gfx7::GetMicroTileThickness(array), tiler ? 1u : 0u};
+	if (is_macro) {
+		const auto macro_mode = Gfx7::CalculateMacrotileMode(mode, layout.num_bits, 1u);
+		spec[4]  = uint32_t(array);
+		spec[5]  = uint32_t(Gfx7::GetPipeConfig(mode));
+		spec[6]  = Gfx7::GetBankWidth(macro_mode);
+		spec[7]  = Gfx7::GetBankHeight(macro_mode);
+		spec[8]  = Gfx7::GetNumBanks(macro_mode);
+		spec[9]  = static_cast<uint32_t>(std::bit_width(spec[8])) - 1u;
+		spec[10] = Gfx7::CalculateTileSplit(mode, array, micro, layout.num_bits);
+		spec[11] = Gfx7::GetMacrotileAspect(macro_mode);
+	}
+	std::span<const uint32_t> code;
+	switch (layout.num_bits) {
+		case 8: code = is_macro ? std::span<const uint32_t> {GFX7_TILING_MACRO_8_SPV} : std::span<const uint32_t> {GFX7_TILING_MICRO_8_SPV}; break;
+		case 16: code = is_macro ? std::span<const uint32_t> {GFX7_TILING_MACRO_16_SPV} : std::span<const uint32_t> {GFX7_TILING_MICRO_16_SPV}; break;
+		case 32: code = is_macro ? std::span<const uint32_t> {GFX7_TILING_MACRO_32_SPV} : std::span<const uint32_t> {GFX7_TILING_MICRO_32_SPV}; break;
+		case 64: code = is_macro ? std::span<const uint32_t> {GFX7_TILING_MACRO_64_SPV} : std::span<const uint32_t> {GFX7_TILING_MICRO_64_SPV}; break;
+		case 96: code = is_macro ? std::span<const uint32_t> {GFX7_TILING_MACRO_96_SPV} : std::span<const uint32_t> {GFX7_TILING_MICRO_96_SPV}; break;
+		case 128: code = is_macro ? std::span<const uint32_t> {GFX7_TILING_MACRO_128_SPV} : std::span<const uint32_t> {GFX7_TILING_MICRO_128_SPV}; break;
+		default: EXIT("gfx7 tiling: unsupported texel size %u\n", layout.num_bits);
+	}
+	std::array<vk::SpecializationMapEntry, 12> entries {};
+	for (uint32_t i = 0; i < entries.size(); i++) {
+		entries[i] = {i, i * 4u, 4u};
+	}
+	const uint32_t               count = is_macro ? 12u : 4u;
+	const vk::SpecializationInfo specialization {count, entries.data(), count * 4u, spec.data()};
+	const auto                   pipeline = CreatePipeline(code, &specialization);
+	m_gfx7_pipelines.emplace(key, pipeline);
+	return pipeline;
+}
+
+TileManager::Result TileManager::DetileGfx7(vk::Buffer tiled, uint64_t tiled_offset,
+                                            const ImageInfo& info) {
+	const auto& layout = info.gfx7;
+	const auto& limits = m_graphics.GetPhysicalDeviceProperties().limits;
+	const uint64_t size = layout.guest_size;
+	EXIT_NOT_IMPLEMENTED(size == 0 || size > limits.maxStorageBufferRange ||
+	                     tiled_offset % std::max<uint64_t>(limits.minStorageBufferOffsetAlignment, 4) != 0);
+
+	Gfx7TilingInfo params {};
+	params.bank_swizzle     = layout.bank_swizzle;
+	params.micro_tiled_mips = layout.micro_tiled_mips;
+	params.num_mips         = info.resources.levels;
+	for (uint32_t mip = 0; mip < params.num_mips; mip++) {
+		params.mips[mip] = layout.mips[mip];
+		if (layout.block) {
+			params.mips[mip].pitch  = static_cast<uint16_t>(std::max((params.mips[mip].pitch + 3u) / 4u, 1u));
+			params.mips[mip].height = static_cast<uint16_t>(std::max((params.mips[mip].height + 3u) / 4u, 1u));
+		}
+	}
+	params.num_texels = static_cast<uint32_t>(size / (layout.num_bits / 8u));
+	const auto params_offset = m_stream_buffer.Copy(
+	    &params, sizeof(params), std::max<uint64_t>(limits.minUniformBufferOffsetAlignment, 4));
+	const auto pipeline = GetGfx7Pipeline(info, false);
+	auto       scratch  = GetScratchBuffer(size, tiled);
+
+	m_scheduler.EndRendering();
+	auto                    command = m_scheduler.Current().Handle();
+	vk::BufferMemoryBarrier barriers[3] {};
+	barriers[0].srcAccessMask       = vk::AccessFlagBits::eMemoryWrite | vk::AccessFlagBits::eHostWrite;
+	barriers[0].dstAccessMask       = vk::AccessFlagBits::eShaderRead;
+	barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barriers[0].buffer              = tiled;
+	barriers[0].offset              = tiled_offset;
+	barriers[0].size                = size;
+	barriers[1]                     = barriers[0];
+	barriers[1].srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+	barriers[1].dstAccessMask       = vk::AccessFlagBits::eShaderWrite;
+	barriers[1].buffer              = scratch.buffer;
+	barriers[1].offset              = 0;
+	barriers[1].size                = scratch.size;
+	barriers[2]                     = barriers[0];
+	barriers[2].srcAccessMask       = vk::AccessFlagBits::eHostWrite;
+	barriers[2].dstAccessMask       = vk::AccessFlagBits::eUniformRead;
+	barriers[2].buffer              = m_stream_buffer.Handle();
+	barriers[2].offset              = params_offset;
+	barriers[2].size                = sizeof(params);
+	command.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
+	                        vk::PipelineStageFlagBits::eComputeShader, {}, 0, nullptr, 3, barriers, 0,
+	                        nullptr);
+
+	const vk::DescriptorBufferInfo infos[] {{tiled, tiled_offset, Common::AlignUp(size, 4)},
+	                                        {scratch.buffer, 0, scratch.size},
+	                                        {m_stream_buffer.Handle(), params_offset, sizeof(params)}};
+	std::array<vk::WriteDescriptorSet, 3> writes {};
+	for (uint32_t index = 0; index < writes.size(); index++) {
+		writes[index].dstBinding      = index;
+		writes[index].descriptorCount = 1;
+		writes[index].descriptorType =
+		    index == 2 ? vk::DescriptorType::eUniformBuffer : vk::DescriptorType::eStorageBuffer;
+		writes[index].pBufferInfo = &infos[index];
+	}
+	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, m_pipeline_layout, 0,
+	                             static_cast<uint32_t>(writes.size()), writes.data());
+	command.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
+	const uint64_t groups   = (uint64_t {params.num_texels} + 63u) / 64u;
+	const uint32_t groups_y = static_cast<uint32_t>(
+	    (groups + limits.maxComputeWorkGroupCount[0] - 1u) / limits.maxComputeWorkGroupCount[0]);
+	const uint32_t groups_x = static_cast<uint32_t>((groups + groups_y - 1u) / groups_y);
+	command.dispatch(groups_x, groups_y, 1);
+
+	barriers[1].srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+	barriers[1].dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eMemoryRead;
+	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+	                        vk::PipelineStageFlagBits::eAllCommands, {}, 0, nullptr, 1, &barriers[1], 0,
+	                        nullptr);
+	return {scratch.buffer, 0, size};
 }
 
 void TileManager::Tile(vk::Buffer linear, uint64_t linear_offset, uint64_t linear_capacity,

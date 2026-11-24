@@ -81,68 +81,34 @@ vk::Extent3D ImageInfo::MipExtent(uint32_t level) const {
 	        IsVolume() ? std::max(extent.depth >> level, 1u) : resources.layers};
 }
 
-ImageInfo::Gfx7MicroLevel ImageInfo::Gfx7MicroLevelLayout(uint32_t level) const {
-	const bool block = tiling.texel_width > 1u;
-	uint32_t   w     = gfx7_micro_pitch >> level;
-	uint32_t   h     = extent.height >> level;
-	if (block) {
-		w = (w + 3u) / 4u;
-		h = (h + 3u) / 4u;
+void ImageInfo::SetGfx7Layout(uint32_t tile, uint32_t pitch, bool pow2) {
+	// As shadPS4's ImageInfo::UpdateSize: power-of-two BC mip chains come from its tables, the rest
+	// from ComputeImageSize.
+	auto& layout       = gfx7;
+	layout             = {};
+	layout.tile        = static_cast<uint8_t>(tile);
+	layout.block       = tiling.texel_width > 1u;
+	layout.pow2        = pow2;
+	layout.pitch       = pitch;
+	layout.num_bits    = bytes_per_block * 8u;
+	const auto mode    = Gfx7::TileMode(tile);
+	const auto array   = Gfx7::GetArrayMode(mode);
+	const auto depth   = IsVolume() ? extent.depth : 1u;
+	const auto num_samples = std::max(samples, 1u);
+	if (std::has_single_bit(pitch) && std::bit_width(pitch) <= Gfx7::MAX_DIM_LOG2 &&
+	    pitch == extent.height && depth == 1u && resources.levels == std::bit_width(pitch) &&
+	    resources.layers == 1u && num_samples == 1u && layout.block && pow2 && mode == Gfx7::TileMode::Thin1DThin &&
+	    (layout.num_bits == 64u || layout.num_bits == 128u)) {
+		const auto& entry = (layout.num_bits == 128u ? Gfx7::Pow2Bcn128ImageTable
+		                                             : Gfx7::Pow2Bcn64ImageTable)[std::bit_width(pitch) - 1u];
+		layout.mips             = entry.mips_layout;
+		layout.guest_size       = entry.guest_size;
+		layout.micro_tiled_mips = entry.micro_tiled_mips;
+		return;
 	}
-	w = std::max(w, 1u);
-	h = std::max(h, 1u);
-	if (gfx7_micro_pow2) {
-		w = std::bit_ceil(w);
-		h = std::bit_ceil(h);
-	}
-	Gfx7MicroLevel layout;
-	if (gfx7_linear) {
-		// Rows align to 64 bytes (at least 8 texels); each slice starts on a 256-byte boundary.
-		const uint32_t row_align = std::max(8u, 64u / bytes_per_block);
-		layout.pitch  = level == 0u ? w : Common::AlignUp(w, row_align);
-		layout.height = h;
-		layout.size   = Common::AlignUp(uint64_t {layout.pitch} * layout.height * bytes_per_block,
-		                                uint64_t {256u});
-		return layout;
-	}
-	// Micro tiles are 8x8 blocks (8x8x4 when thick), and each level is a whole number of 256-byte
-	// groups.
-	const uint32_t thickness = gfx7_micro_thick ? 4u : 1u;
-	layout.pitch             = Common::AlignUp(w, 8u);
-	layout.height            = Common::AlignUp(h, 8u);
-	layout.size = uint64_t {layout.pitch} * layout.height * bytes_per_block * thickness;
-	while (layout.size % 256u != 0u) {
-		layout.pitch += 8u;
-		layout.size = uint64_t {layout.pitch} * layout.height * bytes_per_block * thickness;
-	}
-	if (gfx7_micro_thick) {
-		uint32_t d = std::max(extent.depth >> level, 1u);
-		if (gfx7_micro_pow2) {
-			d = std::bit_ceil(d);
-		}
-		layout.groups = (d + thickness - 1u) / thickness;
-	}
-	return layout;
-}
-
-uint32_t ImageInfo::Gfx7MicroSlots(uint32_t level) const {
-	// A linear or 1D-thin volume stores each depth slice of a level as a 2D slice.
-	const uint32_t slices = IsVolume() && !gfx7_micro_thick ? std::max(extent.depth >> level, 1u)
-	                                                        : resources.layers;
-	return gfx7_micro_pow2 ? std::bit_ceil(slices) : slices;
-}
-
-uint64_t ImageInfo::Gfx7MicroLevelOffset(uint32_t level) const {
-	uint64_t offset = 0;
-	for (uint32_t l = 0; l < level && l < resources.levels; l++) {
-		const auto layout = Gfx7MicroLevelLayout(l);
-		offset += layout.size * layout.groups * Gfx7MicroSlots(l);
-	}
-	return offset;
-}
-
-uint64_t ImageInfo::Gfx7MicroSize() const {
-	return Gfx7MicroLevelOffset(resources.levels);
+	Gfx7::ComputeImageSize(pitch, extent.height, depth, resources.levels, resources.layers,
+	                       layout.num_bits, num_samples, layout.block, pow2, false, mode, array,
+	                       &layout.guest_size, &layout.micro_tiled_mips, layout.mips.data());
 }
 
 void ImageInfo::UpdateSize() {

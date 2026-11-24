@@ -378,6 +378,33 @@ add_custom_command(
 list(APPEND kyty_emulator_src "${fault_buffer_shader_header}")
 list(APPEND kyty_emulator_src ${gpu_tiler_shader_headers})
 
+# PS4 (gfx7) tiling, ported from shadPS4: one shader per pixel size, micro- and macro-tiled.
+foreach(gfx7_bpp 8 16 32 64 96 128)
+	foreach(gfx7_macro 0 1)
+		if(gfx7_macro)
+			set(gfx7_kind macro)
+		else()
+			set(gfx7_kind micro)
+		endif()
+		set(shader_name "gfx7_tiling_${gfx7_kind}_${gfx7_bpp}")
+		set(shader_spv "${gpu_tiler_generated_dir}/${shader_name}.spv")
+		set(shader_header "${gpu_tiler_generated_dir}/${shader_name}_spv.h")
+		string(TOUPPER "${shader_name}_SPV" shader_symbol)
+		add_custom_command(
+			OUTPUT "${shader_header}"
+			COMMAND ${CMAKE_COMMAND} -E make_directory "${gpu_tiler_generated_dir}"
+			COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.3 -Os
+			        -DBITS_PER_PIXEL=${gfx7_bpp} -DIS_MACRO_TILED=${gfx7_macro}
+			        -o "${shader_spv}" "${gpu_tiler_shader_dir}/gfx7_tiling.comp"
+			COMMAND ${CMAKE_COMMAND} -DINPUT=${shader_spv} -DOUTPUT=${shader_header}
+			        -DSYMBOL=${shader_symbol} -P "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+			DEPENDS "${gpu_tiler_shader_dir}/gfx7_tiling.comp"
+			VERBATIM
+		)
+		list(APPEND kyty_emulator_src "${shader_header}")
+	endforeach()
+endforeach()
+
 set(gpu_blit_generated_dir "${PROJECT_BINARY_DIR}/gpu_blit_shaders")
 function(add_gpu_blit_shader shader_name shader_file)
 	set(shader_source "${gpu_tiler_shader_dir}/${shader_file}")

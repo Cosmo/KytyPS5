@@ -6,6 +6,7 @@
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/regionDefinitions.h"
+#include "graphics/host_gpu/renderer/image/gfx7Tiling.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
@@ -93,27 +94,33 @@ struct ImageInfo {
 	TileTextureBlockLayout        tiling;
 	uint64_t                      tiled_slice_stride = 0;
 	uint32_t                      first_tail_level   = 16;
-	// PS4 (backward compatibility) textures the CPU fills in a gfx7 layout that gfx10 has no swizzle
-	// for: the padded pitch from the T#, nonzero when guest memory is laid out that way, and whether
-	// the levels are padded to powers of two. 1D-thin micro tiles (8x8) unless one of the flags says
-	// linear rows or 1D-thick volume tiles (8x8x4).
-	uint32_t gfx7_micro_pitch = 0;
-	bool     gfx7_micro_pow2  = false;
-	bool     gfx7_linear      = false;
-	bool     gfx7_micro_thick = false;
+	// PS4 (backward compatibility): a texture whose guest memory is in a PS4 tile mode, as shadPS4's
+	// ImageInfo describes it (tile mode, padded pitch, the layout of each mip level, size, the levels a
+	// macro-tiled surface keeps micro-tiled); the texture cache detiles it with shadPS4's shaders.
+	struct Gfx7Layout {
+		static constexpr uint8_t NoTile = 0xffu;
+		uint8_t  tile             = NoTile; // Gfx7::TileMode
+		bool     block            = false;
+		bool     pow2             = false;
+		uint32_t pitch            = 0; // texels
+		uint32_t num_bits         = 0; // per texel, or per block of a block-compressed format
+		uint32_t bank_swizzle     = 0;
+		uint32_t guest_size       = 0;
+		uint32_t micro_tiled_mips = 0;
+		std::array<Gfx7::MipInfo, Gfx7::MAX_MIPS> mips {};
 
-	struct Gfx7MicroLevel {
-		uint32_t pitch  = 0; // blocks
-		uint32_t height = 0; // blocks
-		uint64_t size   = 0; // one slice (one 4-slice group when thick), bytes
-		uint32_t groups = 1; // thick volumes: 4-slice groups of the level
+		[[nodiscard]] bool Valid() const noexcept { return tile != NoTile; }
+		[[nodiscard]] bool Tiled() const noexcept {
+			return Valid() && Gfx7::GetArrayMode(Gfx7::TileMode(tile)) != Gfx7::ArrayMode::ArrayLinearAligned;
+		}
+		[[nodiscard]] bool operator==(const Gfx7Layout& other) const noexcept {
+			return tile == other.tile && pitch == other.pitch && guest_size == other.guest_size &&
+			       pow2 == other.pow2;
+		}
 	};
-	[[nodiscard]] Gfx7MicroLevel Gfx7MicroLevelLayout(uint32_t level) const;
-	[[nodiscard]] uint64_t       Gfx7MicroSize() const;
-	// Slices a level holds (array layers, or the level's depth slices of a linear or 1D-thin volume):
-	// with POW2_PAD the count rounds up to a power of two (a cube's six faces take the room of eight).
-	[[nodiscard]] uint32_t       Gfx7MicroSlots(uint32_t level) const;
-	[[nodiscard]] uint64_t       Gfx7MicroLevelOffset(uint32_t level) const;
+	Gfx7Layout gfx7;
+	// Lays the image out in PS4 tile mode `tile` (the extent, levels, layers and texel size are set).
+	void SetGfx7Layout(uint32_t tile, uint32_t pitch, bool pow2);
 
 	void                                           UpdateSize();
 	[[nodiscard]] uint32_t                         DataAlignment() const;

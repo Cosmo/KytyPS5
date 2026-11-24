@@ -616,32 +616,17 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		const uint32_t gfx7_tile  = descriptor.fields[7] & 0x1fu;
 		const uint32_t gfx7_pitch = ((descriptor.fields[7] >> 5u) & 0x3fffu) + 1u;
 		const bool     gfx7_pow2  = (descriptor.fields[7] & 0x40000000u) != 0u;
-		if (gfx7_tile == 8u) {
-			// Linear: rows as long as the T# says, not as gfx10 would pad them.
-			desc.info.gfx7_micro_pitch = gfx7_pitch;
-			desc.info.gfx7_micro_pow2  = gfx7_pow2;
-			desc.info.gfx7_linear      = true;
-			desc.info.data.size        = desc.info.Gfx7MicroSize();
-		} else if (gfx7_tile == 13u) {
-			// 1D-thin micro tiles.
-			desc.info.gfx7_micro_pitch = gfx7_pitch;
-			desc.info.gfx7_micro_pow2  = gfx7_pow2;
-			desc.info.data.size        = std::max(desc.info.data.size, desc.info.Gfx7MicroSize());
-		} else if (gfx7_tile == 19u && volume) {
-			// 1D-thick volume: 8x8x4 micro tiles in raster order.
-			desc.info.gfx7_micro_pitch = gfx7_pitch;
-			desc.info.gfx7_micro_pow2  = gfx7_pow2;
-			desc.info.gfx7_micro_thick = true;
-			desc.info.data.size        = desc.info.Gfx7MicroSize();
-		}
-		// A linear or 1D-thin render target is sampled as what the GPU drew, not from guest memory
-		// (a video's frames, converted to RGB on the GPU, then drawn to the screen).
+		// A texture over an image the GPU drew samples that image (render targets live on the host,
+		// as a video's frames converted to RGB on the GPU and then drawn to the screen).
 		ImageInfo target {};
-		if ((gfx7_tile == 8u || gfx7_tile == 13u) &&
-		    texture_cache.FindTargetInfoAt(address, width, height, &target) &&
+		if (texture_cache.FindTargetInfoAt(address, width, height, &target) &&
 		    target.type == desc.info.type && target.resources.layers >= desc.info.resources.layers &&
 		    target.resources.levels >= desc.info.resources.levels) {
 			desc.info = target;
+		} else if (gfx7_tile >= 8u && gfx7_tile <= 26u && samples == 1u) {
+			// The colour tile modes: the guest layout of shadPS4's ImageInfo, detiled by its shaders.
+			desc.info.SetGfx7Layout(gfx7_tile, gfx7_pitch, gfx7_pow2);
+			desc.info.data.size = desc.info.gfx7.guest_size;
 		}
 	}
 	desc.view_info = TextureViewInfo(resource, descriptor, view_format, surface_format, storage,

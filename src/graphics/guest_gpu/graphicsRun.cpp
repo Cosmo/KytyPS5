@@ -1140,6 +1140,13 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 	if (gl2_writeback) {
 		WriteBackImages();
 	}
+	// A PS4 game (backward compatibility) reads GPU results once a fence says they are done (as a
+	// 1x1 average luminance for its exposure): the images queued for download reach guest memory
+	// before the fence, as shadPS4's Rasterizer::OnFence does on EOP, EOS and RELEASE_MEM.
+	if (ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7 &&
+	    m_renderer.GetTextureCache().ProcessDownloadImages()) {
+		GetScheduler().Flush();
+	}
 	if (data_sel == 0 && !interrupt) {
 		return;
 	}

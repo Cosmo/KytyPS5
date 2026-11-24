@@ -10,6 +10,7 @@
 #include <array>
 #include <memory>
 #include <span>
+#include <unordered_map>
 
 namespace Libs::Graphics {
 
@@ -45,6 +46,10 @@ public:
 
 	// Consume scratch results before the next acquisition, or pass their buffer as input.
 	[[nodiscard]] Result Detile(vk::Buffer tiled, uint64_t tiled_offset, const ImageInfo& info);
+	// PS4 (backward compatibility): detiles a surface in a PS4 tile mode (info.gfx7) into scratch,
+	// each level at its guest offset with its padded pitch and height (shadPS4's
+	// TileManager::DetileImage and tiling shaders).
+	[[nodiscard]] Result DetileGfx7(vk::Buffer tiled, uint64_t tiled_offset, const ImageInfo& info);
 	void Tile(vk::Buffer linear, uint64_t linear_offset, uint64_t linear_capacity, vk::Buffer tiled,
 	          uint64_t tiled_offset, uint64_t tiled_capacity, const ImageInfo& info,
 	          uint32_t levels = 0);
@@ -93,6 +98,7 @@ private:
 	                            vk::Buffer target, uint64_t target_offset, uint64_t target_capacity,
 	                            const Tiling& tiling);
 	[[nodiscard]] vk::Pipeline GetPipeline(uint32_t slot);
+	[[nodiscard]] vk::Pipeline GetGfx7Pipeline(const ImageInfo& info, bool tiler);
 	[[nodiscard]] vk::Pipeline CreatePipeline(std::span<const uint32_t>     code,
 	                                          const vk::SpecializationInfo* specialization) const;
 
@@ -110,6 +116,7 @@ private:
 	vk::Pipeline                            m_color_transform = nullptr;
 	vk::Pipeline                            m_color_clear     = nullptr;
 	std::unique_ptr<Buffer>                 m_clear_predicates;
+	std::unordered_map<uint32_t, vk::Pipeline> m_gfx7_pipelines;
 };
 
 } // namespace Libs::Graphics
