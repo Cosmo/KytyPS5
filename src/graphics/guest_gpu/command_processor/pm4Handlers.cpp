@@ -729,12 +729,18 @@ KYTY_CP_OP_PARSER(CpOpDmaData) {
 	const uint32_t control2  = buffer[5];
 	const uint64_t src       = buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u);
 	const uint64_t dst       = buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u);
-	const uint32_t num_bytes = control2 & 0x03ffffffu;
+	// gfx7 (PS4) has a 21-bit byte count; the bits above are swap and write-confirm controls.
+	const uint32_t num_bytes = control2 & (IsGfx7() ? 0x001fffffu : 0x03ffffffu);
 
 	const uint8_t dst_sel = static_cast<uint8_t>(
 	    ((control >> 20u) & 0x3u) | ((control2 >> 25u) & 0x4u) | ((control2 >> 26u) & 0x8u));
 	const uint8_t src_sel = static_cast<uint8_t>(
 	    ((control >> 29u) & 0x3u) | ((control2 >> 24u) & 0x4u) | ((control2 >> 25u) & 0x8u));
+	// PS4 games also copy into GPU registers (DAS): nothing the renderer reads lives there.
+	if (IsGfx7() && (dst_sel & 0x4u) != 0) {
+		IgnoreGfx7Register("DMA_DATA destination", static_cast<uint32_t>(dst), src_sel);
+		return 6;
+	}
 
 	cp.DmaData(dst_sel, dst, src_sel, src, num_bytes);
 
@@ -2620,6 +2626,9 @@ static constexpr auto MakeContextGfx7Table() {
 			cp.GetCtx().SetColorAttrib2(index, attrib2);
 			RefreshGfx7TargetSizes(cp);
 		};
+		// The base PS4 GPU has no DCC: whatever these hold, the target is not DCC-compressed.
+		table[Pm4::CB_COLOR0_DCC_CONTROL + slot * 15u] = [](KYTY_HW_REG_ARGS) {};
+		table[Pm4::CB_COLOR0_DCC_BASE + slot * 15u]    = [](KYTY_HW_REG_ARGS) {};
 		table[Pm4::CB_COLOR0_CMASK_SLICE_GFX7 + slot * 15u] = [](KYTY_HW_REG_ARGS) {
 			const uint32_t index = (cmd_offset - Pm4::CB_COLOR0_CMASK_SLICE_GFX7) / 15u;
 			auto           cmask = cp.GetCtx().GetRenderTarget(index).cmask;
