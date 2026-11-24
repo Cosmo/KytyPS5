@@ -16,9 +16,6 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
 #include "kernel/eventQueue.h"
-#if defined(__ANDROID__)
-#include "android/capyps5_jni.h"
-#endif
 #include "libs/agc.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
@@ -102,6 +99,26 @@ void TrailingNop(uint32_t* cmd, const uint32_t* start, uint32_t size, uint32_t f
 }
 
 // PS4 default hardware state after CLEAR_STATE (SDK 1.x), as the firmware sets it.
+// Default context state packets of Gnm (ported from shadPS4, GPL-2.0-or-later).
+constexpr std::array<uint32_t, 0x0f> DefaultContextState {
+    0xc0012800u, 0x80000000u, 0x80000000u, 0xc0001200u, 0u, 0xc0002f00u, 1u, 0xc0016900u,
+    0x102u, 0u, 0xc0016900u, 0x202u, 0xcc0010u, 0xc0111000u, 0u};
+
+constexpr std::array<uint32_t, 0x62> DefaultContextState400 {
+    0xc0012800u, 0x80000000u, 0x80000000u, 0xc0001200u, 0u, 0xc0016900u, 0x2f9u, 0x2du,
+    0xc0016900u, 0x282u, 8u, 0xc0016900u, 0x280u, 0x80008u, 0xc0016900u, 0x281u,
+    0xffff0000u, 0xc0016900u, 0x204u, 0u, 0xc0016900u, 0x206u, 0x43fu, 0xc0016900u,
+    0x83u, 0xffffu, 0xc0016900u, 0x317u, 0x10u, 0xc0016900u, 0x2fau, 0x3f800000u,
+    0xc0016900u, 0x2fcu, 0x3f800000u, 0xc0016900u, 0x2fbu, 0x3f800000u, 0xc0016900u, 0x2fdu,
+    0x3f800000u, 0xc0016900u, 0x202u, 0xcc0010u, 0xc0016900u, 0x30eu, 0xffffffffu, 0xc0016900u,
+    0x30fu, 0xffffffffu, 0xc0002f00u, 1u, 0xc0016900u, 0x1b1u, 2u, 0xc0016900u,
+    0x101u, 0u, 0xc0016900u, 0x100u, 0xffffffffu, 0xc0016900u, 0x103u, 0u,
+    0xc0016900u, 0x284u, 0u, 0xc0016900u, 0x290u, 0u, 0xc0016900u, 0x2aeu,
+    0u, 0xc0016900u, 0x102u, 0u, 0xc0016900u, 0x292u, 0u, 0xc0016900u,
+    0x293u, 0x6020000u, 0xc0016900u, 0x2f8u, 0u, 0xc0016900u, 0x2deu, 0x1e9u,
+    0xc0036900u, 0x295u, 0x100u, 0x100u, 4u, 0xc0016900u, 0x2aau, 0xffu,
+    0xc09e1000u, 0u};
+
 constexpr std::array<uint32_t, 115> DefaultHardwareState {
     0xc0017600u, 0x216u, 0xffffffffu, 0xc0017600u, 0x217u, 0xffffffffu, 0xc0017600u, 0x215u,
     0u, 0xc0016900u, 0x2f9u, 0x2du, 0xc0016900u, 0x282u, 8u, 0xc0016900u,
@@ -118,6 +135,60 @@ constexpr std::array<uint32_t, 115> DefaultHardwareState {
     0x292u, 0u, 0xc0016900u, 0x293u, 0x6000000u, 0xc0016900u, 0x2f8u, 0u,
     0xc0016900u, 0x2deu, 0x1e9u, 0xc0036900u, 0x295u, 0x100u, 0x100u, 4u,
     0xc0017900u, 0x200u, 0xe0000000u,
+};
+
+// The same state for games built with later SDKs.
+constexpr std::array<uint32_t, 115> DefaultHardwareState175 {
+    0xc0017600u, 0x216u, 0xffffffffu, 0xc0017600u, 0x217u, 0xffffffffu, 0xc0017600u, 0x215u,
+    0u, 0xc0016900u, 0x2f9u, 0x2du, 0xc0016900u, 0x282u, 8u, 0xc0016900u,
+    0x280u, 0x80008u, 0xc0016900u, 0x281u, 0xffff0000u, 0xc0016900u, 0x204u, 0u,
+    0xc0016900u, 0x206u, 0x43fu, 0xc0016900u, 0x83u, 0xffffu, 0xc0016900u, 0x317u,
+    0x10u, 0xc0016900u, 0x2fau, 0x3f800000u, 0xc0016900u, 0x2fcu, 0x3f800000u, 0xc0016900u,
+    0x2fbu, 0x3f800000u, 0xc0016900u, 0x2fdu, 0x3f800000u, 0xc0016900u, 0x202u, 0xcc0010u,
+    0xc0016900u, 0x30eu, 0xffffffffu, 0xc0016900u, 0x30fu, 0xffffffffu, 0xc0002f00u, 1u,
+    0xc0017600u, 7u, 0x1ffu, 0xc0017600u, 0x46u, 0x1ffu, 0xc0017600u, 0x87u,
+    0x1ffu, 0xc0017600u, 0xc7u, 0x1ffu, 0xc0017600u, 0x107u, 0u, 0xc0017600u,
+    0x147u, 0x1ffu, 0xc0016900u, 0x1b1u, 2u, 0xc0016900u, 0x101u, 0u,
+    0xc0016900u, 0x100u, 0xffffffffu, 0xc0016900u, 0x103u, 0u, 0xc0016900u, 0x284u,
+    0u, 0xc0016900u, 0x290u, 0u, 0xc0016900u, 0x2aeu, 0u, 0xc0016900u,
+    0x292u, 0u, 0xc0016900u, 0x293u, 0x6020000u, 0xc0016900u, 0x2f8u, 0u,
+    0xc0016900u, 0x2deu, 0x1e9u, 0xc0036900u, 0x295u, 0x100u, 0x100u, 4u,
+    0xc0017900u, 0x200u, 0xe0000000u,
+};
+constexpr std::array<uint32_t, 118> DefaultHardwareState200 {
+    0xc0017600u, 0x216u, 0xffffffffu, 0xc0017600u, 0x217u, 0xffffffffu, 0xc0017600u, 0x215u,
+    0u, 0xc0016900u, 0x2f9u, 0x2du, 0xc0016900u, 0x282u, 8u, 0xc0016900u,
+    0x280u, 0x80008u, 0xc0016900u, 0x281u, 0xffff0000u, 0xc0016900u, 0x204u, 0u,
+    0xc0016900u, 0x206u, 0x43fu, 0xc0016900u, 0x83u, 0xffffu, 0xc0016900u, 0x317u,
+    0x10u, 0xc0016900u, 0x2fau, 0x3f800000u, 0xc0016900u, 0x2fcu, 0x3f800000u, 0xc0016900u,
+    0x2fbu, 0x3f800000u, 0xc0016900u, 0x2fdu, 0x3f800000u, 0xc0016900u, 0x202u, 0xcc0010u,
+    0xc0016900u, 0x30eu, 0xffffffffu, 0xc0016900u, 0x30fu, 0xffffffffu, 0xc0002f00u, 1u,
+    0xc0017600u, 7u, 0x1701ffu, 0xc0017600u, 0x46u, 0x1701fdu, 0xc0017600u, 0x87u,
+    0x1701ffu, 0xc0017600u, 0xc7u, 0x1701fdu, 0xc0017600u, 0x107u, 0x17u, 0xc0017600u,
+    0x147u, 0x1701fdu, 0xc0017600u, 0x47u, 0x1cu, 0xc0016900u, 0x1b1u, 2u,
+    0xc0016900u, 0x101u, 0u, 0xc0016900u, 0x100u, 0xffffffffu, 0xc0016900u, 0x103u,
+    0u, 0xc0016900u, 0x284u, 0u, 0xc0016900u, 0x290u, 0u, 0xc0016900u,
+    0x2aeu, 0u, 0xc0016900u, 0x292u, 0u, 0xc0016900u, 0x293u, 0x6020000u,
+    0xc0016900u, 0x2f8u, 0u, 0xc0016900u, 0x2deu, 0x1e9u, 0xc0036900u, 0x295u,
+    0x100u, 0x100u, 4u, 0xc0017900u, 0x200u, 0xe0000000u,
+};
+constexpr std::array<uint32_t, 124> DefaultHardwareState350 {
+    0xc0017600u, 0x216u, 0xffffffffu, 0xc0017600u, 0x217u, 0xffffffffu, 0xc0017600u, 0x215u,
+    0u, 0xc0016900u, 0x2f9u, 0x2du, 0xc0016900u, 0x282u, 8u, 0xc0016900u,
+    0x280u, 0x80008u, 0xc0016900u, 0x281u, 0xffff0000u, 0xc0016900u, 0x204u, 0u,
+    0xc0016900u, 0x206u, 0x43fu, 0xc0016900u, 0x83u, 0xffffu, 0xc0016900u, 0x317u,
+    0x10u, 0xc0016900u, 0x2fau, 0x3f800000u, 0xc0016900u, 0x2fcu, 0x3f800000u, 0xc0016900u,
+    0x2fbu, 0x3f800000u, 0xc0016900u, 0x2fdu, 0x3f800000u, 0xc0016900u, 0x202u, 0xcc0010u,
+    0xc0016900u, 0x30eu, 0xffffffffu, 0xc0016900u, 0x30fu, 0xffffffffu, 0xc0002f00u, 1u,
+    0xc0017600u, 7u, 0x1701ffu, 0xc0017600u, 0x46u, 0x1701fdu, 0xc0017600u, 0x87u,
+    0x1701ffu, 0xc0017600u, 0xc7u, 0x1701fdu, 0xc0017600u, 0x107u, 0x17u, 0xc0017600u,
+    0x147u, 0x1701fdu, 0xc0017600u, 0x47u, 0x1cu, 0xc0016900u, 0x1b1u, 2u,
+    0xc0016900u, 0x101u, 0u, 0xc0016900u, 0x100u, 0xffffffffu, 0xc0016900u, 0x103u,
+    0u, 0xc0016900u, 0x284u, 0u, 0xc0016900u, 0x290u, 0u, 0xc0016900u,
+    0x2aeu, 0u, 0xc0016900u, 0x102u, 0u, 0xc0016900u, 0x292u, 0u,
+    0xc0016900u, 0x293u, 0x6020000u, 0xc0016900u, 0x2f8u, 0u, 0xc0016900u, 0x2deu,
+    0x1e9u, 0xc0036900u, 0x295u, 0x100u, 0x100u, 4u, 0xc0017900u, 0x200u,
+    0xe0000000u, 0xc0016900u, 0x2aau, 0xffu,
 };
 
 struct ComputeQueue {
@@ -326,6 +397,71 @@ int KYTY_SYSV_ABI GnmSetLsShader(uint32_t* cmd, uint32_t size, const uint32_t* r
 	return OK;
 }
 
+// The caller reserved `size` dwords and resumes after them: pad the rest with one NOP packet.
+template <size_t N>
+static uint32_t WriteDefaultContextState(uint32_t* cmd, uint32_t size, const std::array<uint32_t, N>& state) {
+	std::memcpy(cmd, state.data(), sizeof(state));
+	cmd[N] = 0xC0001000u | ((size - static_cast<uint32_t>(N) - 2u) << 16u);
+	return size;
+}
+
+uint32_t KYTY_SYSV_ABI GnmDrawInitToDefaultContextState(uint32_t* cmd, uint32_t size) {
+	PRINT_NAME();
+	if (size != 0x20u) {
+		return 0;
+	}
+	return WriteDefaultContextState(cmd, size, DefaultContextState);
+}
+
+uint32_t KYTY_SYSV_ABI GnmDrawInitToDefaultContextState400(uint32_t* cmd, uint32_t size) {
+	PRINT_NAME();
+	if (size != 0x100u) {
+		return 0;
+	}
+	return WriteDefaultContextState(cmd, size, DefaultContextState400);
+}
+
+int KYTY_SYSV_ABI GnmComputeWaitOnAddress(uint32_t* cmd, uint32_t size, uint64_t addr, uint32_t mask,
+                                          uint32_t func, uint32_t ref) {
+	PRINT_NAME();
+	if (cmd == nullptr || size != 0xeu) {
+		return -1;
+	}
+	WriteNop(cmd, 3u);
+	const uint32_t is_mem = addr > 0xffffu ? 1u : 0u;
+	cmd[3]  = Type3(0x3cu, 6u); // WAIT_REG_MEM
+	cmd[4]  = (is_mem << 4u) | (func & 7u);
+	cmd[5]  = static_cast<uint32_t>(addr) & (is_mem != 0u ? 0xfffffffcu : 0xffffu);
+	cmd[6]  = static_cast<uint32_t>(addr >> 32u);
+	cmd[7]  = ref;
+	cmd[8]  = mask;
+	cmd[9]  = 10u;
+	WriteNop(cmd + 10, 4u);
+	return OK;
+}
+
+uint32_t KYTY_SYSV_ABI GnmGetGpuCoreClockFrequency() {
+	PRINT_NAME();
+	return 800000000u;
+}
+
+// The SGPR offsets are per shader stage (Cs, Ps, Vs, Gs, Es, Hs, Ls), as in shadPS4.
+int KYTY_SYSV_ABI GnmDrawIndirect(uint32_t* cmd, uint32_t size, uint32_t data_offset, uint32_t stage,
+                                  uint32_t vertex_sgpr, uint32_t instance_sgpr, uint32_t /*flags*/) {
+	PRINT_NAME();
+	static constexpr std::array<uint32_t, 7> SgprBase {0u, 0u, 0x4cu, 0u, 0xccu, 0u, 0x14cu};
+	if (cmd == nullptr || size != 9u || stage >= SgprBase.size() || vertex_sgpr >= 0x10u || instance_sgpr >= 0x10u) {
+		return -1;
+	}
+	cmd[0] = Type3(0x24u, 4u); // DRAW_INDIRECT
+	cmd[1] = data_offset;
+	cmd[2] = vertex_sgpr == 0u ? 0u : vertex_sgpr + SgprBase[stage];
+	cmd[3] = instance_sgpr == 0u ? 0u : instance_sgpr + SgprBase[stage];
+	cmd[4] = 2u; // auto index
+	WriteNop(cmd + 5, 4u);
+	return OK;
+}
+
 uint32_t KYTY_SYSV_ABI GnmDrawInitDefaultHardwareState(uint32_t* cmd, uint32_t size) {
 	PRINT_NAME();
 	if (cmd == nullptr || size < HwInitPacketSize) {
@@ -338,6 +474,234 @@ uint32_t KYTY_SYSV_ABI GnmDrawInitDefaultHardwareState(uint32_t* cmd, uint32_t s
 	out += DefaultHardwareState.size();
 	WriteNop(out, static_cast<uint32_t>(cmd + HwInitPacketSize - out));
 	return HwInitPacketSize;
+}
+
+template <size_t N>
+uint32_t WriteDefaultHardwareState(uint32_t* cmd, uint32_t size, const std::array<uint32_t, N>& state) {
+	if (cmd == nullptr || size < HwInitPacketSize) {
+		return 0;
+	}
+	auto* out = cmd;
+	*out++    = Type3(PacketClearState, 1);
+	*out++    = 0;
+	std::memcpy(out, state.data(), state.size() * sizeof(uint32_t));
+	out += state.size();
+	WriteNop(out, static_cast<uint32_t>(cmd + HwInitPacketSize - out));
+	return HwInitPacketSize;
+}
+
+uint32_t KYTY_SYSV_ABI GnmDrawInitDefaultHardwareState175(uint32_t* cmd, uint32_t size) {
+	PRINT_NAME();
+	return WriteDefaultHardwareState(cmd, size, DefaultHardwareState175);
+}
+
+uint32_t KYTY_SYSV_ABI GnmDrawInitDefaultHardwareState200(uint32_t* cmd, uint32_t size) {
+	PRINT_NAME();
+	return WriteDefaultHardwareState(cmd, size, DefaultHardwareState200);
+}
+
+uint32_t KYTY_SYSV_ABI GnmDrawInitDefaultHardwareState350(uint32_t* cmd, uint32_t size) {
+	PRINT_NAME();
+	return WriteDefaultHardwareState(cmd, size, DefaultHardwareState350);
+}
+
+// ---- Draws, for games that call the driver instead of writing the packets themselves. ----
+
+int KYTY_SYSV_ABI GnmDrawIndex(uint32_t* cmd, uint32_t size, uint32_t index_count, uint64_t index_addr,
+                               uint32_t flags, uint32_t type) {
+	PRINT_NAME();
+	(void)type;
+	if (cmd == nullptr || size != 10 || index_addr == 0 || (index_addr & 1u) != 0 ||
+	    (flags & 0x1ffffffeu) != 0) {
+		return -1;
+	}
+	*cmd++ = Type3(0x27, 5); // DRAW_INDEX_2
+	*cmd++ = index_count;
+	*cmd++ = static_cast<uint32_t>(index_addr);
+	*cmd++ = static_cast<uint32_t>(index_addr >> 32u);
+	*cmd++ = index_count;
+	*cmd++ = 0;
+	WriteNop(cmd, 4);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GnmDrawIndexAuto(uint32_t* cmd, uint32_t size, uint32_t index_count, uint32_t flags) {
+	PRINT_NAME();
+	if (cmd == nullptr || size != 7 || (flags & 0x1ffffffeu) != 0) {
+		return -1;
+	}
+	*cmd++ = Type3(0x2d, 2); // DRAW_INDEX_AUTO
+	*cmd++ = index_count;
+	*cmd++ = 2; // auto-generated indices
+	WriteNop(cmd, 4);
+	return OK;
+}
+
+// COMPUTE_PGM_RSRC1 with the caller's modifier bits, otherwise GnmSetCsShader.
+int KYTY_SYSV_ABI GnmSetCsShaderWithModifier(uint32_t* cmd, uint32_t size, const uint32_t* regs, uint32_t modifier) {
+	PRINT_NAME();
+	uint32_t* const start = cmd;
+	if (cmd == nullptr || size <= 0x18 || regs == nullptr || (modifier & 0xfffffc3fu) != 0 || regs[1] != 0) {
+		return -1;
+	}
+	const uint32_t rsrc1 = modifier == 0 ? regs[2] : (regs[2] & 0xfffffc3fu) | modifier;
+	cmd = SetShReg(cmd, 0x20c, {regs[0], 0});                 // COMPUTE_PGM_LO/HI
+	cmd = SetShReg(cmd, 0x212, {rsrc1, regs[3]});             // COMPUTE_PGM_RSRC1/2
+	cmd = SetShReg(cmd, 0x207, {regs[4], regs[5], regs[6]});  // COMPUTE_NUM_THREAD_X/Y/Z
+	TrailingNop(cmd, start, size, 11);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GnmDispatchDirect(uint32_t* cmd, uint32_t size, uint32_t x, uint32_t y, uint32_t z, uint32_t flags) {
+	PRINT_NAME();
+	if (cmd == nullptr || size != 9 || static_cast<int32_t>(x | y | z) < 0) {
+		return -1;
+	}
+	*cmd++ = Type3(0x15, 4) | 2u | (flags & 1u); // DISPATCH_DIRECT, compute shader type, predicate
+	*cmd++ = x;
+	*cmd++ = y;
+	*cmd++ = z;
+	*cmd++ = (flags & 0x18u) + 1u; // COMPUTE_SHADER_EN and the ordered-append mode
+	WriteNop(cmd, 4);
+	return OK;
+}
+
+// Indirect dispatches and draws (packet layouts as in shadPS4's GnmDriver). The arguments come from
+// the base set by SET_BASE plus data_offset, or, on a compute queue (MEC), from `args` itself.
+int KYTY_SYSV_ABI GnmDispatchIndirect(uint32_t* cmd, uint32_t size, uint32_t data_offset, uint32_t flags) {
+	PRINT_NAME();
+	if (cmd == nullptr || size != 7) {
+		return -1;
+	}
+	*cmd++ = Type3(0x16, 2) | 2u | (flags & 1u); // DISPATCH_INDIRECT, compute shader type, predicate
+	*cmd++ = data_offset;
+	*cmd++ = (flags & 0x18u) + 1u;
+	WriteNop(cmd, 4);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GnmDispatchIndirectOnMec(uint32_t* cmd, uint32_t size, uint64_t args, uint32_t modifier) {
+	PRINT_NAME();
+	if (cmd == nullptr || size != 8 || args == 0 || (args & 3u) != 0) {
+		return -1;
+	}
+	*cmd++ = Type3(0x16, 3) | 2u | (modifier & 1u);
+	*cmd++ = static_cast<uint32_t>(args);
+	*cmd++ = static_cast<uint32_t>(args >> 32u);
+	*cmd++ = (modifier & 0x18u) | 1u;
+	WriteNop(cmd, 4);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GnmDrawIndexIndirect(uint32_t* cmd, uint32_t size, uint32_t data_offset, uint32_t stage,
+                                       uint32_t vertex_sgpr, uint32_t instance_sgpr, uint32_t flags) {
+	PRINT_NAME();
+	// SPI_SHADER_USER_DATA_x_0 of the stage that receives the base vertex and instance (VS, ES, LS).
+	constexpr std::array<uint32_t, 7> user_data {0u, 0u, 0x4cu, 0u, 0xccu, 0u, 0x14cu};
+	if (cmd == nullptr || size != 9 || stage >= user_data.size() || vertex_sgpr >= 0x10u ||
+	    instance_sgpr >= 0x10u) {
+		return -1;
+	}
+	*cmd++ = Type3(0x25, 4); // DRAW_INDEX_INDIRECT
+	*cmd++ = data_offset;
+	*cmd++ = vertex_sgpr == 0 ? 0u : vertex_sgpr + user_data[stage];
+	*cmd++ = instance_sgpr == 0 ? 0u : instance_sgpr + user_data[stage];
+	*cmd++ = 0; // DRAW_INITIATOR
+	WriteNop(cmd, 4);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GnmDrawIndexOffset(uint32_t* cmd, uint32_t size, uint32_t index_offset, uint32_t index_count,
+                                     uint32_t flags) {
+	PRINT_NAME();
+	(void)flags;
+	if (cmd == nullptr || size != 9) {
+		return -1;
+	}
+	*cmd++ = Type3(0x35, 4); // DRAW_INDEX_OFFSET_2
+	*cmd++ = index_count;    // max size
+	*cmd++ = index_offset;
+	*cmd++ = index_count;
+	*cmd++ = 0; // DRAW_INITIATOR
+	WriteNop(cmd, 4);
+	return OK;
+}
+
+// PS4 PS setter of SDK 3.50 and later: the null shader also resets CB_SHADER_MASK.
+int KYTY_SYSV_ABI GnmSetPsShader350(uint32_t* cmd, uint32_t size, const uint32_t* regs) {
+	PRINT_NAME();
+	if (regs != nullptr) {
+		return GnmSetPsShader(cmd, size, regs);
+	}
+	uint32_t* const start = cmd;
+	if (cmd == nullptr || size <= 0x27) {
+		return -1;
+	}
+	cmd = SetShReg(cmd, 0x08, {0, 0});      // SPI_SHADER_PGM_LO/HI_PS
+	cmd = SetContextReg(cmd, 0x203, {0});   // DB_SHADER_CONTROL
+	cmd = SetContextReg(cmd, 0x08f, {0xf}); // CB_SHADER_MASK
+	TrailingNop(cmd, start, size, 0x1d);
+	return OK;
+}
+
+// IA_MULTI_VGT_PARAM only tunes how the PS4 hardware splits primitive groups: nothing to do on a
+// host GPU, so the region is filler.
+int KYTY_SYSV_ABI GnmSetVgtControl(uint32_t* cmd, uint32_t size, uint32_t prim_group_minus_one,
+                                   uint32_t partial_vs_wave, uint32_t wd_switch_only_on_eop) {
+	PRINT_NAME();
+	if (cmd == nullptr || size != 3 || prim_group_minus_one >= 0x100u ||
+	    (partial_vs_wave | wd_switch_only_on_eop) >= 2u) {
+		return -1;
+	}
+	WriteNop(cmd, 3);
+	return OK;
+}
+
+// Debug markers are only filler for the GPU, of the size the game reserved.
+int KYTY_SYSV_ABI GnmInsertMarker(uint32_t* cmd, uint32_t size, const char* marker) {
+	PRINT_NAME();
+	(void)marker;
+	if (cmd == nullptr || size < 2) {
+		return -1;
+	}
+	WriteNop(cmd, size);
+	return OK;
+}
+
+int KYTY_SYSV_ABI GnmInsertPopMarker(uint32_t* cmd, uint32_t size) {
+	PRINT_NAME();
+	if (cmd == nullptr || size != 6) {
+		return -1;
+	}
+	WriteNop(cmd, size);
+	return OK;
+}
+
+// Workloads only group submissions for profiling tools.
+int KYTY_SYSV_ABI GnmCreateWorkloadStream(uint64_t name, uint32_t* stream) {
+	PRINT_NAME();
+	if (name == 0 || stream == nullptr) {
+		return 3;
+	}
+	*stream = 1;
+	return OK;
+}
+
+int KYTY_SYSV_ABI GnmBeginWorkload(uint32_t stream, uint64_t* workload) {
+	PRINT_NAME();
+	if (workload == nullptr) {
+		return 3;
+	}
+	*workload = stream < 0x10u ? 1u : 0u;
+	return stream < 0x10u ? 0 : 1;
+}
+
+int KYTY_SYSV_ABI GnmEndWorkload(uint64_t workload) {
+	PRINT_NAME();
+	if (workload == 0) {
+		return 2;
+	}
+	return ((workload >> 0x38u) & 0xffu) > 0xfu ? 2 : 0;
 }
 
 uint32_t KYTY_SYSV_ABI GnmDispatchInitDefaultHardwareState(uint32_t* cmd, uint32_t size) {
@@ -397,6 +761,26 @@ int KYTY_SYSV_ABI GnmSubmitAndFlipCommandBuffers(uint32_t count, uint32_t* const
 		return result;
 	}
 	return SubmitBuffers(count, dcbs, dcb_bytes, ccbs, ccb_bytes);
+}
+
+// The workload variants take the workload id first; it is only a profiling tag.
+int KYTY_SYSV_ABI GnmSubmitCommandBuffersForWorkload(uint64_t workload, uint32_t count, uint32_t* const* dcbs,
+                                                     const uint32_t* dcb_bytes, uint32_t* const* ccbs,
+                                                     const uint32_t* ccb_bytes) {
+	PRINT_NAME();
+	(void)workload;
+	return GnmSubmitCommandBuffers(count, dcbs, dcb_bytes, ccbs, ccb_bytes);
+}
+
+int KYTY_SYSV_ABI GnmSubmitAndFlipCommandBuffersForWorkload(uint64_t workload, uint32_t count,
+                                                            uint32_t* const* dcbs, const uint32_t* dcb_bytes,
+                                                            uint32_t* const* ccbs, const uint32_t* ccb_bytes,
+                                                            uint32_t handle, uint32_t index, uint32_t flip_mode,
+                                                            int64_t flip_arg) {
+	PRINT_NAME();
+	(void)workload;
+	return GnmSubmitAndFlipCommandBuffers(count, dcbs, dcb_bytes, ccbs, ccb_bytes, handle, index, flip_mode,
+	                                      flip_arg);
 }
 
 int KYTY_SYSV_ABI GnmSubmitDone() {
@@ -533,6 +917,12 @@ uint64_t KYTY_SYSV_ABI GnmGetTheTessellationFactorRingBufferBaseAddress() {
 	return 0xff0000000ull;
 }
 
+uint32_t KYTY_SYSV_ABI GnmGetOffChipTessellationBufferSize() {
+	PRINT_NAME();
+	// The PS4 driver's off-chip tessellation buffer (as in shadPS4): games allocate it themselves.
+	return 0x800000u;
+}
+
 void KYTY_SYSV_ABI GnmFlushGarlic() {
 	PRINT_NAME();
 }
@@ -568,9 +958,40 @@ LIB_DEFINE(InitGnmDriver_1) {
 	LIB_FUNC("VJNjFtqiF5w", Gnm::GnmSetHsShader);
 	LIB_FUNC("vckdzbQ46SI", Gnm::GnmSetLsShader);
 	LIB_FUNC("Idffwf3yh8s", Gnm::GnmDrawInitDefaultHardwareState);
+	LIB_FUNC("4v+otIIdjqg", Gnm::GnmDrawIndirect);
+	LIB_FUNC("ffrNQOshows", Gnm::GnmComputeWaitOnAddress);
+	LIB_FUNC("Fwvh++m9IQI", Gnm::GnmGetGpuCoreClockFrequency);
+	LIB_FUNC("8lH54sfjfmU", Gnm::GnmDrawInitToDefaultContextState);
+	LIB_FUNC("im2ZuItabu4", Gnm::GnmDrawInitToDefaultContextState400);
+	LIB_FUNC("QhnyReteJ1M", Gnm::GnmDrawInitDefaultHardwareState175);
+	LIB_FUNC("0H2vBYbTLHI", Gnm::GnmDrawInitDefaultHardwareState200);
+	LIB_FUNC("yb2cRhagD1I", Gnm::GnmDrawInitDefaultHardwareState350);
+	LIB_FUNC("HlTPoZ-oY7Y", Gnm::GnmDrawIndex);
+	LIB_FUNC("GGsn7jMTxw4", Gnm::GnmDrawIndexAuto);
+	LIB_FUNC("5uFKckiJYRM", Gnm::GnmSetPsShader350);
+	// The Update setters rewrite a region reserved by the matching setter, with the same layout.
+	LIB_FUNC("V31V01UiScY", Gnm::GnmSetVsShader);     // UpdateVsShader
+	LIB_FUNC("4MgRw-bVNQU", Gnm::GnmSetPsShader);     // UpdatePsShader
+	LIB_FUNC("mLVL7N7BVBg", Gnm::GnmSetPsShader350);  // UpdatePsShader350
+	LIB_FUNC("nLM2i2+65hA", Gnm::GnmSetGsShader);     // UpdateGsShader
+	LIB_FUNC("Kx-h-nWQJ8A", Gnm::GnmSetCsShaderWithModifier);
+	LIB_FUNC("0BzLGljcwBo", Gnm::GnmDispatchDirect);
+	LIB_FUNC("Z43vKp5k7r0", Gnm::GnmDispatchIndirect);
+	LIB_FUNC("wED4ZXCFJT0", Gnm::GnmDispatchIndirectOnMec);
+	LIB_FUNC("ED9-Fjr8Ta4", Gnm::GnmDrawIndexIndirect);
+	LIB_FUNC("oYM+YzfCm2Y", Gnm::GnmDrawIndexOffset);
+	LIB_FUNC("cFCp0NX8wf0", Gnm::GnmSetVgtControl);
+	LIB_FUNC("jiItzS6+22g", Gnm::GnmInsertMarker); // SetMarker
+	LIB_FUNC("W1Etj-jlW7Y", Gnm::GnmInsertMarker); // PushMarker
+	LIB_FUNC("7qZVNgEu+SY", Gnm::GnmInsertPopMarker);
+	LIB_FUNC("5udAm+6boVg", Gnm::GnmCreateWorkloadStream);
+	LIB_FUNC("ihxrbsoSKWc", Gnm::GnmBeginWorkload);
+	LIB_FUNC("Fa3x75OOLRA", Gnm::GnmEndWorkload);
 	LIB_FUNC("nF6bFRUBRAU", Gnm::GnmDispatchInitDefaultHardwareState);
 	LIB_FUNC("1qXLHIpROPE", Gnm::GnmInsertWaitFlipDone);
 	LIB_FUNC("zwY0YV91TTI", Gnm::GnmSubmitCommandBuffers);
+	LIB_FUNC("jRcI8VcgTz4", Gnm::GnmSubmitCommandBuffersForWorkload);
+	LIB_FUNC("Ga6r7H6Y0RI", Gnm::GnmSubmitAndFlipCommandBuffersForWorkload);
 	LIB_FUNC("xbxNatawohc", Gnm::GnmSubmitAndFlipCommandBuffers);
 	LIB_FUNC("yvZ73uQUqrk", Gnm::GnmSubmitDone);
 	LIB_FUNC("gObODli-OH8", Gnm::GnmRequestFlipAndSubmitDone);
@@ -584,6 +1005,7 @@ LIB_DEFINE(InitGnmDriver_1) {
 	LIB_FUNC("H7-fgvEutM0", Gnm::GnmGetEqTimeStamp);
 	LIB_FUNC("jtkqXpAOY6w", Gnm::GnmSetGsRingSizes);
 	LIB_FUNC("ln33zjBrfjk", Gnm::GnmGetTheTessellationFactorRingBufferBaseAddress);
+	LIB_FUNC("FFVZcCu3zWU", Gnm::GnmGetOffChipTessellationBufferSize);
 	LIB_FUNC("iBt3Oe00Kvc", Gnm::GnmFlushGarlic);
 	LIB_FUNC("jg33rEKLfVs", Gnm::GnmIsUserPaEnabled);
 	LIB_FUNC("RU74kek-N0c", Gnm::GnmLogicalCuMaskToPhysicalCuMask);
