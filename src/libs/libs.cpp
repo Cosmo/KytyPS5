@@ -91,6 +91,7 @@ LIB_DEFINE(InitDialog_1);
 LIB_DEFINE(InitFont_1);
 LIB_DEFINE(InitFontFt_1);
 LIB_DEFINE(InitAgcDriver_1);
+LIB_DEFINE(InitGnmDriver_1);
 LIB_DEFINE(InitHmd2_1);
 LIB_DEFINE(InitJpegDec_1);
 LIB_DEFINE(InitJpegEnc_1);
@@ -130,6 +131,7 @@ void InitAll(Loader::SymbolDatabase* s) {
 	InitFont_1(s);
 	InitFontFt_1(s);
 	InitAgcDriver_1(s);
+	InitGnmDriver_1(s);
 	InitBluetoothHid_1(s);
 	InitDeviceService_1(s);
 	InitUsbd_1(s);

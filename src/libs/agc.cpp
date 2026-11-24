@@ -81,6 +81,11 @@ void Initialize() {
 	ShaderInit();
 }
 
+RenderContext& GetRenderContext() {
+	EXIT_IF(g_renderer == nullptr);
+	return *g_renderer;
+}
+
 void Shutdown() {
 	EXIT_IF(g_renderer == nullptr);
 	g_renderer->ShutdownGpu();
