@@ -17,6 +17,7 @@ class Presenter;
 namespace Libs::VideoOut {
 
 struct VideoOutBufferAttribute2;
+struct VideoOutBufferAttributePs4;
 struct VideoOutFlipStatus;
 struct VideoOutVblankStatus;
 struct VideoOutOutputStatus;
@@ -75,6 +76,13 @@ KYTY_SYSV_ABI int VideoOutDeleteFlipEvent(LibKernel::EventQueue::KernelEqueue eq
 KYTY_SYSV_ABI int VideoOutDeleteVblankEvent(LibKernel::EventQueue::KernelEqueue eq, int handle);
 KYTY_SYSV_ABI int VideoOutDeletePreVblankStartEvent(LibKernel::EventQueue::KernelEqueue eq,
                                                     int                                 handle);
+KYTY_SYSV_ABI void VideoOutSetBufferAttribute(VideoOutBufferAttributePs4* attribute,
+                                              uint32_t pixel_format, uint32_t tiling_mode,
+                                              uint32_t aspect_ratio, uint32_t width,
+                                              uint32_t height, uint32_t pitch_in_pixel);
+KYTY_SYSV_ABI int  VideoOutRegisterBuffers(int handle, int buffer_index_start,
+                                           void* const* addresses, int buffer_num,
+                                           const VideoOutBufferAttributePs4* attribute);
 KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer_index_start,
                                            const VideoOutBuffers* buffers, int buffer_num,
                                            const VideoOutBufferAttribute2* attribute, int category,

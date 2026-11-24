@@ -37,6 +37,7 @@ constexpr int32_t NGS2_ERROR_INVALID_SYSTEM_HANDLE =
     static_cast<int32_t>(0x804a8201u);
 constexpr int32_t NGS2_ERROR_INVALID_RACK_HANDLE =
     static_cast<int32_t>(0x804a8202u);
+constexpr int32_t NGS2_ERROR_INVALID_VOICE_HANDLE = static_cast<int32_t>(0x804a0230u);
 constexpr int32_t NGS2_ERROR_INVALID_OUT_ADDRESS =
     static_cast<int32_t>(0x804a8010u);
 constexpr int32_t NGS2_ERROR_INVALID_OUT_SIZE =
@@ -4436,7 +4437,10 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
                                     size_t state_size) {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(voice_handle == 0);
+	if (voice_handle == 0) {
+		// PS4 games poll voices they have not created yet.
+		return NGS2_ERROR_INVALID_VOICE_HANDLE;
+	}
 	if (state_size < sizeof(Ngs2VoiceState)) {
 		return NGS2_ERROR_INVALID_OUT_SIZE;
 	}

@@ -1273,6 +1273,9 @@ Program* RuntimeLinker::LoadProgram(const std::filesystem::path& elf_name) {
 		EXIT("elf is not valid: %s\n", Common::PathToString(elf_name).c_str());
 	}
 
+	if (m_programs.empty()) {
+		m_main_is_ps4.store(!program->elf->IsNextGen(), std::memory_order_relaxed);
+	}
 	m_programs.push_back(program_owner.release());
 
 	if (!program->elf->IsShared()) {

@@ -8,6 +8,7 @@
 #include "common/threads.h"
 #include "loader/symbolDatabase.h"
 
+#include <atomic>
 #include <filesystem>
 #include <memory>
 #include <vector>
@@ -137,6 +138,10 @@ public:
 
 	[[nodiscard]] uint64_t GetEntry();
 	[[nodiscard]] uint64_t GetProcParam();
+	// The main executable was built for PS4 (backward compatibility); set once it is loaded.
+	[[nodiscard]] bool MainProgramIsPs4() const noexcept {
+		return m_main_is_ps4.load(std::memory_order_relaxed);
+	}
 
 	void RelocateAll();
 	void RelocateProgram(Program* program);
@@ -182,6 +187,7 @@ private:
 	static const LibraryId* FindLibrary(const Program& program, const std::string& id);
 
 	std::vector<Program*>           m_programs;
+	std::atomic<bool>               m_main_is_ps4 {false};
 	std::unique_ptr<SymbolDatabase> m_symbols;
 	Common::Mutex                   m_mutex;
 

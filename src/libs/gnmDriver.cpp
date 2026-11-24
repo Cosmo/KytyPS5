@@ -10,11 +10,15 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/stringUtils.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
 #include "kernel/eventQueue.h"
+#if defined(__ANDROID__)
+#include "android/capyps5_jni.h"
+#endif
 #include "libs/agc.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
@@ -24,8 +28,12 @@
 #include <atomic>
 #include <bit>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fmt/format.h>
 #include <mutex>
+#include <tuple>
 
 namespace Libs::Graphics::Gen4Driver {
 
@@ -82,6 +90,15 @@ void WriteNop(uint32_t* cmd, uint32_t dwords) {
 	}
 	*cmd = Type3(PacketNop, dwords - 1u);
 	std::memset(cmd + 1, 0, (dwords - 1u) * sizeof(uint32_t));
+}
+
+// The shader setters end with a NOP over the rest of the region the game reserved (`size` dwords
+// from `start`): a dword left over (zero) reads as a type-0 packet that swallows the next header.
+// A region far larger than the packets falls back to the usual NOP of `fixed` dwords.
+void TrailingNop(uint32_t* cmd, const uint32_t* start, uint32_t size, uint32_t fixed) {
+	const auto used = static_cast<uint32_t>(cmd - start);
+	const auto rest = size > used ? size - used : 0u;
+	WriteNop(cmd, rest >= fixed && rest <= fixed + 4u ? rest : fixed);
 }
 
 // PS4 default hardware state after CLEAR_STATE (SDK 1.x), as the firmware sets it.
@@ -194,6 +211,7 @@ int SubmitBuffers(uint32_t count, uint32_t* const* dcbs, const uint32_t* dcb_byt
 
 int KYTY_SYSV_ABI GnmSetVsShader(uint32_t* cmd, uint32_t size, const uint32_t* regs, uint32_t modifier) {
 	PRINT_NAME();
+	uint32_t* const start = cmd;
 	if (cmd == nullptr || size <= 0x1c || regs == nullptr || (modifier & 0xfcfffc3fu) != 0 || regs[1] != 0) {
 		return -1;
 	}
@@ -203,19 +221,20 @@ int KYTY_SYSV_ABI GnmSetVsShader(uint32_t* cmd, uint32_t size, const uint32_t* r
 	cmd = SetContextReg(cmd, 0x207, {regs[6]});         // PA_CL_VS_OUT_CNTL
 	cmd = SetContextReg(cmd, 0x1b1, {regs[4]});         // SPI_VS_OUT_CONFIG
 	cmd = SetContextReg(cmd, 0x1c3, {regs[5]});         // SPI_SHADER_POS_FORMAT
-	WriteNop(cmd, 11);
+	TrailingNop(cmd, start, size, 11);
 	return OK;
 }
 
 int KYTY_SYSV_ABI GnmSetPsShader(uint32_t* cmd, uint32_t size, const uint32_t* regs) {
 	PRINT_NAME();
+	uint32_t* const start = cmd;
 	if (cmd == nullptr || size <= 0x27) {
 		return -1;
 	}
 	if (regs == nullptr) {
 		cmd = SetShReg(cmd, 0x08, {0, 0});           // SPI_SHADER_PGM_LO/HI_PS
 		cmd = SetContextReg(cmd, 0x203, {0});        // DB_SHADER_CONTROL
-		WriteNop(cmd, 0x20);
+		TrailingNop(cmd, start, size, 0x20);
 		return OK;
 	}
 	if (regs[1] != 0) {
@@ -229,36 +248,39 @@ int KYTY_SYSV_ABI GnmSetPsShader(uint32_t* cmd, uint32_t size, const uint32_t* r
 	cmd = SetContextReg(cmd, 0x1b8, {regs[9]});           // SPI_BARYC_CNTL
 	cmd = SetContextReg(cmd, 0x203, {regs[10]});          // DB_SHADER_CONTROL
 	cmd = SetContextReg(cmd, 0x08f, {regs[11]});          // CB_SHADER_MASK
-	WriteNop(cmd, 11);
+	TrailingNop(cmd, start, size, 11);
 	return OK;
 }
 
 int KYTY_SYSV_ABI GnmSetCsShader(uint32_t* cmd, uint32_t size, const uint32_t* regs) {
 	PRINT_NAME();
+	uint32_t* const start = cmd;
 	if (cmd == nullptr || size <= 0x18 || regs == nullptr || regs[1] != 0) {
 		return -1;
 	}
 	cmd = SetShReg(cmd, 0x20c, {regs[0], 0});                 // COMPUTE_PGM_LO/HI
 	cmd = SetShReg(cmd, 0x212, {regs[2], regs[3]});           // COMPUTE_PGM_RSRC1/2
 	cmd = SetShReg(cmd, 0x207, {regs[4], regs[5], regs[6]});  // COMPUTE_NUM_THREAD_X/Y/Z
-	WriteNop(cmd, 11);
+	TrailingNop(cmd, start, size, 11);
 	return OK;
 }
 
 int KYTY_SYSV_ABI GnmSetEsShader(uint32_t* cmd, uint32_t size, const uint32_t* regs, uint32_t modifier) {
 	PRINT_NAME();
+	uint32_t* const start = cmd;
 	if (cmd == nullptr || size < 0x14 || regs == nullptr || (modifier & 0xfcfffc3fu) != 0 || regs[1] != 0) {
 		return -1;
 	}
 	const uint32_t rsrc1 = modifier == 0 ? regs[2] : (regs[2] & 0xfcfffc3fu) | modifier;
 	cmd = SetShReg(cmd, 0xc8, {regs[0], 0});      // SPI_SHADER_PGM_LO/HI_ES
 	cmd = SetShReg(cmd, 0xca, {rsrc1, regs[3]});  // SPI_SHADER_PGM_RSRC1/2_ES
-	WriteNop(cmd, 11);
+	TrailingNop(cmd, start, size, 11);
 	return OK;
 }
 
 int KYTY_SYSV_ABI GnmSetGsShader(uint32_t* cmd, uint32_t size, const uint32_t* regs) {
 	PRINT_NAME();
+	uint32_t* const start = cmd;
 	if (cmd == nullptr || size < 0x1d || regs == nullptr || regs[1] != 0) {
 		return -1;
 	}
@@ -267,12 +289,13 @@ int KYTY_SYSV_ABI GnmSetGsShader(uint32_t* cmd, uint32_t size, const uint32_t* r
 	cmd = SetContextReg(cmd, 0x2e5, {regs[4]});      // VGT_STRMOUT_CONFIG
 	cmd = SetContextReg(cmd, 0x29b, {regs[5]});      // VGT_GS_OUT_PRIM_TYPE
 	cmd = SetContextReg(cmd, 0x2e4, {regs[6]});      // VGT_GS_INSTANCE_CNT
-	WriteNop(cmd, 11);
+	TrailingNop(cmd, start, size, 11);
 	return OK;
 }
 
 int KYTY_SYSV_ABI GnmSetHsShader(uint32_t* cmd, uint32_t size, const uint32_t* regs, uint32_t ls_hs_config) {
 	PRINT_NAME();
+	uint32_t* const start = cmd;
 	if (cmd == nullptr || size < 0x1e || regs == nullptr || regs[1] != 0) {
 		return -1;
 	}
@@ -281,12 +304,13 @@ int KYTY_SYSV_ABI GnmSetHsShader(uint32_t* cmd, uint32_t size, const uint32_t* r
 	cmd = SetContextReg(cmd, 0x286, {regs[5], regs[6]}); // VGT_HOS_MAX/MIN_TESS_LEVEL
 	cmd = SetContextReg(cmd, 0x2db, {regs[4]});         // VGT_TF_PARAM
 	cmd = SetContextReg(cmd, 0x2d6, {ls_hs_config});    // VGT_LS_HS_CONFIG
-	WriteNop(cmd, 11);
+	TrailingNop(cmd, start, size, 11);
 	return OK;
 }
 
 int KYTY_SYSV_ABI GnmSetLsShader(uint32_t* cmd, uint32_t size, const uint32_t* regs, uint32_t modifier) {
 	PRINT_NAME();
+	uint32_t* const start = cmd;
 	if (cmd == nullptr || size < 0x17 || regs == nullptr || regs[1] != 0) {
 		return -1;
 	}
@@ -298,7 +322,7 @@ int KYTY_SYSV_ABI GnmSetLsShader(uint32_t* cmd, uint32_t size, const uint32_t* r
 	cmd = SetShReg(cmd, 0x148, {regs[0], 0});      // SPI_SHADER_PGM_LO/HI_LS
 	cmd = SetShReg(cmd, 0x14b, {regs[3]});         // SPI_SHADER_PGM_RSRC2_LS
 	cmd = SetShReg(cmd, 0x14a, {rsrc1, regs[3]});  // SPI_SHADER_PGM_RSRC1/2_LS
-	WriteNop(cmd, 11);
+	TrailingNop(cmd, start, size, 11);
 	return OK;
 }
 
