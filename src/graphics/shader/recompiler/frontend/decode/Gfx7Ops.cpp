@@ -263,6 +263,43 @@ void DecodeMimgGfx7(uint32_t pc, std::span<const uint32_t> code, uint32_t word_i
 	Restore(inst, code, word_index, 2, (word0 >> 18u) & 0x7fu);
 }
 
+// MUBUF with ADDR64 accesses V# base + the VGPR pair at VADDR + SOFFSET + OFFSET, without range
+// checks. The PS4 shader compiler uses it for pointer accesses: a V# with base 0 and NUM_RECORDS
+// -1, SOFFSET 0. That is a gfx10 GLOBAL access through the VGPR pair, whose load and store opcodes
+// have the gfx7 MUBUF numbers; the V# base is taken as 0. Format loads, atomics and a non-zero
+// SOFFSET have no such form.
+void DecodeMubufAddr64Gfx7(uint32_t pc, std::span<const uint32_t> code, uint32_t word_index,
+                           Instruction& inst) {
+	const uint32_t word0   = code[word_index];
+	const uint32_t word1   = WordAt(code, word_index + 1u);
+	const uint32_t opcode  = (word0 >> 18u) & 0x7fu;
+	const uint32_t vaddr   = word1 & 0xffu;
+	const uint32_t vdata   = (word1 >> 8u) & 0xffu;
+	const uint32_t soffset = (word1 >> 24u) & 0xffu;
+	const bool     load    = opcode >= 8u && opcode <= 15u;
+	const bool     store   = opcode == 24u || opcode == 26u || (opcode >= 28u && opcode <= 31u);
+	const bool     lds     = ((word0 >> 16u) & 1u) != 0u;
+	const bool     tfe     = ((word1 >> 23u) & 1u) != 0u;
+	constexpr uint32_t InlineZero = 0x80u;
+	if ((!load && !store) || soffset != InlineZero || lds || tfe) {
+		inst.pc = pc;
+		SetRawWords(inst, code, word_index, 2);
+		SetUnsupported(inst, Family::MUBUF, opcode,
+		               "gfx7 ADDR64 buffer access other than a plain load or store at SOFFSET 0");
+		return;
+	}
+	constexpr uint32_t FlatEncoding  = 0x37u << 26u;
+	constexpr uint32_t GlobalSegment = 2u << 14u;
+	constexpr uint32_t SaddrOff      = 0x7du;
+	const std::array<uint32_t, 2> words {
+	    FlatEncoding | (opcode << 18u) | GlobalSegment,
+	    vaddr | ((store ? vdata : 0u) << 8u) | (SaddrOff << 16u) | ((load ? vdata : 0u) << 24u)};
+	DecodeFlat(pc, words, 0, inst);
+	// MUBUF offsets are unsigned 12-bit; GLOBAL ones are signed.
+	inst.offset = word0 & 0xfffu;
+	Restore(inst, code, word_index, 2, opcode);
+}
+
 } // namespace
 
 // A gfx7 DFMT/NFMT pair as the gfx10 unified buffer format number, 0 when it has none. Formats run
@@ -412,6 +449,10 @@ bool DecodeGfx7Instruction(std::span<const uint32_t> code, uint32_t word_index, 
 			return true;
 		case 0x38u:
 		case 0x3au:
+			if (((word >> 15u) & 1u) != 0u && (word >> 26u) == 0x38u) {
+				DecodeMubufAddr64Gfx7(pc, code, word_index, inst);
+				return true;
+			}
 			if (((word >> 15u) & 1u) != 0u) {
 				inst.pc = pc;
 				SetRawWords(inst, code, word_index, 2);

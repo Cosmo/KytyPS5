@@ -11,6 +11,18 @@ void Translator::EmitCompareResult(const Decoder::Instruction& inst, IR::U1 valu
 		return;
 	}
 	WriteVectorMask(inst.dst, value);
+	// gfx7 V_CMPX also writes its compare result to VCC (VOPC) or to the VOP3 SDST; gfx10 writes
+	// only EXEC. PS4 waterfall loops (`s10 &= ~sdst` after V_CMPX) never end without it.
+	if (inst.dst.kind == Decoder::OperandKind::ExecLo &&
+	    Decoder::GetGuestIsa() == Decoder::GuestIsa::Gfx7) {
+		if (inst.dst2.kind != Decoder::OperandKind::Unknown) {
+			WriteVectorMask(inst.dst2, value);
+		} else if (inst.family == Decoder::Family::VOPC) {
+			Decoder::Operand vcc;
+			vcc.kind = Decoder::OperandKind::VccLo;
+			WriteVectorMask(vcc, value);
+		}
+	}
 }
 
 void Translator::EmitCompareConstant(const Decoder::Instruction& inst, bool value, bool scalar) {

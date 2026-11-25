@@ -1575,6 +1575,43 @@ void DefineIndirectBufferLoads(ValueEmitContext& ctx) {
 	}
 }
 
+void DefineGetBdaPointerFlat(EmitterState& state, uint32_t type, uint32_t address, uint32_t page64,
+                             uint32_t page) {
+	// One level: pages past the guest address space have no entry; they read a null pointer and
+	// record no fault, as the two-level table reads its zero slot for them.
+	const auto in_range = Binary(state, spv::OpULessThan, TypeBool(state), page64,
+	                             ConstantU64(state, BdaLayout::PAGE_COUNT));
+	const auto outside_label = state.builder.AllocateId();
+	const auto inside_label  = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpSelectionMerge, inside_label, spv::SelectionControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, in_range, inside_label, outside_label);
+	EmitLabel(state, outside_label);
+	state.builder.AddFunction(spv::OpReturnValue, ConstantU64(state, 0));
+	EmitLabel(state, inside_label);
+	const auto entry_pointer = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state, 64),
+	                          entry_pointer, state.bda_pagetable_variable, ConstantU32(state, 0),
+	                          page);
+	const auto entry = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, type, entry, entry_pointer);
+	const auto unbacked =
+	    Binary(state, spv::OpIEqual, TypeBool(state), entry, ConstantU64(state, 0));
+	const auto fault_label = state.builder.AllocateId();
+	const auto merge_label = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpSelectionMerge, merge_label, spv::SelectionControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, unbacked, fault_label, merge_label);
+
+	EmitLabel(state, fault_label);
+	RecordBdaFault(state, page);
+	state.builder.AddFunction(spv::OpReturnValue, ConstantU64(state, 0));
+
+	EmitLabel(state, merge_label);
+	const auto offset = Binary(state, spv::OpBitwiseAnd, type, address,
+	                           ConstantU64(state, BufferCache::CACHING_PAGESIZE - 1));
+	state.builder.AddFunction(spv::OpReturnValue, Binary(state, spv::OpIAdd, type, entry, offset));
+	state.builder.AddFunction(spv::OpFunctionEnd);
+}
+
 void DefineGetBdaPointer(EmitterState& state) {
 	if (!state.program.info.uses_dma) {
 		return;
@@ -1625,6 +1662,10 @@ void DefineGetBdaPointer(EmitterState& state) {
 		    Binary(state, spv::OpBitwiseAnd, TypeU32(state), page,
 		           ConstantU32(state, static_cast<uint32_t>(BdaLayout::BLOCK_ENTRIES - 1))));
 	}
+	if (!GetHostShaderFeatures().bda_two_level) {
+		DefineGetBdaPointerFlat(state, type, address, page64, page);
+		return;
+	}
 	const auto entry_pointer = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state, 64),
 	                          entry_pointer, state.bda_pagetable_variable, ConstantU32(state, 0),
@@ -1656,22 +1697,6 @@ void DefineGetBdaPointer(EmitterState& state) {
 		state.builder.AddFunction(spv::OpFunctionEnd);
 		return;
 	}
-	const auto unbacked =
-	    Binary(state, spv::OpIEqual, TypeBool(state), entry, ConstantU64(state, 0));
-	const auto fault_label = state.builder.AllocateId();
-	const auto merge_label = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpSelectionMerge, merge_label, spv::SelectionControlMaskNone);
-	state.builder.AddFunction(spv::OpBranchConditional, unbacked, fault_label, merge_label);
-
-	EmitLabel(state, fault_label);
-	RecordBdaFault(state, page);
-	state.builder.AddFunction(spv::OpReturnValue, ConstantU64(state, 0));
-
-	EmitLabel(state, merge_label);
-	const auto offset = Binary(state, spv::OpBitwiseAnd, type, address,
-	                           ConstantU64(state, BufferCache::CACHING_PAGESIZE - 1));
-	state.builder.AddFunction(spv::OpReturnValue, Binary(state, spv::OpIAdd, type, entry, offset));
-	state.builder.AddFunction(spv::OpFunctionEnd);
 }
 
 uint32_t EmitAtomic32(ValueEmitContext& ctx, const IR::Inst& inst) {

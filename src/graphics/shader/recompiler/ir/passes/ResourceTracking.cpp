@@ -1,6 +1,8 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
@@ -4082,6 +4084,23 @@ private:
 			    std::all_of(descriptor.dwords.begin(), descriptor.dwords.begin() + width,
 			                [](Value word) { return word.Resolve().GetType() == Type::U32; })) {
 				return false;
+			}
+			// PS4: an image or sampler the GPU selects in a way no indirect plan serves (a table
+			// indexed by a value computed in vector registers) reads as a null descriptor rather
+			// than stopping the game.
+			if (Decoder::GetGuestIsa() == Decoder::GuestIsa::Gfx7 && descriptor.dword_count == width &&
+			    (expected == ValueOpcode::GetImageResource ||
+			     expected == ValueOpcode::GetSamplerResource)) {
+				Log::WriteToConsoleAndLog(fmt::format(
+				    "shader resource tracking: hash=0x{:016x} pc=0x{:08x}: {} dword {} is GPU-selected; "
+				    "using a null descriptor\n",
+				    m_program.shader_hash, pc, ValueOpcodeName(expected), bad_dword));
+				for (uint32_t i = 0; i < width; i++) {
+					descriptor.dwords[i] = Value(0u);
+				}
+				descriptor.indirect_descriptor.reset();
+				source = InternSource(descriptor);
+				return true;
 			}
 			Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
 			                     ValueOpcodeName(expected), bad_dword));
