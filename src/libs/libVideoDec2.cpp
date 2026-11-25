@@ -1,9 +1,11 @@
 #include "common/abi.h"
 #include "common/alignment.h"
+#include "common/singleton.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "kernel/memory.h"
 #include "libs/videoDec2Decoder.h"
+#include "loader/runtimeLinker.h"
 #include "loader/symbolDatabase.h"
 
 #include <algorithm>
@@ -429,8 +431,14 @@ static int32_t CreateDecoderChecked(const Videodec2DecoderConfigInfo* config,
 		return VIDEODEC2_ERROR_MEMORY_POINTER;
 	}
 
-	auto* state =
-	    Decoder::Create({config->codec_type, config->max_frame_width, config->max_frame_height});
+	Decoder::Config decoder_config {config->codec_type, config->max_frame_width, config->max_frame_height};
+	// PS4 (backward compatibility): the PS4's Videodec2 lays frames out as its Videodec does, rows
+	// aligned to 64 bytes and the luma plane to 16 rows (shadPS4's videodec2_impl.cpp).
+	if (Common::Singleton<Loader::RuntimeLinker>::Instance()->MainProgramIsPs4()) {
+		decoder_config.pitch_alignment  = 64;
+		decoder_config.height_alignment = 16;
+	}
+	auto* state = Decoder::Create(decoder_config);
 	if (state == nullptr) {
 		return VIDEODEC2_ERROR_API_FAIL;
 	}
