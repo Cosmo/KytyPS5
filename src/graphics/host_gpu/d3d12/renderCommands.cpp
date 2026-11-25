@@ -498,10 +498,18 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 		m_mesh_indices = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(),
 		                                          MemoryUsage::DeviceLocal, 0, IndexBytes);
 	}
+	// The primitive IDs: one dword per primitive slot, no more slots than indices. A program without them has the records bound
+	// there (its shaders do not read that register).
+	const bool primitive_ids = mesh.output_primitive_id;
+	if (primitive_ids && m_mesh_primitive_ids == nullptr) {
+		m_mesh_primitive_ids = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(),
+		                                                MemoryUsage::DeviceLocal, 0, IndexBytes);
+	}
 	auto*      list    = buffer.Handle();
 	auto&      trace   = D3D12::GetGpuTrace();
 	const auto records = m_mesh_records->GpuAddress();
 	const auto indices = m_mesh_indices->GpuAddress();
+	const auto ids     = primitive_ids ? m_mesh_primitive_ids->GpuAddress() : records;
 
 	// The chunk: `chunk_groups` groups of each of `chunk_instances` instances, as many as fit.
 	const uint64_t budget = std::min(RecordBytes / group_records, IndexBytes / group_indices);
@@ -528,10 +536,14 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 			// The compute shader writes the chunk's vertices and triangles.
 			m_mesh_records->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 			m_mesh_indices->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+			if (primitive_ids) {
+				m_mesh_primitive_ids->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+			}
 			// (Root descriptors are set after the transitions: the debug layer takes a buffer's state
 			// at its first use from the first descriptor set for it.)
 			list->SetComputeRootUnorderedAccessView(compute_layout.MeshScratchParameter(), records);
 			list->SetComputeRootUnorderedAccessView(compute_layout.MeshScratchParameter() + 1, indices);
+			list->SetComputeRootUnorderedAccessView(compute_layout.MeshScratchParameter() + 2, ids);
 			list->SetComputeRoot32BitConstants(0, IR::MeshEmulation::DrawDwordCount, parameters, 0);
 			if (compute_layout.runtime_data) {
 				// spirv_to_dxil's compute runtime data: the group counts.
@@ -549,7 +561,11 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 			// One indexed draw of every slot of the chunk.
 			m_mesh_records->Use(buffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 			m_mesh_indices->Use(buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+			if (primitive_ids) {
+				m_mesh_primitive_ids->Use(buffer, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+			}
 			list->SetGraphicsRootShaderResourceView(graphics.layout.MeshScratchParameter(), records);
+			list->SetGraphicsRootShaderResourceView(graphics.layout.MeshScratchParameter() + 1, ids);
 			const auto                     index_count = chunk_groups * chunk_instances * primitive_slots * primitive_size;
 			const D3D12_INDEX_BUFFER_VIEW  view {indices, static_cast<UINT>(index_count * sizeof(uint32_t)),
 			                                     DXGI_FORMAT_R32_UINT};
@@ -1099,10 +1115,12 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	if (mesh && !emulated_mesh) {
 		list->SetGraphicsRoot32BitConstants(0, static_cast<UINT>(std::size(draw_data)), draw_data,
 		                                    0);
-	} else if (!mesh && state.ps_input_info.object_primitive_id) {
-		// The object ID (CxObjectIdMode) starts the push constants; the pixel program adds the primitive ID.
+	}
+	if (state.ps_input_info.object_primitive_id) {
+		// The object ID (CxObjectIdMode) takes the last push dword (upstream's PushData::ObjectIdDword); the pixel program adds
+		// the primitive ID.
 		const uint32_t object_id = buffer.GetUserConfig().GetObjectId();
-		list->SetGraphicsRoot32BitConstants(0, 1, &object_id, 0);
+		list->SetGraphicsRoot32BitConstants(0, 1, &object_id, IR::PushData::ObjectIdDword);
 	}
 	// The user clip planes follow (the vertex stage, or the one of a mesh program run as a compute shader, makes the clip distances).
 	if (const auto planes = vs_input_info.user_clip_planes; planes != 0) {

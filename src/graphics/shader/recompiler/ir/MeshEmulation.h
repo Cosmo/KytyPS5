@@ -19,6 +19,9 @@ struct MeshEmulation {
 	// Register spaces of the two buffers (root descriptors), outside the guest resource spaces.
 	static constexpr uint32_t RecordSpace = 1002;
 	static constexpr uint32_t IndexSpace  = 1003;
+	// With a primitive ID output (upstream's mesh PrimitiveId for the object/primitive ID target): the guest's ID of each primitive
+	// slot, which the pixel stage reads at its SV_PrimitiveID (the draw's primitives are the slots, in order).
+	static constexpr uint32_t PrimitiveIdSpace = 1009;
 	// The index of a point or line a group did not make (list draws take it as a vertex number).
 	static constexpr uint32_t NoVertex    = 0xffffffffu;
 

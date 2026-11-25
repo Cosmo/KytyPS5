@@ -169,6 +169,8 @@ struct EmitterState {
 	bool                       mesh_compute                          = false;
 	uint32_t                   mesh_records                          = 0;
 	uint32_t                   mesh_indices                          = 0;
+	// The emulation's primitive IDs (IR::MeshEmulation::PrimitiveIdSpace): written by the mesh program, read by the pixel stage.
+	uint32_t                   mesh_primitive_ids                    = 0;
 	uint32_t                   mesh_payload                          = 0;
 	// The tessellation stages run as the capture draw, the hull compute shader and the domain vertex stage (IR::TessEmulation):
 	// the tessellation attributes are buffer dwords, its builtins come from the buffers and the dispatch.
@@ -449,6 +451,8 @@ void     DefineMeshOutputs(EmitterState& state, uint32_t clip_distance_count,
 void     EmitMeshEntryPoint(EmitterState& state);
 uint32_t MeshOutputPointer(EmitterState& state, IR::StageOutputKind kind, uint32_t index = 0);
 uint32_t MeshPrimitivePointer(EmitterState& state, uint32_t component);
+// The pixel stage of a draw of the mesh compute emulation: the guest's ID of the primitive in slot `slot` (its SV_PrimitiveID).
+uint32_t EmitMeshEmulationPrimitiveId(EmitterState& state, uint32_t slot);
 
 DppTargetLane EmitDppTargetLane(EmitterState& state, const IR::DppMoveFlags& flags);
 

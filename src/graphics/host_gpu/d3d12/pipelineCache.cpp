@@ -1464,9 +1464,12 @@ ID3D12RootSignature* PipelineCache::GetRootSignature(const RootLayout& layout) {
 	}
 	// The buffers of a mesh program run as a compute shader: root descriptors, whose registers
 	// are the ones the emitter gives them (IR::MeshEmulation).
+	// The compute pass writes the records, the indices and the primitive IDs; the draw reads the records (vertex stage) and the
+	// primitive IDs (pixel stage, for the object/primitive ID target).
 	if (layout.mesh_scratch != RootLayout::MeshScratch::None) {
 		const bool write = layout.mesh_scratch == RootLayout::MeshScratch::Write;
-		for (const auto space: {IR::MeshEmulation::RecordSpace, IR::MeshEmulation::IndexSpace}) {
+		for (const auto space: {IR::MeshEmulation::RecordSpace, IR::MeshEmulation::IndexSpace,
+		                        IR::MeshEmulation::PrimitiveIdSpace}) {
 			if (!write && space == IR::MeshEmulation::IndexSpace) {
 				continue;
 			}
@@ -1477,9 +1480,9 @@ ID3D12RootSignature* PipelineCache::GetRootSignature(const RootLayout& layout) {
 			parameter.Descriptor.RegisterSpace  = space;
 			// The buffers go from written to read and back between the chunks of a draw.
 			parameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
-			// The records are read by the vertex stage only.
-			parameter.ShaderVisibility = write ? D3D12_SHADER_VISIBILITY_ALL
-			                                   : D3D12_SHADER_VISIBILITY_VERTEX;
+			parameter.ShaderVisibility = write                                         ? D3D12_SHADER_VISIBILITY_ALL
+			                             : space == IR::MeshEmulation::PrimitiveIdSpace ? D3D12_SHADER_VISIBILITY_PIXEL
+			                                                                            : D3D12_SHADER_VISIBILITY_VERTEX;
 			parameters.push_back(parameter);
 		}
 	}

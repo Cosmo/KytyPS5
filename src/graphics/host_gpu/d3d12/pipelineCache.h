@@ -79,7 +79,8 @@ struct RootLayout {
 		return (push_constants ? 1u : 0u) + (runtime_data ? 1u : 0u) + (views.empty() ? 0u : 1u) +
 		       (samplers.empty() ? 0u : 1u);
 	}
-	// The root parameter of the first mesh scratch buffer, which follows the tables.
+	// The root parameter of the first mesh scratch buffer, which follows the tables: the records, the indices (compute only) and
+	// the primitive IDs (IR::MeshEmulation).
 	[[nodiscard]] uint32_t MeshScratchParameter() const noexcept {
 		return GuestTableParameter() + (guest_table ? 1u : 0u);
 	}

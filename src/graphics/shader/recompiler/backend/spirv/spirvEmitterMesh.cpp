@@ -152,7 +152,7 @@ void EmitMeshComputeEpilogue(EmitterState& state, uint32_t vertices, uint32_t pr
 		EmitIfCondition(state, in_slots, [&] {
 			const auto in_range = MeshCompare(state, spv::OpULessThan, index, primitives);
 			const auto packed =
-			    MeshLoad(state, state.mesh_primitive_data, spv::StorageClassPrivate, TypeU32(state),
+			    MeshLoad(state, state.mesh_primitive_data[0], spv::StorageClassPrivate, TypeU32(state),
 			             ConstantU32(state, half));
 			const auto culled =
 			    MeshCompare(state, spv::OpINotEqual,
@@ -177,6 +177,13 @@ void EmitMeshComputeEpilogue(EmitterState& state, uint32_t vertices, uint32_t pr
 				state.builder.AddFunction(spv::OpSelect, TypeU32(state), kept, made, EmitAddU32(state, vertex_base, vertex),
 				                          size == 3u ? vertex_base : ConstantU32(state, IR::MeshEmulation::NoVertex));
 				MeshStoreDword(state, state.mesh_indices, EmitAddU32(state, first, ConstantU32(state, component)), kept);
+			}
+			if (state.mesh_primitive_ids != 0) {
+				const auto id   = MeshLoad(state, state.mesh_primitive_data[1], spv::StorageClassPrivate, TypeU32(state),
+				                           ConstantU32(state, half));
+				const auto kept = state.builder.AllocateId();
+				state.builder.AddFunction(spv::OpSelect, TypeU32(state), kept, made, id, ConstantU32(state, 0));
+				MeshStoreDword(state, state.mesh_primitive_ids, EmitAddU32(state, primitive_base, index), kept);
 			}
 		});
 	}
@@ -233,6 +240,13 @@ void DefineMeshOutputs(EmitterState& state, uint32_t clip_distance_count,
 	if (state.mesh_compute) {
 		state.mesh_records = MeshEmulationBuffer(state, IR::MeshEmulation::RecordSpace, "mesh_records");
 		state.mesh_indices = MeshEmulationBuffer(state, IR::MeshEmulation::IndexSpace, "mesh_indices");
+		if (mesh.output_primitive_id) {
+			// Each primitive's ID (its export's second dword) goes to its slot in a third buffer, which the pixel stage reads.
+			state.mesh_primitive_data[1] =
+			    MeshArray(state, spv::StorageClassPrivate, TypeU32(state), state.lane_count);
+			state.mesh_primitive_ids =
+			    MeshEmulationBuffer(state, IR::MeshEmulation::PrimitiveIdSpace, "mesh_primitive_ids");
+		}
 		return;
 	}
 	state.mesh_primitives = MeshArray(state, spv::StorageClassOutput, MeshPrimitiveType(state),
@@ -276,6 +290,21 @@ uint32_t MeshOutputPointer(EmitterState& state, IR::StageOutputKind kind, uint32
 uint32_t MeshPrimitivePointer(EmitterState& state, uint32_t component) {
 	return MeshElement(state, state.mesh_primitive_data[component], spv::StorageClassPrivate, TypeU32(state),
 	                   ConstantU32(state, state.lane_half));
+}
+
+uint32_t EmitMeshEmulationPrimitiveId(EmitterState& state, uint32_t slot) {
+	if (state.mesh_primitive_ids == 0) {
+		// Read only: set and binding make D3D12 register t0 of the primitive ID space (as the fetch stage's records).
+		state.mesh_primitive_ids =
+		    MeshEmulationBuffer(state, IR::MeshEmulation::PrimitiveIdSpace, "mesh_primitive_ids");
+		state.builder.AddAnnotation(spv::OpDecorate, state.mesh_primitive_ids, spv::DecorationNonWritable);
+	}
+	const auto pointer = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state, 32), pointer,
+	                          state.mesh_primitive_ids, ConstantU32(state, 0), slot);
+	const auto value = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, pointer);
+	return value;
 }
 
 void EmitMeshAllocate(ValueEmitContext& ctx, const IR::Inst& inst) {

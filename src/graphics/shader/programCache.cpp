@@ -453,18 +453,19 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 	}
 	if (object_primitive_id) {
 		// CxObjectIdMode: register source plus a 32-bit pipelined primitive-ID addition.
-		EXIT_NOT_IMPLEMENTED(sh.m_paClObjprimIdCntl != 2u || mesh_active || tess_active ||
-		                     !pixel_active || (sh.m_vgtDrawPayloadCntl & 8u) == 0 ||
-		                     user_config.GetPrimType() != Prospero::PrimitiveType::kTriList);
+		EXIT_NOT_IMPLEMENTED(sh.m_paClObjprimIdCntl != 2u || !pixel_active ||
+		                     (sh.m_vgtDrawPayloadCntl & 8u) == 0 ||
+		                     (!mesh_active && user_config.GetPrimType() != Prospero::PrimitiveType::kTriList));
 		const auto& target = context.GetRenderTarget(7);
 		EXIT_NOT_IMPLEMENTED(Prospero::ResolveRenderTargetFormat(target.info.format,
 		                                                       target.info.channel_type)
 		                         .buffer_format != Prospero::BufferFormat::k32UInt);
 	}
 	if (mesh_active) {
-		auto& mesh              = vertex_info[0].mesh;
-		mesh.compute_emulation  = !m_limits.mesh_shader_enabled;
-		mesh.host_subgroup_size = m_limits.subgroup_size;
+		auto& mesh               = vertex_info[0].mesh;
+		mesh.compute_emulation   = !m_limits.mesh_shader_enabled;
+		mesh.output_primitive_id = object_primitive_id;
+		mesh.host_subgroup_size  = m_limits.subgroup_size;
 		static std::atomic_bool reported = false;
 		const auto              report_once = [&](const char* message) {
 			if (!reported.exchange(true, std::memory_order_relaxed)) {
@@ -514,6 +515,7 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 		const auto target_export_mapping = RenderTargetExportMapping(m_graphics, context);
 		pixel_params      = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
 		pixel_info.object_primitive_id = object_primitive_id;
+		pixel_info.mesh_primitive_ids  = object_primitive_id && mesh_active && vertex_info[0].mesh.compute_emulation;
 		for (uint32_t export_index = 0; export_index < 8u; export_index++) {
 			const auto slot = ShaderPixelExportTarget(pixel_info.target_shader_mask, export_index);
 			if (slot >= 8u || pixel_info.target_output_mode[export_index] == 0u) continue;
@@ -607,18 +609,17 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 		                     Prospero::IsRectList(user_config.GetPrimType()));
 		last_stage.user_clip_planes = clip_control.user_clip_planes;
 	}
-	// A mesh program's own draw parameters (or the object ID) come first in the push data, then the user
-	// clip planes; the pixel stage's data takes the end (upstream's PushData::Window). (A mesh program run as a compute shader has its draw
-	// parameters in the compute push data and its planes in the graphics one, both before the window: 6 + 4 per plane > DrawDwordCount.)
+	// A mesh program's own draw parameters come first in the push data, then the user clip planes; the object ID takes the last
+	// dword and the pixel stage's data the end before it (upstream's PushData::GraphicsWindow). (A mesh program run as a compute
+	// shader has its draw parameters in the compute push data and its planes in the graphics one, both before the window: 6 + 4 per
+	// plane > DrawDwordCount.)
 	static_assert(ShaderRecompiler::IR::PushData::UserClipPlaneDword + 4u >
 	              ShaderRecompiler::IR::MeshEmulation::DrawDwordCount);
-	ShaderRecompiler::IR::PushData::Window push_data;
-	push_data.begin =
-	    !mesh_active || last_stage.user_clip_planes != 0
-	        ? ShaderRecompiler::IR::PushData::GraphicsDrawDwords(mesh_active, object_primitive_id,
-	                                                             last_stage.user_clip_planes)
-	    : vertex_info[0].mesh.compute_emulation ? ShaderRecompiler::IR::MeshEmulation::DrawDwordCount
-	                                            : ShaderRecompiler::IR::PushData::MeshDrawDwordCount;
+	auto push_data = ShaderRecompiler::IR::PushData::GraphicsWindow(mesh_active, object_primitive_id,
+	                                                                last_stage.user_clip_planes);
+	if (mesh_active && last_stage.user_clip_planes == 0 && vertex_info[0].mesh.compute_emulation) {
+		push_data.begin = ShaderRecompiler::IR::MeshEmulation::DrawDwordCount;
+	}
 	GraphicsPrograms  result;
 	if (pixel_active) {
 		result.pixel = m_impl->Get(pixel_params, pixel_info, push_data);

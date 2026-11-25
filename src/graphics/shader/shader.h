@@ -234,6 +234,8 @@ struct ShaderPixelInputInfo {
 	bool                                           ps_sample_shading            = false;
 	bool                                           dual_source_blending         = false;
 	bool                                           object_primitive_id          = false;
+	// The draw's primitive IDs come from the mesh compute emulation's buffer (IR::MeshEmulation::PrimitiveIdSpace), not the rasterizer.
+	bool                                           mesh_primitive_ids           = false;
 	// Export logical alpha or per-channel source factors through MRT1 after channel swizzling.
 	ShaderAlphaBlendSource                         alpha_blend_source = ShaderAlphaBlendSource::None;
 	bool                                           ps_early_z                   = false;
