@@ -2070,6 +2070,8 @@ void TextureCache::ApplyBackingWrites() {
 		m_has_backing_writes.store(false, std::memory_order_release);
 	}
 	for (const auto& write: writes) {
+		// The buffer cache would hand image uploads its older copy of the range.
+		m_buffer_cache.InvalidateMemory(write.address, write.size);
 		Common::SmallVector<ImageId, 8> ids;
 		ForEachImageInRegion(write.address, write.size, [&](ImageId id, Image& image) {
 			if (!image.IsGpuModified()) {
