@@ -282,6 +282,8 @@ private:
 	// made when the first one is drawn.
 	std::unique_ptr<Buffer> m_mesh_records;
 	std::unique_ptr<Buffer> m_mesh_indices;
+	// Made by the first draw whose mesh program outputs primitive IDs (IR::MeshEmulation::PrimitiveIdSpace).
+	std::unique_ptr<Buffer> m_mesh_primitive_ids;
 	// The buffers of the tessellated draw being recorded (see TessDraw): the LS outputs, the patch records, and the tessellator's domain
 	// points followed by its indices. Made when the first one is drawn, grown as needed.
 	std::unique_ptr<Buffer> m_tess_capture;

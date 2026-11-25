@@ -86,8 +86,12 @@ void EmitReturn(ValueEmitContext& ctx) {
 	EmitKillIfPixelValidMaskInactive(ctx.state);
 	if (ctx.state.object_primitive_id_variable != 0) {
 		auto& state = ctx.state;
-		const auto primitive = EmitGetBuiltin(
+		auto primitive = EmitGetBuiltin(
 		    ctx, IR::Value {static_cast<uint32_t>(IR::StageInputKind::PrimitiveId)}, IR::Value {0u});
+		if (state.input_info.pixel != nullptr && state.input_info.pixel->mesh_primitive_ids) {
+			// After a mesh program run as a compute shader the rasterizer's primitive is a slot: its ID is the program's.
+			primitive = EmitMeshEmulationPrimitiveId(state, primitive);
+		}
 		const auto object = EmitPushDataLoad(state, ConstantU32(state, IR::PushData::ObjectIdDword));
 		state.builder.AddFunction(spv::OpStore, state.object_primitive_id_variable,
 		                          EmitAddU32(state, object, primitive));
