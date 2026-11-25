@@ -1764,6 +1764,17 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		    Common::PathToString(program->file_name.filename()).c_str());
 		EXIT_IF(program->map_vaddr != first);
 		program->base_vaddr = 0;
+	} else if (!is_shared && !is_next_gen) {
+		// A PS4 main executable loads at 0x400000 on the console and in shadPS4
+		// (ExecutableLoadBase): games keep pointer offsets that only cover the low 2 GiB. The host
+		// may map something there, so it takes the first free range from 0x400000 below 2 GiB.
+		constexpr uint64_t PS4_EXECUTABLE_BASE = 0x400000u;
+		constexpr uint64_t PS4_EXECUTABLE_END  = 0x80000000u;
+		program->base_vaddr = Libs::LibKernel::Memory::AllocateProgramMemory(
+		    PS4_EXECUTABLE_BASE, program->mapped_size, Common::VirtualMemory::Mode::ExecuteReadWrite,
+		    Common::PathToString(program->file_name.filename()).c_str());
+		EXIT_IF(program->base_vaddr == 0 || program->base_vaddr > PS4_EXECUTABLE_END - program->mapped_size);
+		program->map_vaddr = program->base_vaddr;
 	} else {
 		program->base_vaddr = Libs::LibKernel::Memory::AllocateProgramMemory(
 		    g_desired_base_addr, program->mapped_size, Common::VirtualMemory::Mode::ExecuteReadWrite,
