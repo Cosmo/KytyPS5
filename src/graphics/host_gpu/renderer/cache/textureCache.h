@@ -274,6 +274,10 @@ private:
 	void ValidateImageDesc(const ImageDesc& desc) const;
 
 	[[nodiscard]] bool DownloadImageMemory(ImageId id);
+	// PS4: guest memory a write-back changed without a page fault (any lock may be held); the
+	// images over it are marked CPU-dirty under m_lock by ApplyBackingWrites.
+	void NoteBackingWrite(uint64_t address, uint64_t size);
+	void ApplyBackingWrites();
 	[[nodiscard]] bool DownloadQueuedImages();
 
 	GraphicContext&                                   m_graphics;
@@ -289,6 +293,9 @@ private:
 	Common::LeastRecentlyUsedCache<ImageId, uint64_t> m_lru_cache;
 	std::unordered_set<ImageId>                       m_download_images;
 	std::mutex                                        m_write_back_mutex;
+	std::mutex                                        m_backing_writes_mutex;
+	std::vector<GuestRange>                           m_backing_writes;
+	std::atomic<bool>                                 m_has_backing_writes {false};
 	std::vector<WriteBack>                            m_write_backs;
 	std::map<uint64_t, MetaDataInfo>                  m_surface_metas;
 	uint64_t                                          m_total_used_memory  = 0;

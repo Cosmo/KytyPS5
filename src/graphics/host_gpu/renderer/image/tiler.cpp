@@ -266,11 +266,26 @@ vk::Pipeline TileManager::GetGfx7Pipeline(const ImageInfo& info, bool tiler) {
 
 TileManager::Result TileManager::DetileGfx7(vk::Buffer tiled, uint64_t tiled_offset,
                                             const ImageInfo& info) {
+	const auto scratch = GetScratchBuffer(info.gfx7.guest_size, tiled);
+	RecordGfx7(false, tiled, tiled_offset, scratch.buffer, 0, info);
+	return {scratch.buffer, 0, info.gfx7.guest_size};
+}
+
+void TileManager::TileGfx7(vk::Buffer linear, uint64_t linear_offset, vk::Buffer tiled,
+                           uint64_t tiled_offset, const ImageInfo& info) {
+	RecordGfx7(true, tiled, tiled_offset, linear, linear_offset, info);
+}
+
+// One dispatch of shadPS4's tiling shader between a surface in its gfx7 layout (`tiled`) and its
+// levels one after another at their guest offsets (`linear`); `tiler` writes the gfx7 layout.
+void TileManager::RecordGfx7(bool tiler, vk::Buffer tiled, uint64_t tiled_offset, vk::Buffer linear,
+                             uint64_t linear_offset, const ImageInfo& info) {
 	const auto& layout = info.gfx7;
 	const auto& limits = m_graphics.GetPhysicalDeviceProperties().limits;
-	const uint64_t size = layout.guest_size;
+	const uint64_t size      = layout.guest_size;
+	const uint64_t alignment = std::max<uint64_t>(limits.minStorageBufferOffsetAlignment, 4);
 	EXIT_NOT_IMPLEMENTED(size == 0 || size > limits.maxStorageBufferRange ||
-	                     tiled_offset % std::max<uint64_t>(limits.minStorageBufferOffsetAlignment, 4) != 0);
+	                     tiled_offset % alignment != 0 || linear_offset % alignment != 0);
 
 	Gfx7TilingInfo params {};
 	params.bank_swizzle     = layout.bank_swizzle;
@@ -286,8 +301,13 @@ TileManager::Result TileManager::DetileGfx7(vk::Buffer tiled, uint64_t tiled_off
 	params.num_texels = static_cast<uint32_t>(size / (layout.num_bits / 8u));
 	const auto params_offset = m_stream_buffer.Copy(
 	    &params, sizeof(params), std::max<uint64_t>(limits.minUniformBufferOffsetAlignment, 4));
-	const auto pipeline = GetGfx7Pipeline(info, false);
-	auto       scratch  = GetScratchBuffer(size, tiled);
+	const auto pipeline = GetGfx7Pipeline(info, tiler);
+
+	// The shader reads one side and writes the other.
+	const vk::Buffer source        = tiler ? linear : tiled;
+	const uint64_t   source_offset = tiler ? linear_offset : tiled_offset;
+	const vk::Buffer target        = tiler ? tiled : linear;
+	const uint64_t   target_offset = tiler ? tiled_offset : linear_offset;
 
 	m_scheduler.EndRendering();
 	auto                    command = m_scheduler.Current().Handle();
@@ -296,15 +316,15 @@ TileManager::Result TileManager::DetileGfx7(vk::Buffer tiled, uint64_t tiled_off
 	barriers[0].dstAccessMask       = vk::AccessFlagBits::eShaderRead;
 	barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barriers[0].buffer              = tiled;
-	barriers[0].offset              = tiled_offset;
+	barriers[0].buffer              = source;
+	barriers[0].offset              = source_offset;
 	barriers[0].size                = size;
 	barriers[1]                     = barriers[0];
 	barriers[1].srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
 	barriers[1].dstAccessMask       = vk::AccessFlagBits::eShaderWrite;
-	barriers[1].buffer              = scratch.buffer;
-	barriers[1].offset              = 0;
-	barriers[1].size                = scratch.size;
+	barriers[1].buffer              = target;
+	barriers[1].offset              = target_offset;
+	barriers[1].size                = size;
 	barriers[2]                     = barriers[0];
 	barriers[2].srcAccessMask       = vk::AccessFlagBits::eHostWrite;
 	barriers[2].dstAccessMask       = vk::AccessFlagBits::eUniformRead;
@@ -316,7 +336,7 @@ TileManager::Result TileManager::DetileGfx7(vk::Buffer tiled, uint64_t tiled_off
 	                        nullptr);
 
 	const vk::DescriptorBufferInfo infos[] {{tiled, tiled_offset, Common::AlignUp(size, 4)},
-	                                        {scratch.buffer, 0, scratch.size},
+	                                        {linear, linear_offset, Common::AlignUp(size, 4)},
 	                                        {m_stream_buffer.Handle(), params_offset, sizeof(params)}};
 	std::array<vk::WriteDescriptorSet, 3> writes {};
 	for (uint32_t index = 0; index < writes.size(); index++) {
@@ -336,11 +356,11 @@ TileManager::Result TileManager::DetileGfx7(vk::Buffer tiled, uint64_t tiled_off
 	command.dispatch(groups_x, groups_y, 1);
 
 	barriers[1].srcAccessMask = vk::AccessFlagBits::eShaderWrite;
-	barriers[1].dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eMemoryRead;
+	barriers[1].dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eMemoryRead |
+	                            vk::AccessFlagBits::eHostRead;
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-	                        vk::PipelineStageFlagBits::eAllCommands, {}, 0, nullptr, 1, &barriers[1], 0,
-	                        nullptr);
-	return {scratch.buffer, 0, size};
+	                        vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
+	                        {}, 0, nullptr, 1, &barriers[1], 0, nullptr);
 }
 
 void TileManager::Tile(vk::Buffer linear, uint64_t linear_offset, uint64_t linear_capacity,

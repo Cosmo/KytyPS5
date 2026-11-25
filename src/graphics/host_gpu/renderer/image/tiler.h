@@ -50,6 +50,9 @@ public:
 	// each level at its guest offset with its padded pitch and height (shadPS4's
 	// TileManager::DetileImage and tiling shaders).
 	[[nodiscard]] Result DetileGfx7(vk::Buffer tiled, uint64_t tiled_offset, const ImageInfo& info);
+	// PS4: the reverse, the levels at their guest offsets in `linear` into the gfx7 layout.
+	void TileGfx7(vk::Buffer linear, uint64_t linear_offset, vk::Buffer tiled, uint64_t tiled_offset,
+	              const ImageInfo& info);
 	void Tile(vk::Buffer linear, uint64_t linear_offset, uint64_t linear_capacity, vk::Buffer tiled,
 	          uint64_t tiled_offset, uint64_t tiled_capacity, const ImageInfo& info,
 	          uint32_t levels = 0);
@@ -99,6 +102,8 @@ private:
 	                            const Tiling& tiling);
 	[[nodiscard]] vk::Pipeline GetPipeline(uint32_t slot);
 	[[nodiscard]] vk::Pipeline GetGfx7Pipeline(const ImageInfo& info, bool tiler);
+	void RecordGfx7(bool tiler, vk::Buffer tiled, uint64_t tiled_offset, vk::Buffer linear,
+	                uint64_t linear_offset, const ImageInfo& info);
 	[[nodiscard]] vk::Pipeline CreatePipeline(std::span<const uint32_t>     code,
 	                                          const vk::SpecializationInfo* specialization) const;
 

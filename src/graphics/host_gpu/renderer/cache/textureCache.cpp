@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/resolveCache.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
@@ -914,9 +915,9 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId source_id) {
 
 bool TextureCache::CanDownload(const Image& image) const {
 	const auto& info = image.info;
-	// PS4 (backward compatibility): a gfx7 layout the tiler cannot write back.
+	// PS4 (backward compatibility): DownloadImage writes a gfx7 layout back with shadPS4's tiler.
 	if (info.gfx7.Valid()) {
-		return false;
+		return info.samples == 1 && image.backing.samples == 1 && !image.depth_id;
 	}
 	// Low quality: a reduced host image has no finest levels, so it cannot give the guest's memory its contents back.
 	if (info.host_skip != 0) {
@@ -942,20 +943,16 @@ bool TextureCache::CanDownload(const Image& image) const {
 	       info.LinearSize() != 0;
 }
 
-// PS4 (backward compatibility): a texture in a PS4 tile mode, detiled on the GPU from the guest data
-// with shadPS4's tiling shaders (a linear one is copied as it is); each level then sits at its guest
-// offset with its padded pitch and height, as shadPS4's TextureCache::RefreshImage copies it.
-void TextureCache::UploadGfx7(Image& image, Buffer& source, uint64_t source_offset) {
-	const auto& info   = image.info;
-	const auto& layout = info.gfx7;
-	const auto  linear = layout.Tiled() ? m_tiler.DetileGfx7(source.Handle(), source_offset, info)
-	                                    : TileManager::Result {source.Handle(), source_offset, layout.guest_size};
+// PS4: a gfx7 surface's levels as shadPS4 lays them out linearly: each at its guest offset with its
+// padded pitch and height (its TextureCache::RefreshImage copies).
+static std::vector<vk::BufferImageCopy> Gfx7Copies(const ImageInfo& info, uint64_t base_offset) {
+	const auto&                      layout = info.gfx7;
 	std::vector<vk::BufferImageCopy> copies;
 	for (uint32_t level = 0; level < info.resources.levels; level++) {
 		const auto& mip    = layout.mips[level];
 		const auto  active = info.MipExtent(level);
 		vk::BufferImageCopy copy {};
-		copy.bufferOffset      = linear.offset + mip.offset;
+		copy.bufferOffset      = base_offset + mip.offset;
 		copy.bufferRowLength   = mip.pitch;
 		copy.bufferImageHeight = mip.height;
 		copy.imageSubresource  = {vk::ImageAspectFlagBits::eColor, level, 0,
@@ -965,6 +962,17 @@ void TextureCache::UploadGfx7(Image& image, Buffer& source, uint64_t source_offs
 		                                       info.IsVolume() ? active.depth : 1u};
 		copies.push_back(copy);
 	}
+	return copies;
+}
+
+// PS4 (backward compatibility): a texture in a PS4 tile mode, detiled on the GPU from the guest data
+// with shadPS4's tiling shaders (a linear one is copied as it is).
+void TextureCache::UploadGfx7(Image& image, Buffer& source, uint64_t source_offset) {
+	const auto& info   = image.info;
+	const auto& layout = info.gfx7;
+	const auto  linear = layout.Tiled() ? m_tiler.DetileGfx7(source.Handle(), source_offset, info)
+	                                    : TileManager::Result {source.Handle(), source_offset, layout.guest_size};
+	const auto copies = Gfx7Copies(info, linear.offset);
 	image.Upload(copies, linear.buffer, linear.offset, linear.size);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureUploadBytes, linear.size);
 }
@@ -1439,6 +1447,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	ImageId result {};
 	{
 		std::scoped_lock lock {m_lock};
+		ApplyBackingWrites();
 		Common::SmallVector<ImageId, 8> candidates;
 		ForEachImageInRegion(desc.info.data.address, desc.info.data.size,
 		                     [&](ImageId id, Image&) { candidates.push_back(id); });
@@ -1896,6 +1905,20 @@ void TextureCache::DownloadImage(Image& image, Buffer& destination, uint64_t des
 
 	const auto& info      = image.info;
 	const auto  transform = info.GetColorTransform();
+	if (info.gfx7.Valid()) {
+		// PS4: the levels at their guest offsets, then shadPS4's tiler into the gfx7 layout
+		// (its TextureCache::DownloadImageMemory and TileManager::TileImage).
+		EXIT_IF(destination_size < info.gfx7.guest_size || levels != info.resources.levels);
+		if (info.gfx7.Tiled()) {
+			auto linear = m_tiler.GetScratchBuffer(info.gfx7.guest_size, destination.Handle());
+			image.Download(Gfx7Copies(info, 0), linear.buffer, 0, linear.size);
+			m_tiler.TileGfx7(linear.buffer, 0, destination.Handle(), destination_offset, info);
+		} else {
+			image.Download(Gfx7Copies(info, destination_offset), destination.Handle(),
+			               destination_offset, info.gfx7.guest_size);
+		}
+		return;
+	}
 	if (info.IsTiled()) {
 		const auto copies = info.BufferCopies(0, levels);
 		m_tiler.TileImage(image, copies, destination.Handle(), destination_offset, destination_size,
@@ -1968,8 +1991,11 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 		return false;
 	}
 	const auto range = image.info.data;
+	// The gfx7 tiler binds the download as a storage buffer.
 	auto download = m_buffer_cache.GetUtilityBuffer(MemoryUsage::Download)
-	                    .MapDownload(range.size, std::max<uint64_t>(image.info.bytes_per_block, 4));
+	                    .MapDownload(range.size, image.info.gfx7.Valid()
+	                                                 ? uint64_t {256}
+	                                                 : std::max<uint64_t>(image.info.bytes_per_block, 4));
 	if (!LibKernel::Memory::TryReadBacking(range.address, download.mapped, range.size)) {
 		return false;
 	}
@@ -1988,9 +2014,16 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 		m_page_manager.UpdatePageWatchers<true, true>(range.address, range.size);
 	}
 	m_scheduler.DeferPriorityOperation([this, download = std::move(download), range,
-	                                    trapped = m_readback_storage_images] {
+	                                    trapped = m_readback_storage_images,
+	                                    ps4 = ShaderRecompiler::Decoder::GetGuestIsa() ==
+	                                          ShaderRecompiler::Decoder::GuestIsa::Gfx7] {
 		download.buffer->Invalidate(download.offset, range.size);
 		LibKernel::Memory::WriteBacking(range.address, download.mapped, range.size);
+		// PS4: a game streams its textures through GPU-written images over its texture pool; the
+		// write-back skips page tracking, so textures over it reload (SpartanPort's NoteBackingWrite).
+		if (ps4) {
+			NoteBackingWrite(range.address, range.size);
+		}
 		if (trapped) {
 			m_page_manager.UpdatePageWatchers<false, true>(range.address, range.size);
 			// Priority operations run in queue order, so this write-back is the oldest.
@@ -2016,6 +2049,38 @@ uint64_t TextureCache::WriteBackTick(uint64_t address, uint64_t size) {
 		}
 	}
 	return tick;
+}
+
+void TextureCache::NoteBackingWrite(uint64_t address, uint64_t size) {
+	std::scoped_lock lock {m_backing_writes_mutex};
+	m_backing_writes.push_back({address, size});
+	m_has_backing_writes.store(true, std::memory_order_release);
+}
+
+// Under m_lock: the images over guest memory a write-back changed, except the GPU-written ones
+// (they hold the data), take the new contents at their next use.
+void TextureCache::ApplyBackingWrites() {
+	if (!m_has_backing_writes.load(std::memory_order_acquire)) {
+		return;
+	}
+	std::vector<GuestRange> writes;
+	{
+		std::scoped_lock lock {m_backing_writes_mutex};
+		writes.swap(m_backing_writes);
+		m_has_backing_writes.store(false, std::memory_order_release);
+	}
+	for (const auto& write: writes) {
+		Common::SmallVector<ImageId, 8> ids;
+		ForEachImageInRegion(write.address, write.size, [&](ImageId id, Image& image) {
+			if (!image.IsGpuModified()) {
+				ids.push_back(id);
+			}
+		});
+		for (const auto id: ids) {
+			m_slot_images[id].MarkCpuDirty();
+			UntrackImage(id);
+		}
+	}
 }
 
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
