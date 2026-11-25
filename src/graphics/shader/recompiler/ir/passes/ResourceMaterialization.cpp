@@ -2098,6 +2098,13 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 			auto& memory = memory_info[index];
 			EXIT_IF(memory.resource >= images.size());
 			const auto& image = images[memory.resource];
+			// PS4 (gfx7): the address follows the T#'s dimension; the translator carried the
+			// address VGPRs after the decoded 2D ones (MakeImageAddress).
+			if (Decoder::GetGuestIsa() == Decoder::GuestIsa::Gfx7 &&
+			    memory.image_dimension != image.dimension) {
+				memory.image_dimension          = image.dimension;
+				memory.image_address_components = 13u;
+			}
 			if (specialization.images[memory.resource].fmask) {
 				EXIT_IF(inst.GetOpcode() != ValueOpcode::ImageRead || memory.data_bits != 32u);
 				// Vulkan MSAA stores each sample directly; FMASK's four-bit fragment indices
