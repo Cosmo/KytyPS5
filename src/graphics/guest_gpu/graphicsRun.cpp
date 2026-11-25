@@ -156,6 +156,19 @@ void GuestGpu::SuspendPoint() {
 	m_done_num++;
 }
 
+void GuestGpu::NoteGnmFlipReached() {
+	{
+		std::scoped_lock lock(m_gnm_flip_mutex);
+		m_gnm_flips_reached++;
+	}
+	m_gnm_flip_reached.notify_all();
+}
+
+void GuestGpu::WaitGnmFlipsReached(uint64_t count, std::chrono::milliseconds timeout) {
+	std::unique_lock lock(m_gnm_flip_mutex);
+	m_gnm_flip_reached.wait_for(lock, timeout, [&] { return m_gnm_flips_reached >= count; });
+}
+
 int GuestGpu::GetFrameNum() const {
 	return m_done_num;
 }
@@ -1346,6 +1359,10 @@ void CommandProcessor::Flip(int handle, int index, int flip_mode, int64_t flip_a
 	GetScheduler().DeferPriorityOperation(
 	    [&renderer = m_renderer, request] { renderer.GetVideoOut().CompleteFlip(request); });
 	GetScheduler().Flush();
+}
+
+void CommandProcessor::NoteGnmFlipReached() {
+	m_renderer.GetGpu().NoteGnmFlipReached();
 }
 
 void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {

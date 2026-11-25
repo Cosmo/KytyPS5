@@ -9,6 +9,8 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -43,6 +45,11 @@ public:
 	// Wait for guest command processing, including all compute queues (not native GPU completion).
 	void              WaitForIdle();
 	[[nodiscard]] int GetFrameNum() const;
+
+	// PS4 submit-and-flip pacing: the command processor counts the GNM flips it reaches; the
+	// driver waits for a count, at most `timeout`.
+	void NoteGnmFlipReached();
+	void WaitGnmFlipsReached(uint64_t count, std::chrono::milliseconds timeout);
 
 	[[nodiscard]] static bool IsGpuThread() noexcept;
 
@@ -99,7 +106,12 @@ private:
 	std::array<std::unique_ptr<CommandProcessor>, ComputeQueueCount> m_compute_cp;
 
 	std::atomic_int m_done_num = 0;
-	std::jthread    m_thread;
+
+	std::mutex              m_gnm_flip_mutex;
+	std::condition_variable m_gnm_flip_reached;
+	uint64_t                m_gnm_flips_reached = 0;
+
+	std::jthread m_thread;
 
 	friend class CommandProcessor;
 };

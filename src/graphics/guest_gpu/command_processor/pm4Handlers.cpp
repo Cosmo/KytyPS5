@@ -2884,6 +2884,7 @@ KYTY_CP_OP_PARSER(CpOpGnmFlip) {
 	if (labels != nullptr && index >= 0 && index < 16) {
 		cp.ReleaseMem(2, 0, labels + index, 1, 0, false);
 	}
+	cp.NoteGnmFlipReached();
 
 	return 5;
 }

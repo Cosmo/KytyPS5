@@ -1048,6 +1048,64 @@ uint8_t* RuntimeLinker::TlsGetAddr(Program* program) {
 	return dtv[index].ptr;
 }
 
+// An engine's frame start asserts that the frame it recycles, three back, already has the
+// end-of-pipe tick its GPU interrupt handler sets. It never waits: the PS4's GPU keeps up. Ours can
+// fall behind (pipelines compiling, a capture), and the game then stopped on that assertion. The
+// check, found through its message, now waits instead: after the failed `cmp qword [..], 0; jne`,
+// `pause; jmp cmp`. The same patch as shadPS4-based PC ports make.
+static void PatchEopTickWait(const Program& program,
+                             const std::vector<std::pair<uint64_t, uint64_t>>& executable_segments) {
+	static constexpr char Message[] = "GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick";
+	const auto*           begin     = reinterpret_cast<const uint8_t*>(program.map_vaddr);
+	const auto*           end       = begin + program.mapped_size;
+	const auto*           text      = std::search(begin, end, Message, Message + sizeof(Message));
+	if (text == end) {
+		return;
+	}
+	for (const auto& [segment_addr, segment_size]: executable_segments) {
+		auto* code     = reinterpret_cast<uint8_t*>(segment_addr);
+		auto* code_end = code + segment_size;
+		for (auto* at = code + 64; at + 7 <= code_end; at++) {
+			// lea rdi, [rip + rel32] -> the message
+			if (at[0] != 0x48 || at[1] != 0x8d || at[2] != 0x3d) {
+				continue;
+			}
+			int32_t rel = 0;
+			std::memcpy(&rel, at + 3, 4);
+			if (at + 7 + rel != text) {
+				continue;
+			}
+			// Up to 64 bytes before: cmp qword [base(+index*scale)+disp8/32], 0 (REX.W 83 /7), then a
+			// jne past the message with room for the four patched bytes.
+			for (int back = 10; back <= 64; back++) {
+				auto* cmp = at - back;
+				if ((cmp[0] & 0xf8u) != 0x48 || cmp[1] != 0x83 || ((cmp[2] >> 3u) & 7u) != 7) {
+					continue;
+				}
+				const int  mod    = cmp[2] >> 6u;
+				const bool sib    = (cmp[2] & 7u) == 4;
+				const int  length = 3 + (sib ? 1 : 0) + (mod == 2 ? 4 : 1);
+				if ((mod != 1 && mod != 2) || cmp[length] != 0x00 || cmp[length + 1] != 0x75) {
+					continue;
+				}
+				auto* jne = cmp + length + 1;
+				if (jne + 2 + static_cast<int8_t>(jne[1]) <= at || at - (jne + 2) < 4) {
+					continue;
+				}
+				const uint8_t wait[4] = {0xf3, 0x90, 0xeb, static_cast<uint8_t>(cmp - (jne + 6))};
+				std::memcpy(jne + 2, wait, sizeof(wait));
+				Common::VirtualMemory::FlushInstructionCache(reinterpret_cast<uint64_t>(jne + 2),
+				                                             sizeof(wait));
+				Log::WriteToConsoleAndLog(
+				    fmt::format("Frame pacing: {}: the end-of-pipe check at +0x{:x} waits for the GPU\n",
+				                Common::PathToString(program.file_name.filename()),
+				                reinterpret_cast<uint64_t>(cmp) - program.base_vaddr));
+				break;
+			}
+		}
+	}
+}
+
 void RuntimeLinker::PatchGuestCode(uint64_t address, uint64_t size) {
 	if (size >= 12) {
 		// Replace guest stack-canary/errno stores through fs:[0x28] with nops.
@@ -1875,6 +1933,10 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			eh_frame_header_addr = phdr[i].p_vaddr + program->base_vaddr;
 			eh_frame_header_size = phdr[i].p_memsz;
 		}
+	}
+
+	if (!is_next_gen) {
+		PatchEopTickWait(*program, executable_segments);
 	}
 
 	if (patch_guest_instructions) {

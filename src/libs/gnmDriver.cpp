@@ -754,13 +754,27 @@ int KYTY_SYSV_ABI GnmSubmitAndFlipCommandBuffers(uint32_t count, uint32_t* const
 	if (count == 0 || dcbs == nullptr || dcb_bytes == nullptr || !ValidSizes(count, dcb_bytes, ccb_bytes)) {
 		return GnmErrorSubmissionFailed;
 	}
-	std::scoped_lock lock(g_submit_mutex);
-	if (const int result = PatchFlipRequest(dcbs[count - 1], dcb_bytes[count - 1] / 4u, handle, index,
-	                                        flip_mode, flip_arg);
-	    result != OK) {
-		return result;
+	uint32_t flip   = 0;
+	int      result = OK;
+	{
+		std::scoped_lock lock(g_submit_mutex);
+		result = PatchFlipRequest(dcbs[count - 1], dcb_bytes[count - 1] / 4u, handle, index, flip_mode,
+		                          flip_arg);
+		if (result != OK) {
+			return result;
+		}
+		result = SubmitBuffers(count, dcbs, dcb_bytes, ccbs, ccb_bytes);
+		flip   = g_flips_patched.load(std::memory_order_relaxed);
 	}
-	return SubmitBuffers(count, dcbs, dcb_bytes, ccbs, ccb_bytes);
+	// The PS4's GPU keeps up with its games, and some engines count on it: they reuse command
+	// buffers without waiting for them (assertion cmdBuf.m_bInUse == false). Ours can fall behind
+	// (pipelines compiling), so a game runs at most one frame ahead of the command processor:
+	// submit-and-flip returns once it has reached the previous flip. Bounded, so a flip it never
+	// reaches cannot hang the game. (A frame limit as in shadPS4-based PC ports.)
+	if (result == OK && flip > 1) {
+		GetRenderContext().GetGpu().WaitGnmFlipsReached(flip - 1, std::chrono::seconds(2));
+	}
+	return result;
 }
 
 // The workload variants take the workload id first; it is only a profiling tag.

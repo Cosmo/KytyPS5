@@ -91,6 +91,8 @@ public:
 	                uint32_t interrupt_context_id, bool gl2_writeback);
 	void WriteBackImages();
 	void Flip(int handle, int index, int flip_mode, int64_t flip_arg);
+	// PS4: a flip of the GNM driver's submit-and-flip (see GuestGpu::NoteGnmFlipReached).
+	void NoteGnmFlipReached();
 	void PrepareCpuFlip(uint64_t request_id);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z,
 	                    uint32_t mode);
