@@ -11,20 +11,6 @@
 
 namespace Libs::Graphics {
 
-vk::ImageAspectFlags Image::FullAspectMask(vk::Format format) noexcept {
-	switch (format) {
-		case vk::Format::eD16Unorm:
-		case vk::Format::eX8D24UnormPack32:
-		case vk::Format::eD32Sfloat: return vk::ImageAspectFlagBits::eDepth;
-		case vk::Format::eS8Uint: return vk::ImageAspectFlagBits::eStencil;
-		case vk::Format::eD16UnormS8Uint:
-		case vk::Format::eD24UnormS8Uint:
-		case vk::Format::eD32SfloatS8Uint:
-			return vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
-		default: return vk::ImageAspectFlagBits::eColor;
-	}
-}
-
 std::pair<uint32_t, uint32_t> Image::SanitizeCopyLayers(const Image& source,
                                                         const Image& destination, uint32_t depth) {
 	const auto source_type        = source.backing.image_type;
