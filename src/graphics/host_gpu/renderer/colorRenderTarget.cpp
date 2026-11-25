@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -232,6 +233,15 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 			(void)TileGetDccSize(width, height, layers, bytes_per_element, levels,
 			                     rt.attrib3.tile_mode, metadata_size, rt.attrib.num_fragments);
 			desc.info.metadata.dcc_alpha_msb = DccAlphaOnMsb(rt.info);
+		} else if (ShaderRecompiler::Decoder::GetGuestIsa() ==
+		               ShaderRecompiler::Decoder::GuestIsa::Gfx7 &&
+		           rt.cmask.gfx7_slice_blocks != 0 && levels == 1) {
+			// PS4: CB_COLOR_CMASK_SLICE counts the 128x128-pixel blocks of the slice padded to CMASK
+			// cache lines. Four bits per 8x8 tile make 128 bytes per block; slices align to the 8
+			// pipes' 2 KiB. The gen5 size is larger, so a game's cleared CMASK never read as clear.
+			const uint32_t slice = static_cast<uint32_t>(
+			    Common::AlignUp(uint64_t {rt.cmask.gfx7_slice_blocks} * 128u, 2048u));
+			metadata_size = {slice * layers, 256};
 		} else {
 			(void)TileGetCmaskSize(width, height, layers, levels, metadata_size);
 		}

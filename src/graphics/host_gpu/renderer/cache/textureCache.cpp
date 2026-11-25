@@ -1116,11 +1116,15 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		}
 	}
 	const auto layers = desc.info.TransferLayers();
-	// Color metadata slices consist of complete 4 KiB blocks.
+	// Color metadata slices consist of complete 4 KiB blocks; PS4 CMASK slices of 2 KiB pipe
+	// interleaves (256-byte aligned).
 	constexpr uint64_t MetadataBlockSize = 0x1000;
-	if (!range.Valid() || range.address % MetadataBlockSize != 0 || layers == 0 ||
-	    range.size % layers != 0 || (range.size / layers) % MetadataBlockSize != 0) {
-		EXIT("TextureCache: color metadata slices must contain aligned 4 KiB blocks\n");
+	const uint64_t     slice_alignment =
+	    ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7 ? 0x100
+	                                                                                          : MetadataBlockSize;
+	if (!range.Valid() || range.address % slice_alignment != 0 || layers == 0 ||
+	    range.size % layers != 0 || (range.size / layers) % slice_alignment != 0) {
+		EXIT("TextureCache: color metadata slices are not aligned\n");
 	}
 	const bool volume_texture = desc.info.IsVolume() && view.type == vk::ImageViewType::e3D;
 	const auto first          = volume_texture ? 0u : metadata_base_layer;
