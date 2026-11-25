@@ -258,6 +258,11 @@ if(TARGET OpenAL AND CLANG)
 		endif()
 	endif()
 endif()
+# The UWP app: OpenAL leaves out its config file and data file lookup in the user's folders, as in Xbox GDK builds
+# (SHGetKnownFolderPath, which UWP apps on the Xbox do not have). Its HRTF data is built in (ALSOFT_EMBED_HRTF_DATA).
+if(TARGET OpenAL AND KYTY_BUILD_UWP)
+	target_compile_definitions(OpenAL PRIVATE _GAMING_XBOX)
+endif()
 add_subdirectory("${KYTY_SOURCE_DIR}/common" "${CMAKE_CURRENT_BINARY_DIR}/common")
 
 file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
