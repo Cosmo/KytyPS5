@@ -651,14 +651,20 @@ static void PrepareGfx7FetchCall(const HW::VertexShaderInfo& regs, uint32_t user
 		const auto fetch = static_cast<uint64_t>(regs.vs_user_sgpr.value[pair]) |
 		                   (static_cast<uint64_t>(regs.vs_user_sgpr.value[pair + 1u]) << 32u);
 		EXIT_NOT_IMPLEMENTED(fetch == 0 || (fetch & 3u) != 0);
-		// The fetch shader ends at its S_SETPC_B64; the decoder looks at most 4 KiB ahead, inside
-		// the memory mapped from the fetch shader on.
-		const auto fetch_words = static_cast<uint32_t>((MappedEnd(fetch, 4096u) - fetch) / 4u);
-		EXIT_NOT_IMPLEMENTED(fetch_words == 0);
 		params.back_code = code.subspan(word);
-		params.code      = std::span {reinterpret_cast<const uint32_t*>(fetch), fetch_words};
-		const auto front = Decoder::DecodeFrontProgram(params.code);
-		params.code      = front.code;
+		// The fetch shader ends at its S_SETPC_B64; the decoder looks at most 4 KiB ahead, inside
+		// the memory mapped from the fetch shader on. Every draw calls it: its length is
+		// remembered per address (the hash below still covers its words).
+		thread_local std::unordered_map<uint64_t, uint32_t> fetch_lengths;
+		auto known = fetch_lengths.find(fetch);
+		if (known == fetch_lengths.end()) {
+			const auto fetch_words = static_cast<uint32_t>((MappedEnd(fetch, 4096u) - fetch) / 4u);
+			EXIT_NOT_IMPLEMENTED(fetch_words == 0);
+			const auto front = Decoder::DecodeFrontProgram(
+			    std::span {reinterpret_cast<const uint32_t*>(fetch), fetch_words});
+			known = fetch_lengths.emplace(fetch, static_cast<uint32_t>(front.code.size())).first;
+		}
+		params.code = std::span {reinterpret_cast<const uint32_t*>(fetch), known->second};
 		const uint64_t hashes[] = {params.hash,
 		                           XXH3_64bits(params.code.data(), params.code.size_bytes())};
 		params.hash = XXH3_64bits(hashes, sizeof(hashes));
