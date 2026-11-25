@@ -308,8 +308,24 @@ void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 
 // sRGB views decode before filtering; a sampler that skips degamma reads through a UNorm view.
 static vk::Format SampledViewFormat(const GraphicContext& graphics, Prospero::BufferFormat format,
-                                    vk::Format pixel_format, bool skip_degamma) {
+                                    vk::Format pixel_format, bool skip_degamma,
+                                    bool force_degamma) {
 	if (skip_degamma) return SrgbUnormViewFormat(pixel_format);
+	// PS4 FORCE_DEGAMMA: the sRGB variant of a UNorm format decodes before filtering.
+	if (force_degamma) {
+		switch (pixel_format) {
+			case vk::Format::eR8G8B8A8Unorm: return vk::Format::eR8G8B8A8Srgb;
+			case vk::Format::eB8G8R8A8Unorm: return vk::Format::eB8G8R8A8Srgb;
+			case vk::Format::eBc1RgbaUnormBlock: return vk::Format::eBc1RgbaSrgbBlock;
+			case vk::Format::eBc1RgbUnormBlock: return vk::Format::eBc1RgbSrgbBlock;
+			case vk::Format::eBc2UnormBlock: return vk::Format::eBc2SrgbBlock;
+			case vk::Format::eBc3UnormBlock: return vk::Format::eBc3SrgbBlock;
+			case vk::Format::eBc7UnormBlock: return vk::Format::eBc7SrgbBlock;
+			// shadPS4 decodes the sampled colour after the swizzle: the one and two channel
+			// formats, mostly alpha or distance data, stay as stored.
+			default: return pixel_format;
+		}
+	}
 	switch (format) {
 		case Prospero::BufferFormat::k8Srgb:
 			return graphics.r8_srgb_views ? vk::Format::eR8Srgb : pixel_format;
@@ -660,7 +676,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	} else {
 		// Set after FindImage, whose metadata clears need the attachment-capable format.
 		desc.view_info.format = SampledViewFormat(m_context.GetGraphics(), format, pixel_format,
-		                                          resource.skip_degamma);
+		                                          resource.skip_degamma, resource.force_degamma);
 		(void)SelectSampledColorView(image->info.pixel_format, desc.view_info.format,
 		                             descriptor.DstSelXYZW());
 	}

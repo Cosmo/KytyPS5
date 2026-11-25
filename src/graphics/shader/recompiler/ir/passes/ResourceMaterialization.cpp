@@ -991,11 +991,21 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		    static_cast<Prospero::TileMode>((descriptor.dwords[3] >> 20u) & 0x1fu) ==
 		        Prospero::TileMode::kDepth;
 		image.conversion_format = depth_bits ? format : ImageConversionFormat(format);
-		// SKIP_DEGAMMA (S# bit 31) reads sRGB texels as stored.
-		image.skip_degamma = Prospero::IsSrgbFormat(format) &&
+		// SKIP_DEGAMMA (S# bit 31) reads sRGB texels as stored. PS4 (gfx7) samplers have no such
+		// bit (shadPS4's Sampler leaves bit 31 unnamed): they always decode sRGB.
+		image.skip_degamma = Decoder::GetGuestIsa() != Decoder::GuestIsa::Gfx7 &&
+		    Prospero::IsSrgbFormat(format) &&
 		    std::ranges::any_of(program.info.sampled_pairs, [&](const auto& pair) {
 			    return pair.image == base_index && pair.sampler < snapshot.samplers.size() &&
 			           (snapshot.samplers[pair.sampler].dwords[0] >> 31u) != 0u;
+		    });
+		// PS4 (gfx7): FORCE_DEGAMMA (S# bit 20) decodes UNorm texels as sRGB before filtering
+		// (shadPS4 keys its shaders on it). The view becomes the sRGB variant of the format.
+		image.force_degamma = Decoder::GetGuestIsa() == Decoder::GuestIsa::Gfx7 && !storage &&
+		    !base.depth_compare && !Prospero::IsSrgbFormat(format) &&
+		    std::ranges::any_of(program.info.sampled_pairs, [&](const auto& pair) {
+			    return pair.image == base_index && pair.sampler < snapshot.samplers.size() &&
+			           ((snapshot.samplers[pair.sampler].dwords[0] >> 20u) & 1u) != 0u;
 		    });
 		// The shader decodes direct 8 and 8_8 sRGB textures where the device has no sRGB view.
 		if (!storage && !base.depth_compare && !image.skip_degamma &&
@@ -1938,6 +1948,7 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		image.indirect_search_iterations = source.indirect_search_iterations;
 		image.cube                       = source.cube;
 		image.skip_degamma               = source.skip_degamma;
+		image.force_degamma              = source.force_degamma;
 		image.heap                       = source.heap;
 		image.indirect_resources.clear();
 	}

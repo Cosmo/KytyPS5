@@ -32,6 +32,7 @@ struct ResourceSpecialization {
 		uint32_t                      indirect_search_iterations = 0;
 		bool                          cube                       = false;
 		bool                          skip_degamma               = false;
+		bool                          force_degamma              = false;
 		bool                          fmask                      = false;
 		bool                          heap                       = false;
 		bool                          operator==(const Image&) const = default;

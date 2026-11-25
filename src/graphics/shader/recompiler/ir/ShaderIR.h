@@ -163,6 +163,7 @@ struct ImageResource {
 	bool                          sample_access_only     = true; // Every use is a sample.
 	bool                          depth_compare     = false;
 	bool                          skip_degamma      = false; // A sampler reads sRGB as stored.
+	bool                          force_degamma     = false; // PS4: a sampler reads UNorm as sRGB.
 	bool                          cube              = false;
 	bool                          r128              = false;
 	bool                          heap              = false; // Resident image heap root or kind.
