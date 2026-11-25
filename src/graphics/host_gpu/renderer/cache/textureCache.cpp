@@ -581,6 +581,11 @@ void TextureCache::CopyImageMip(ImageId destination_id, ImageId source_id, uint3
 	}
 }
 
+ImageId TextureCache::ReplaceDepthForStorage(ImageId depth_id, const ImageInfo& requested) {
+	std::scoped_lock lock {m_lock};
+	return ResolveDepthOverlap(requested, BindingType::Storage, depth_id);
+}
+
 ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingType binding,
                                           ImageId cached_id) {
 	auto& cached = m_slot_images[cached_id];
@@ -615,8 +620,11 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 	     cached.info.metadata.kind == ImageMetadataKind::Htile);
 	// Depth bytes sampled through a color format no depth view provides (16_UINT, 8_8_UNORM)
 	// need a color copy of the whole single-sample depth layout.
+	// PS4: a depth surface with stencil read as RGBA8 copies its depth aspect too.
 	const bool raw_depth_texture =
-	    cached.info.IsDepth() && !requested.IsDepth() && !cached.info.HasStencil() &&
+	    cached.info.IsDepth() && !requested.IsDepth() &&
+	    (!cached.info.HasStencil() ||
+	     ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7) &&
 	    !requested.HasMetadata() && cached.backing.samples == 1 && requested.samples == 1 &&
 	    requested.pitch == cached.info.pitch &&
 	    (requested.resources == cached.info.resources || retain_cached_layout) &&

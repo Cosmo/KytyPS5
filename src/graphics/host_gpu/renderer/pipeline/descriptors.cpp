@@ -635,7 +635,11 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		// A texture over an image the GPU drew samples that image (render targets live on the host,
 		// as a video's frames converted to RGB on the GPU and then drawn to the screen).
 		ImageInfo target {};
+		// A storage view writes its own color format, also over a depth target's memory, and so
+		// reads a view no depth view provides (RGBA8 over D32S8): those take their own image.
 		if (texture_cache.FindTargetInfoAt(address, width, height, &target) &&
+		    !(target.IsDepth() &&
+		      (storage || !IsSupportedSampledDepthFormat(target.pixel_format, pixel_format))) &&
 		    target.type == desc.info.type && target.resources.layers >= desc.info.resources.layers &&
 		    target.resources.levels >= desc.info.resources.levels) {
 			desc.info = target;
@@ -667,7 +671,17 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		image = &texture_cache.GetImage(id);
 	} else if (image->info.IsDepth()) {
 		if (storage) {
-			EXIT("depth target cannot be bound as a storage image\n");
+			// A shader writes a depth surface through a color storage view (PS4 games do): like
+			// shadPS4, the depth image becomes a color image holding its data; binding it as a depth
+			// target later converts it back.
+			const auto replacement = texture_cache.ReplaceDepthForStorage(id, desc.info);
+			if (!replacement || replacement == id) {
+				EXIT("depth target cannot be bound as a storage image\n");
+			}
+			id    = replacement;
+			image = &texture_cache.GetImage(id);
+			ValidateStorageColorView(image->info.pixel_format, view_format, descriptor.DstSelXYZW());
+			return {id, {}, std::move(desc)};
 		}
 		ValidateSampledDepthBinding(resource, descriptor, *image, pixel_format,
 		                            desc.info.data.size);

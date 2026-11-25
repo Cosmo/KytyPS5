@@ -65,6 +65,9 @@ public:
 	KYTY_CLASS_NO_COPY(TextureCache);
 
 	[[nodiscard]] ImageId       FindImage(ImageDesc& desc, bool exact_format = false);
+	// A depth image a shader binds as a storage image: replaced by a color image holding its data
+	// (shadPS4's ResolveDepthOverlap for storage bindings), or the same id if it stays.
+	[[nodiscard]] ImageId       ReplaceDepthForStorage(ImageId depth_id, const ImageInfo& requested);
 	void                        UpdateImage(ImageId id);
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);

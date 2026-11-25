@@ -959,12 +959,25 @@ static void PatchIndirectDrawOffsets(CommandProcessor& cp, IndirectDrawRegisters
                                      uint32_t vertex_offset, uint32_t instance_offset,
                                      uint32_t first_index, uint32_t draw_index) {
 	const auto write = [&](uint32_t location, uint32_t value) {
-		if (location == Pm4::SH_NOP) {
+		const bool gfx7 =
+		    ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7;
+		// A PS4 game passes location 0 when its vertex shader does not take the value.
+		if (location == Pm4::SH_NOP || (gfx7 && location == 0u)) {
 			return;
 		}
-		EXIT_NOT_IMPLEMENTED(location >= Pm4::SH_NUM ||
-		                     g_hw_sh_indirect_func[location] == nullptr);
-		g_hw_sh_indirect_func[location](cp, location, value);
+		if (location >= Pm4::SH_NUM) {
+			EXIT("indirect draw writes SH register 0x%x, which has no handler\n", location);
+		}
+		// A PS4 game's register where gfx7 differs, as SET_SH_REG writes it.
+		auto handler = g_hw_sh_indirect_func[location];
+		if (ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7 &&
+		    g_hw_sh_gfx7_func[location] != nullptr) {
+			handler = g_hw_sh_gfx7_func[location];
+		}
+		if (handler == nullptr) {
+			EXIT("indirect draw writes SH register 0x%x, which has no handler\n", location);
+		}
+		handler(cp, location, value);
 	};
 	write(registers.vertex_offset, vertex_offset);
 	write(registers.instance_offset, instance_offset);
@@ -1139,6 +1152,7 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 	EXIT_NOT_IMPLEMENTED(interrupt_selector > 4);
 	const bool interrupt = (interrupt_selector != 0 && interrupt_selector != 3);
 	// kSendIntCtx has no label, and kOnly writes none on graphics queues.
+	const bool gfx7 = ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7;
 	if (address == nullptr || interrupt_selector == 4 ||
 	    (interrupt_selector == 1 && !IsAsyncComputeQueue())) {
 		data_sel = 0;
@@ -1183,6 +1197,14 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 		}
 		case 3: data = Sync::ReadReferenceClock(); [[fallthrough]];
 		case 2: write_label(&data, sizeof(data)); break;
+		case 4:
+			// PS4: the 64-bit performance counter (shadPS4's DataSelect::PerfCounter).
+			if (gfx7) {
+				data = Sync::ReadReferenceClock();
+				write_label(&data, sizeof(data));
+				break;
+			}
+			EXIT("unknown release_mem data selector: %" PRIu32 "\n", data_sel);
 		case 5: {
 			GetScheduler().Finish();
 			const auto gds = static_cast<uint32_t>(data);

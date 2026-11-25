@@ -1251,7 +1251,8 @@ KYTY_CP_OP_PARSER(CpOpPushMarker) {
 KYTY_CP_OP_PARSER(CpOpReleaseMem) {
 	KYTY_PROFILER_FUNCTION();
 
-	if (IsGfx7() && cmd_id == 0xc0054900) {
+	// Bit 1 of the header is the shader type: 1 on the compute queues.
+	if (IsGfx7() && (cmd_id & ~2u) == 0xc0054900) {
 		// gfx7: no interrupt context; TC_WB_ACTION_ENA (bit 15) and TC_ACTION_ENA (bit 17) write the
 		// L2 back.
 		cp.ReleaseMem(
