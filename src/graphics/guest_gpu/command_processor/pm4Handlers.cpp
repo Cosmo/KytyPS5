@@ -2709,6 +2709,16 @@ static constexpr auto MakeContextGfx7Table() {
 		RefreshGfx7TargetSizes(cp);
 	};
 
+	// VGT_INDX_OFFSET is a context register on gfx7 (GE_INDX_OFFSET, a uconfig register, on gfx10):
+	// the vertex index is the fetched index plus this offset. Meshes sharing one vertex buffer draw
+	// with it.
+	table[Pm4::VGT_INDX_OFFSET_GFX7] = [](KYTY_HW_REG_ARGS) { cp.GetUcfg().SetIndexOffset(value); };
+	// VGT_MULTI_PRIM_IB_RESET_EN is a context register on gfx7 (a uconfig register on gfx10). Bit 0
+	// turns primitive restart on for strips and fans.
+	table[Pm4::VGT_MULTI_PRIM_IB_RESET_EN_GFX7] = [](KYTY_HW_REG_ARGS) {
+		cp.GetUcfg().SetPrimitiveResetControl(value & 1u);
+	};
+
 	// The format, sample count, ALLOW_EXPCLEAR (27) and TILE_SURFACE_ENABLE (29) mean the same as on
 	// gfx10; the tile bits do not. With TILE_SURFACE_ENABLE the target has an HTile, so the game's
 	// HTile fills are depth fast clears.

@@ -203,6 +203,13 @@ void CommandProcessor::ResetQueue(uint32_t op) {
 }
 
 void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operation) {
+	// PS4: the index offset and the primitive restart switch are context registers on gfx7 and
+	// clear with the rest of the context.
+	if (operation == ContextStateOperation::Clear &&
+	    ShaderRecompiler::Decoder::GetGuestIsa() == ShaderRecompiler::Decoder::GuestIsa::Gfx7) {
+		m_ucfg.SetIndexOffset(0);
+		m_ucfg.SetPrimitiveResetControl(0);
+	}
 	switch (operation) {
 		case ContextStateOperation::Clear: m_ctx.Reset(); break;
 		case ContextStateOperation::Push:
