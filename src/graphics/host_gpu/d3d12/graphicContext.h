@@ -92,6 +92,9 @@ struct GraphicContext {
 	bool                sampler_filter_minmax_enabled = false;
 	// 64-bit image atomics (shaderImageInt64Atomics in Vulkan) are not available in D3D12 at feature level 11_0.
 	bool                shader_image_int64_atomics_enabled = false;
+	// Vulkan's maintenance8 (the texture cache's direct depth/color copies): off, since the copy D3D12 falls back to is as direct
+	// (Image::CopyImageWithBuffer goes to CopyContents, which copies within a format family and through a GPU buffer otherwise).
+	bool                maintenance8_enabled = false;
 	// D3D12 has no 8 and 8_8 sRGB formats: such textures are sampled through UNorm views and the shaders decode them (upstream's fallback).
 	bool                r8_srgb_views   = false;
 	bool                r8g8_srgb_views = false;

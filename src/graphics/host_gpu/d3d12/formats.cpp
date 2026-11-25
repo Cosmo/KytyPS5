@@ -164,6 +164,11 @@ FormatInfo GetFormatInfo(vk::Format format) {
 		case F::eD32SfloatS8Uint:
 			return Depth(DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,
 			             DXGI_FORMAT_D32_FLOAT_S8X24_UINT, DXGI_FORMAT_X32_TYPELESS_G8X24_UINT);
+		// DXGI has no stencil-only format: a stencil-only target is the stencil plane of a depth/stencil resource whose depth
+		// plane nothing reads or writes (its aspect is stencil only, ImageAspectMask).
+		case F::eS8Uint:
+			return Depth(DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,
+			             DXGI_FORMAT_D32_FLOAT_S8X24_UINT, DXGI_FORMAT_X32_TYPELESS_G8X24_UINT);
 
 		default: return {};
 	}

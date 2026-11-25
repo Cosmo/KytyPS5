@@ -253,7 +253,6 @@ private:
 	                  uint32_t destination_resource, std::span<const vk::ImageCopy> copies);
 #endif
 
-	[[nodiscard]] static vk::ImageAspectFlags FullAspectMask(vk::Format format) noexcept;
 	[[nodiscard]] static uint32_t             CopyRows(uint64_t row_size, uint32_t rows,
 	                                                   uint64_t capacity) noexcept;
 	[[nodiscard]] static std::pair<uint32_t, uint32_t>

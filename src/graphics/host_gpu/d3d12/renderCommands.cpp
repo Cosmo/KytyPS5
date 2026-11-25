@@ -436,7 +436,7 @@ RenderExecutor::RenderTargets RenderExecutor::AcquireRenderTargets(CommandBuffer
 		          ImageSubresourceRange {info.base_level, info.level_count, info.base_layer,
 		                                 info.layer_count},
 		          view);
-		const auto aspects = ImageViewOps::DepthAspectMask(info.format);
+		const auto aspects = info.aspect; // (a stencil-only target's view has the stencil aspect only)
 		targets.depth      = image.DepthStencilView(view, read_only_depth);
 		targets.has_depth  = true;
 		if ((depth.load_clear_aspects & aspects & vk::ImageAspectFlagBits::eDepth) != vk::ImageAspectFlags {}) {

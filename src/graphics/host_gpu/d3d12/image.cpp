@@ -151,7 +151,7 @@ struct CopyBlock {
 		return {1};
 	}
 	if (aspect == vk::ImageAspectFlagBits::eDepth) {
-		return {DepthAspectTransferBytes(format)};
+		return {DepthStencilTransferBytes(format)};
 	}
 	const auto extent = vk::blockExtent(format);
 	return {vk::blockSize(format), extent[0], extent[1]};
@@ -522,7 +522,7 @@ void Image::Synchronize(CommandBuffer& command, uint32_t resource) {
 	const auto source = backing.current;
 	EXIT_IF(source == resource);
 	std::vector<vk::ImageCopy> copies;
-	const auto                 aspect     = FullAspectMask(backing.format) & ~vk::ImageAspectFlagBits::eStencil;
+	const auto                 aspect     = DataAspect(backing.format);
 	const auto                 from_block = ResourceCopyBlock(backing, source, aspect);
 	const auto                 to_block   = ResourceCopyBlock(backing, resource, aspect);
 	for (uint32_t level = 0; level < backing.mip_levels; level++) {
@@ -1374,10 +1374,8 @@ void Image::CopyImage(Image& source) {
 	const uint32_t base_depth = backing.image_type == vk::ImageType::e3D
 	                                ? backing.extent.depth
 	                                : source.backing.extent.depth;
-	const auto source_aspect =
-	    FullAspectMask(source.backing.format) & ~vk::ImageAspectFlagBits::eStencil;
-	const auto destination_aspect =
-	    FullAspectMask(backing.format) & ~vk::ImageAspectFlagBits::eStencil;
+	const auto source_aspect      = DataAspect(source.backing.format);
+	const auto destination_aspect = DataAspect(backing.format);
 	std::vector<vk::ImageCopy> copies;
 	for (uint32_t level = 0; level < levels; level++) {
 		// As upstream's: overlapping cache images can differ in size; copying the source extent into a smaller destination writes out of
@@ -1517,8 +1515,8 @@ void Image::CopyMip(Image& source, uint32_t mip, uint32_t layer) {
 	const auto depth  = std::max(backing.extent.depth >> mip, 1u);
 	EXIT_IF(width != source.backing.extent.width || height != source.backing.extent.height);
 	const auto [source_layers, destination_layers] = SanitizeCopyLayers(source, *this, depth);
-	const auto aspects = FullAspectMask(source.backing.format);
-	EXIT_IF(aspects != FullAspectMask(backing.format));
+	const auto aspects = ImageAspectMask(source.backing.format);
+	EXIT_IF(aspects != ImageAspectMask(backing.format));
 	std::vector<vk::ImageCopy> copies;
 	for (const auto aspect: {vk::ImageAspectFlagBits::eColor, vk::ImageAspectFlagBits::eDepth,
 	                         vk::ImageAspectFlagBits::eStencil}) {
