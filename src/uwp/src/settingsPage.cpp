@@ -813,6 +813,14 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    },
 	    {L"The audio device the games see: a TV, an AV amplifier (7.1), a sound bar (5.1) or headphones."});
 	AddSwitch(
+	    panel(L"System"), explanation, L"3D audio", settings.audio_3d,
+	    [state, save](bool on) {
+		    state->settings.audio_3d = on;
+		    save();
+	    },
+	    {L"Lets games that support PS5 3D audio place sounds around you.",
+	     L"With Headphones as the audio output it uses headphone surround (HRTF)."});
+	AddSwitch(
 	    panel(L"System"), explanation, L"Skip intro logos", settings.skip_intro_logos,
 	    [state, save](bool on) {
 		    state->settings.skip_intro_logos = on;
