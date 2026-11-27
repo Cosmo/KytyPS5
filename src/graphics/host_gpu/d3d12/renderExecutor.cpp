@@ -548,7 +548,7 @@ ID3D12CommandSignature* RenderExecutor::MeshDrawSignature(const PipelineCache::P
 void RenderExecutor::RecordDispatchIndirect(CommandBuffer&                 buffer,
                                             const PipelineCache::Pipeline& pipeline,
                                             PreparedBindings&              bindings,
-                                            const ShaderComputeInputInfo& /*input_info*/,
+                                            const ShaderComputeInputInfo&  input_info,
                                             const Buffer& args, uint64_t args_offset) {
 	if (pipeline.pipeline == nullptr) {
 		return;
@@ -578,6 +578,11 @@ void RenderExecutor::RecordDispatchIndirect(CommandBuffer&                 buffe
 	PreparedBindings* stage      = &bindings;
 	CommitBindings(buffer, false, pipeline, {&stage, 1},
 	               {reinterpret_cast<const uint8_t*>(runtime), sizeof(runtime)});
+	if (input_info.lds_storage || WritesMemory(input_info.stage)) {
+		// Memory writes wait for earlier accesses to the memory, as RecordDispatch's (upstream's
+		// hazard barrier before both kinds of dispatch).
+		buffer.GlobalMemoryBarrier();
+	}
 	auto&      trace = D3D12::GetGpuTrace();
 	const auto slot  = trace.Begin(buffer.Handle(), &pipeline.trace);
 	buffer.Handle()->SetPipelineState(pipeline.pipeline);
