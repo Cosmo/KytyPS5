@@ -49,7 +49,6 @@ private:
 
 	GraphicContext&                                               m_graphics;
 	DescriptorHeap&                                               m_heap;
-	Common::Mutex                                                 m_mutex;
 	std::unordered_map<SamplerKey, SamplerHandle, SamplerKeyHash> m_samplers;
 };
 

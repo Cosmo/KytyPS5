@@ -33,8 +33,7 @@ namespace {
 } // namespace
 
 SamplerHandle SamplerCache::GetSampler(const ShaderSamplerResource& guest, bool integer_border, Use use) {
-	Common::LockGuard lock(m_mutex);
-
+	// (No lock, as upstream's since 1db836fbb: only the thread that records draws and dispatches asks.)
 	auto r = guest;
 	if (use == Use::Plain) {
 		r.fields[0] &= ~(0x7u << 12u);
