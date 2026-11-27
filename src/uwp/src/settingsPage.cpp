@@ -106,6 +106,7 @@ constexpr std::array CONSOLE_LANGUAGES = {
     L"Thai",
     L"Vietnamese",
     L"Indonesian",
+    L"Ukrainian",
 };
 
 constexpr wchar_t SettingsMarkup[] = LR"xaml(
