@@ -239,7 +239,10 @@ void RecordRowCopy(CommandBuffer& command, const Buffer& source, const Buffer& d
 } // namespace
 
 Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageInfo& image_info)
-    : info(image_info), m_graphics(graphics), m_scheduler(scheduler) {
+    : info(image_info),
+      // As upstream's (068d7621d): a stencil plane covers all levels and layers until a depth target maps it.
+      stencil_subresources {0, image_info.resources.levels, 0, image_info.resources.layers},
+      m_graphics(graphics), m_scheduler(scheduler) {
 	KYTY_PROFILER_FUNCTION();
 	ImageOps::Validate(info);
 	m_cpu_dirty =
@@ -1378,10 +1381,15 @@ void Image::CopyDepthToColor(CommandBuffer& command, Image& depth, const ImageSu
 
 void Image::CopyImage(Image& source) {
 	EXIT_IF(source.backing.samples != backing.samples);
-	const uint32_t levels     = std::min(source.backing.mip_levels, backing.mip_levels);
-	const uint32_t base_depth = backing.image_type == vk::ImageType::e3D
-	                                ? backing.extent.depth
-	                                : source.backing.extent.depth;
+	const uint32_t levels = std::min(source.backing.mip_levels, backing.mip_levels);
+	// As upstream's (8b0cc79ac, 1db836fbb): between images of one type the smaller depth (a volume
+	// that grew keeps its slices), a 2D array into a volume fills its depth.
+	uint32_t base_depth = source.backing.extent.depth;
+	if (source.backing.image_type == backing.image_type) {
+		base_depth = std::min(base_depth, backing.extent.depth);
+	} else if (backing.image_type == vk::ImageType::e3D) {
+		base_depth = backing.extent.depth;
+	}
 	const auto source_aspect      = DataAspect(source.backing.format);
 	const auto destination_aspect = DataAspect(backing.format);
 	std::vector<vk::ImageCopy> copies;
