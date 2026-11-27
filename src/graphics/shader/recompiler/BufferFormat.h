@@ -26,6 +26,31 @@ struct BufferFormatInfo {
 	bool                   packed_bitfield         = false;
 };
 
+// The vertex formats a vertex shader reads as integers and converts itself where the host's own
+// conversion is wrong (HostShaderFeatures::vertex_formats_as_integers). The shader's code depends
+// on this kind, not on the format.
+enum class VertexIntegerRead : uint32_t { None, Uscaled, Sscaled, Snorm10 };
+
+constexpr VertexIntegerRead GetVertexIntegerRead(Prospero::BufferFormat format) {
+	switch (format) {
+		case Prospero::BufferFormat::k8UScaled:
+		case Prospero::BufferFormat::k16UScaled:
+		case Prospero::BufferFormat::k8_8UScaled:
+		case Prospero::BufferFormat::k16_16UScaled:
+		case Prospero::BufferFormat::k10_10_10_2UScaled:
+		case Prospero::BufferFormat::k8_8_8_8UScaled:
+		case Prospero::BufferFormat::k16_16_16_16UScaled: return VertexIntegerRead::Uscaled;
+		case Prospero::BufferFormat::k8SScaled:
+		case Prospero::BufferFormat::k16SScaled:
+		case Prospero::BufferFormat::k8_8SScaled:
+		case Prospero::BufferFormat::k16_16SScaled:
+		case Prospero::BufferFormat::k8_8_8_8SScaled:
+		case Prospero::BufferFormat::k16_16_16_16SScaled: return VertexIntegerRead::Sscaled;
+		case Prospero::BufferFormat::k10_10_10_2SNorm: return VertexIntegerRead::Snorm10;
+		default: return VertexIntegerRead::None;
+	}
+}
+
 enum class FormattedSourceKind { Memory, Zero, One, Invalid };
 
 struct FormattedSource {
