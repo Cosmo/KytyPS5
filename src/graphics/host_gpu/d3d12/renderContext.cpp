@@ -250,10 +250,11 @@ void RenderContext::TriggerInterrupt(int event_id, uint32_t context_id) {
 			}
 		}
 	}
+	// As upstream's (8adeaa1e1): the event data is the context id << 16 | the event id (AgcDriverGetEqEventType/GetEqContextId).
+	const auto ident = static_cast<uintptr_t>(event_id);
+	auto*      data  = reinterpret_cast<void*>((static_cast<uintptr_t>(context_id) << 16u) | ident);
 	for (const auto& registration: registrations) {
-		const auto result = LibKernel::EventQueue::KernelTriggerEvent(registration.eq, static_cast<uintptr_t>(registration.event_id),
-		                                                              LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
-		                                                              reinterpret_cast<void*>(static_cast<uintptr_t>(context_id)));
+		const auto result = LibKernel::EventQueue::KernelTriggerEvent(registration.eq, ident, LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS, data);
 		if (result == LibKernel::KERNEL_ERROR_EBADF || result == LibKernel::KERNEL_ERROR_ENOENT) {
 			DeleteInterruptEq(registration.eq, registration.event_id);
 			continue;
