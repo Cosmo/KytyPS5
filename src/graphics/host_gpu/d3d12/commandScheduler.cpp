@@ -40,6 +40,12 @@ ID3D12GraphicsCommandList* CommandBuffer::Handle() const {
 	return m_list;
 }
 
+ID3D12GraphicsCommandList1* CommandBuffer::Handle1() const {
+	EXIT_IF(IsInvalid() || m_list1 == nullptr);
+	m_used = true;
+	return m_list1;
+}
+
 ID3D12GraphicsCommandList6* CommandBuffer::MeshHandle() const {
 	EXIT_IF(IsInvalid() || m_mesh_list == nullptr);
 	m_used = true;
@@ -125,6 +131,9 @@ CommandScheduler::~CommandScheduler() {
 	if (m_mesh_list != nullptr) {
 		m_mesh_list->Release();
 	}
+	if (m_list1 != nullptr) {
+		m_list1->Release();
+	}
 	if (m_list != nullptr) {
 		m_list->Release();
 	}
@@ -157,6 +166,7 @@ void CommandScheduler::Shutdown() {
 		m_list_kept           = false;
 		m_command.m_list      = nullptr;
 		m_command.m_mesh_list = nullptr;
+		m_command.m_list1     = nullptr;
 	}
 	m_master.Wait(CurrentTick() - 1);
 	PopPendingOperations();
@@ -401,11 +411,14 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 			D3D12::Check(m_list->QueryInterface(IID_PPV_ARGS(&m_mesh_list)),
 			             "query ID3D12GraphicsCommandList6");
 		}
+		D3D12::Check(m_list->QueryInterface(IID_PPV_ARGS(&m_list1)), "query ID3D12GraphicsCommandList1");
 	} else {
 		D3D12::Check(m_list->Reset(allocator, nullptr), "reset command list");
 	}
 	m_command.m_list                  = m_list;
 	m_command.m_mesh_list             = m_mesh_list;
+	m_command.m_list1                 = m_list1;
+	m_command.m_draw_state            = {}; // (a new list has none set)
 	m_command.m_contains_encoded_draw = false;
 	m_command.m_used                  = false;
 	StartTiming();
@@ -502,6 +515,7 @@ uint64_t CommandScheduler::Submit() {
 
 	m_command.m_list                  = nullptr;
 	m_command.m_mesh_list             = nullptr;
+	m_command.m_list1                 = nullptr;
 	m_recorded_release_mem_writes     = 0;
 	m_recorded_release_mem_interrupts = 0;
 	m_recorded_draws                  = 0;

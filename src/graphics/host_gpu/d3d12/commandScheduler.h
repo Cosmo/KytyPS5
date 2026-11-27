@@ -108,6 +108,7 @@ private:
 	AllocatorPool                m_allocators;
 	ID3D12GraphicsCommandList*   m_list = nullptr;
 	ID3D12GraphicsCommandList6*  m_mesh_list = nullptr;
+	ID3D12GraphicsCommandList1*  m_list1 = nullptr;
 	CommandBuffer                m_command;
 	uint32_t                     m_recorded_release_mem_writes     = 0;
 	uint32_t                     m_recorded_release_mem_interrupts = 0;

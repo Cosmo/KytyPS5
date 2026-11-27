@@ -321,6 +321,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE FidelityFx::Upscale(CommandBuffer& command) {
 	params.frameID = effect.frame_id;
 	const auto result = ffxFsr3ContextDispatchUpscale(effect.context.get(), &params);
 	fx.renderer.GetDescriptorHeap().InvalidateBinding();
+	command.InvalidateDrawState(); // (the SDK's passes may set viewports and other state on the list)
 	for (size_t i = 0; i < (fx.has_exposure ? 4u : 3u); ++i) {
 		Transition(list, fx.inputs[i].image.Get(), ComputeRead, UnorderedAccess);
 	}
@@ -405,6 +406,7 @@ bool FidelityFx::Interpolate(CommandBuffer& command, ID3D12Resource* color, DXGI
 		result = ffxFsr3DispatchFrameGeneration(&interpolate);
 	}
 	fx.renderer.GetDescriptorHeap().InvalidateBinding();
+	command.InvalidateDrawState(); // (the SDK's passes may set viewports and other state on the list)
 	Transition(list, color, ComputeRead, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	for (size_t i: {1, 2}) {
 		Transition(list, fx.inputs[i].image.Get(), ComputeRead, UnorderedAccess);

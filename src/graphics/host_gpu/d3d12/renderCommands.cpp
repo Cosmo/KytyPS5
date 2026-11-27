@@ -234,8 +234,18 @@ void SetViewports(const CommandBuffer& buffer, ID3D12GraphicsCommandList* list,
 	}
 	runtime.viewport_width  = viewports[0].Width;
 	runtime.viewport_height = viewports[0].Height;
-	list->RSSetViewports(count, viewports.data());
-	list->RSSetScissorRects(count, scissors.data());
+	// (Not again while they are the same on this list: CommandBuffer::DrawState.)
+	static_assert(Slots <= CommandBuffer::DrawState::MaxViewports);
+	auto& state = buffer.GetDrawState();
+	if (state.viewport_count != count ||
+	    std::memcmp(state.viewports.data(), viewports.data(), count * sizeof(D3D12_VIEWPORT)) != 0 ||
+	    std::memcmp(state.scissors.data(), scissors.data(), count * sizeof(D3D12_RECT)) != 0) {
+		list->RSSetViewports(count, viewports.data());
+		list->RSSetScissorRects(count, scissors.data());
+		state.viewport_count = count;
+		std::copy_n(viewports.begin(), count, state.viewports.begin());
+		std::copy_n(scissors.begin(), count, state.scissors.begin());
+	}
 }
 
 void SetDynamicState(const CommandBuffer& buffer, ID3D12GraphicsCommandList* list,
@@ -268,15 +278,32 @@ void SetDynamicState(const CommandBuffer& buffer, ID3D12GraphicsCommandList* lis
 			WarnOnce(warned, "a draw blends color channels with both the constant's alpha and its color; the alpha uses the color");
 		}
 	}
-	list->OMSetBlendFactor(blend_constants);
+	// (Each not again while it is the same on this list: CommandBuffer::DrawState.)
+	auto& state = buffer.GetDrawState();
+	if (!state.blend_set || std::memcmp(state.blend.data(), blend_constants, sizeof(blend_constants)) != 0) {
+		list->OMSetBlendFactor(blend_constants);
+		state.blend_set = true;
+		std::copy_n(blend_constants, 4, state.blend.begin());
+	}
 	if (depth.stencil_test_enable) {
 		// (A draw whose faces have different references is drawn once per face: ExecutePreparedDraw.)
-		list->OMSetStencilRef(depth.stencil_front.reference);
+		const UINT reference = depth.stencil_front.reference;
+		if (!state.stencil_set || state.stencil_ref != reference) {
+			list->OMSetStencilRef(reference);
+			state.stencil_set = true;
+			state.stencil_ref = reference;
+		}
 	}
 	if (depth_bounds) {
-		D3D12::ComPtr<ID3D12GraphicsCommandList1> list1;
-		D3D12::Check(list->QueryInterface(IID_PPV_ARGS(&list1)), "query ID3D12GraphicsCommandList1");
-		list1->OMSetDepthBounds(ctx.GetDepthBoundsMin(), ctx.GetDepthBoundsMax());
+		const float min = ctx.GetDepthBoundsMin();
+		const float max = ctx.GetDepthBoundsMax();
+		if (!state.bounds_set || std::memcmp(&state.bounds_min, &min, sizeof(min)) != 0 ||
+		    std::memcmp(&state.bounds_max, &max, sizeof(max)) != 0) {
+			buffer.Handle1()->OMSetDepthBounds(min, max);
+			state.bounds_set = true;
+			state.bounds_min = min;
+			state.bounds_max = max;
+		}
 	}
 	if (ctx.GetLineWidth() != 1.0f) {
 		static std::atomic_bool warned = false;
@@ -726,6 +753,7 @@ void RenderExecutor::RecordTessPasses(CommandBuffer& buffer, const DrawCallInfo&
 	const D3D12_RECT     scissor {0, 0, 1, 1};
 	list->RSSetViewports(1, &viewport);
 	list->RSSetScissorRects(1, &scissor);
+	buffer.InvalidateDrawState(); // (the domain draw sets its own again)
 	list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
 	auto slot = trace.Begin(list, &capture.trace);
 	list->SetPipelineState(capture.pipeline);
@@ -1276,6 +1304,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 			// The back faces, with their stencil values.
 			list->SetPipelineState(back_pass->pipeline);
 			list->OMSetStencilRef(back_faces.stencil_front.reference);
+			buffer.GetDrawState().stencil_ref = back_faces.stencil_front.reference;
 			record();
 		}
 	}

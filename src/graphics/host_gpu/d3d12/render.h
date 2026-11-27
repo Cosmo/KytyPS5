@@ -23,6 +23,7 @@
 #include <vector>
 
 struct ID3D12GraphicsCommandList;
+struct ID3D12GraphicsCommandList1;
 struct ID3D12GraphicsCommandList6;
 
 namespace Libs::Graphics {
@@ -75,6 +76,27 @@ public:
 	[[nodiscard]] ID3D12GraphicsCommandList* Handle() const;
 	// The same list, for recording mesh shader draws (GraphicContext::mesh_shaders).
 	[[nodiscard]] ID3D12GraphicsCommandList6* MeshHandle() const;
+	// The same list, for depth bounds.
+	[[nodiscard]] ID3D12GraphicsCommandList1* Handle1() const;
+
+	// The fixed-function state the draws last set on the list (SetViewports and SetDynamicState in renderCommands.cpp), which
+	// they do not set again while it is the same: upstream's DynamicState (93452b24e). A new list starts without any; a pass that
+	// sets some of it itself (blits, the tessellation passes, FidelityFX) clears it (InvalidateDrawState).
+	struct DrawState {
+		static constexpr uint32_t        MaxViewports   = 16;
+		uint32_t                         viewport_count = 0; // 0: not set
+		std::array<D3D12_VIEWPORT, MaxViewports> viewports {};
+		std::array<D3D12_RECT, MaxViewports>     scissors {};
+		bool                             blend_set   = false;
+		std::array<float, 4>             blend       = {};
+		bool                             stencil_set = false;
+		UINT                             stencil_ref = 0;
+		bool                             bounds_set  = false;
+		float                            bounds_min  = 0.0f;
+		float                            bounds_max  = 0.0f;
+	};
+	[[nodiscard]] DrawState& GetDrawState() const noexcept { return m_draw_state; }
+	void                     InvalidateDrawState() const noexcept { m_draw_state = {}; }
 	void                         MarkEncodedDraw() noexcept { m_contains_encoded_draw = true; }
 	[[nodiscard]] bool           ContainsEncodedDraw() const noexcept {
 		return m_contains_encoded_draw;
@@ -98,6 +120,8 @@ private:
 	GraphicContext&            m_graphics;
 	ID3D12GraphicsCommandList* m_list                  = nullptr;
 	ID3D12GraphicsCommandList6* m_mesh_list            = nullptr;
+	ID3D12GraphicsCommandList1* m_list1                = nullptr;
+	mutable DrawState          m_draw_state;
 	bool                       m_contains_encoded_draw = false;
 	// Whether anything asked for the list since it began (Handle, MeshHandle): a list nobody did is not submitted
 	// (CommandScheduler::Submit).

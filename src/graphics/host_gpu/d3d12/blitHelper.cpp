@@ -155,7 +155,9 @@ void BlitHelper::ReinterpretColorAsMsDepth(Image& source, Image& destination) {
 	list->OMSetRenderTargets(0, nullptr, FALSE, &depth);
 	list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	list->DrawInstanced(3, 1, 0, 0);
-	// Each guest draw sets its root signature, pipeline, targets and dynamic state again (RenderExecutor), so nothing is left to restore.
+	// Each guest draw sets its root signature, pipeline and targets again (RenderExecutor), and its viewports and other dynamic
+	// state when they differ from the list's: those are forgotten here.
+	command.InvalidateDrawState();
 }
 
 } // namespace Libs::Graphics
