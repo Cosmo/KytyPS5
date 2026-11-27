@@ -401,7 +401,11 @@ void GraphicContext::Create(bool enable_debug_layer) {
 		Log::WriteToConsoleAndLog(fmt::format("D3D12: BC texture arrays are written by the CPU ({})\n",
 		                                      copies_work ? "the Xbox's limits apply" : "this device's copies place their small layers wrongly"));
 	}
-	predicated_clears = D3D12::PredicatedClearsWork(*this);
+	// (The Xbox's limits: its device makes a clear behind a zero predicate, so the texture cache reads the color metadata back.)
+	predicated_clears = !Config::XboxGpuLimitsEnabled() && D3D12::PredicatedClearsWork(*this);
+	if (Config::XboxGpuLimitsEnabled()) {
+		Log::WriteToConsoleAndLog("D3D12: color clears are selected by the CPU (the Xbox's limits apply)\n");
+	}
 }
 
 void GraphicContext::Destroy() {
