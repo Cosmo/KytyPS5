@@ -151,6 +151,7 @@ The "Checked" column says how a change was checked when it was made, before the 
 - **Vertex values in pixel shaders**: the Series X has no barycentrics, so a pixel shader that reads the values of its triangle's three vertices (RDNA2 custom interpolation: P0, P10, P20) gets the interpolated value as P0 and zeros as P10 and P20 (`HostShaderFeatures.h`, `EmitInterpolationParameter`). Plain interpolation comes out right; surfaces whose shaders need the real vertex values show black speckles. Giving the interpolated value for all three, as older Kyty did, speckles too. On a PC the Mesa patch reads them with `AttributeAtVertex`; `xbox_gpu_limits` shows the Series X's result there.
 - **DLSS for PSSR**: upstream’s model and preset options apply to its NVIDIA Vulkan path. D3D12 defaults to linear PSSR and can use the FSR option for compatible temporal PSSR requests.
 - **Multisampled storage images**: a shader that writes a multisampled image stops the game; D3D12 below shader model 6.7 has no writable multisampled textures.
+- **Fractional depth bias**: D3D12 takes a draw's constant depth bias as a whole number of depth units (`DepthBias` is an integer in the pipeline state), so a guest polygon offset between whole units is rounded (`d3d12/pipelineCache.cpp`).
 
 ## Notes on running the CPU tests
 
