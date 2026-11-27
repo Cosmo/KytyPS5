@@ -2,6 +2,9 @@
 
 #include "log.h"
 
+#include "common/emulatorConfig.h"
+#include "common/localization.h"
+
 #include <winrt/Windows.Data.Xml.Dom.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.UI.Notifications.h>
@@ -61,7 +64,9 @@ void ShowTrophyToast(const std::string& name, const std::wstring& link) {
 		dom::XmlDocument document;
 		document.LoadXml(L"<toast><visual><binding template=\"ToastGeneric\"><text/><text/></binding></visual></toast>");
 		document.DocumentElement().SetAttribute(L"launch", link);
-		const std::array<winrt::hstring, 2> lines = {winrt::to_hstring(name), L"Trophy earned!"};
+		// The second line in the console language, as upstream's notification (4c6be6cd1; the system lays out right-to-left text itself).
+		const std::array<winrt::hstring, 2> lines = {
+		    winrt::to_hstring(name), winrt::to_hstring(Common::Localization::Get(Config::GetConsoleLanguage(), "trophy.toast.earned"))};
 		const auto                          texts = document.GetElementsByTagName(L"text");
 		for (uint32_t index = 0; index < lines.size(); index++) {
 			texts.Item(index).AppendChild(document.CreateTextNode(lines[index]));
