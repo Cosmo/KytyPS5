@@ -27,12 +27,19 @@ TileManager::TileManager(GraphicContext& graphics, CommandScheduler& scheduler,
                          StreamBuffer& stream_buffer)
     : m_graphics(graphics), m_scheduler(scheduler), m_stream_buffer(stream_buffer) {}
 
-TileManager::Result TileManager::GetScratchBuffer(uint64_t size, BufferHandle /*input*/) {
-	auto  scratch = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0,
-	                                         Common::AlignUp<uint64_t>(std::max<uint64_t>(size, 4), 4));
-	auto* result  = scratch.get();
-	m_scheduler.DeferOperation([owner = std::move(scratch)]() mutable { owner.reset(); });
-	return {result, 0, result->Size()};
+TileManager::Result TileManager::GetScratchBuffer(uint64_t size, BufferHandle input) {
+	// As upstream's (c2f8e64f6): two scratch buffers that only grow, the second one while `input`
+	// (a conversion's source) is the first. The state changes between a buffer's uses order them.
+	size         = Common::AlignUp<uint64_t>(std::max<uint64_t>(size, 4), 4);
+	auto& buffer = m_scratch[m_scratch[0] && m_scratch[0]->Handle() == input ? 1 : 0];
+	if (!buffer || buffer->Size() < size) {
+		if (buffer) {
+			m_scheduler.DeferOperation([old = std::move(buffer)]() mutable { old.reset(); });
+		}
+		buffer = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0, size);
+		buffer->SetName("tiler scratch");
+	}
+	return {buffer->Handle(), 0, size};
 }
 
 TileManager::Dispatch TileManager::Prepare(bool tile, uint64_t tiled_capacity,
@@ -79,7 +86,7 @@ TileManager::Result TileManager::Detile(BufferHandle tiled, uint64_t tiled_offse
 	}
 	const auto linear_capacity = info.LinearSize();
 	const auto dispatch = Prepare(false, info.data.size, linear_capacity, info, 0, tiled_offset % RootAlignment, 0);
-	const auto linear   = GetScratchBuffer(linear_capacity);
+	const auto linear   = GetScratchBuffer(linear_capacity, tiled);
 	Record(tiled, tiled_offset, linear.buffer, 0, dispatch);
 	return {linear.buffer, 0, linear_capacity};
 }
@@ -100,7 +107,7 @@ void TileManager::TileImage(Image& image, std::span<const vk::BufferImageCopy> r
 	// Reserve the stream parameters first: StreamBuffer::Map may submit the current tick.
 	const auto dispatch =
 	    Prepare(true, tiled_capacity, linear_capacity, image.info, levels, 0, tiled_offset % RootAlignment);
-	auto linear = GetScratchBuffer(linear_capacity);
+	auto linear = GetScratchBuffer(linear_capacity, tiled);
 	image.Download(regions, linear.buffer, 0, linear.size);
 	Record(linear.buffer, linear.offset, tiled, tiled_offset, dispatch);
 }
@@ -168,7 +175,7 @@ void TileManager::TransformColor(Result input, Result output, ColorTransform tra
 
 TileManager::Result TileManager::TransformColor(Result input, ColorTransform transform,
                                                 bool to_host) {
-	auto output = GetScratchBuffer(input.size);
+	auto output = GetScratchBuffer(input.size, input.buffer);
 	TransformColor(input, output, transform, to_host);
 	return {output.buffer, 0, input.size};
 }

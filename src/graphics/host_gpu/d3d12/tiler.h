@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/renderer/image/tileDispatch.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -81,6 +82,7 @@ private:
 	GraphicContext&         m_graphics;
 	CommandScheduler&       m_scheduler;
 	StreamBuffer&           m_stream_buffer;
+	std::array<std::unique_ptr<Buffer>, 2> m_scratch; // GetScratchBuffer's
 	std::unique_ptr<Buffer> m_clear_predicates;
 };
 
