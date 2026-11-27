@@ -41,8 +41,15 @@ public:
 	             ShaderRecompiler::IR::ImageHeapView&          result) override;
 	// Image discovery: resolves new elements and rediscovers changed images.
 	void Rebind(RenderExecutor& executor);
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// Recording: uploads slots, moves the views of resident images to their read state and writes
+	// new elements (a view's descriptor can need its state first: a copied view); the executor
+	// binds the table (DescriptorHeap::ImageHeapTable).
+	void Commit(CommandBuffer& buffer);
+#else
 	// Recording: uploads slots, moves resident images to their read layout and binds the array.
 	void Commit(CommandBuffer& buffer, vk::PipelineBindPoint bind_point, vk::PipelineLayout layout);
+#endif
 	// CPU write fault, on any thread.
 	void InvalidateMemory(uint64_t address, uint64_t size);
 	void UnmapMemory(uint64_t address, uint64_t size);
@@ -76,6 +83,9 @@ private:
 		uint32_t kind   = 0;
 		uint32_t refs   = 0; // Slots of all views that select it.
 		State    state  = State::Live;
+#if defined(KYTY_GPU_BACKEND_D3D12)
+		ImageViewHandle view {}; // Of image: D3D12 images keep their views' states apart.
+#endif
 	};
 
 	struct Memory;
@@ -128,7 +138,12 @@ private:
 	ImageId  CurrentImage(const Image::HeapChange& change);
 	uint32_t Allocate();
 	void     Resize(Memory& memory, uint64_t base, uint64_t size);
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	void     Upload();
+	void     WriteDescriptors(CommandBuffer& buffer);
+#else
 	void     WriteDescriptors();
+#endif
 
 	RenderContext&                       m_context;
 	PageManager&                         m_page_manager;
@@ -150,10 +165,15 @@ private:
 	std::vector<std::pair<size_t, size_t>>            m_runs;
 	std::vector<uint32_t>                             m_scratch;
 	std::vector<Image::HeapChange>                    m_changes;
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	std::vector<uint32_t>                             m_writes; // Elements, written at the commit.
+	std::vector<ImageId>                              m_ready;  // Scratch: away images to the read state.
+#else
 	std::vector<std::pair<uint32_t, vk::DescriptorImageInfo>> m_writes;
 	vk::DescriptorSetLayout                           m_layout = nullptr;
 	vk::DescriptorPool                                m_pool   = nullptr;
 	vk::DescriptorSet                                 m_set    = nullptr;
+#endif
 
 	friend struct ImageHeapTestAccess;
 };

@@ -19,7 +19,8 @@ namespace Libs::Graphics {
 
 RenderContext::RenderContext(GraphicContext& graphics)
     : m_graphics(graphics), m_render_executor(*this), m_command_scheduler(*this, graphics), m_descriptor_heap(graphics, m_command_scheduler),
-      m_pipeline_cache(graphics), m_compute_kernels(graphics, m_pipeline_cache.GetCompiler()), m_sampler_cache(graphics, m_descriptor_heap),
+      m_image_heap(*this, m_page_manager), m_pipeline_cache(graphics, &m_image_heap),
+      m_compute_kernels(graphics, m_pipeline_cache.GetCompiler()), m_sampler_cache(graphics, m_descriptor_heap),
       m_resolve_cache(*this),
       m_buffer_cache(graphics, m_command_scheduler, m_page_manager, m_texture_cache),
       m_texture_cache(graphics, m_command_scheduler, m_page_manager, m_buffer_cache, m_resolve_cache),
@@ -83,6 +84,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	if (access == PageFaultAccess::Write) {
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
+		m_image_heap.InvalidateMemory(fault_vaddr, fault_size);
 	} else {
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
@@ -113,6 +115,7 @@ bool RenderContext::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	}
 	m_buffer_cache.InvalidateMemory(vaddr, size);
 	m_texture_cache.InvalidateMemory(vaddr, size);
+	m_image_heap.InvalidateMemory(vaddr, size);
 	return true;
 }
 
@@ -146,6 +149,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		}
 		m_buffer_cache.InvalidateMemory(vaddr, size);
 		m_texture_cache.UnmapMemory(vaddr, size);
+		m_image_heap.UnmapMemory(vaddr, size);
 		std::lock_guard lock(m_mapped_ranges_mutex);
 		m_mapped_ranges.Subtract(vaddr, size);
 	};
@@ -201,6 +205,7 @@ void RenderContext::RunGarbageCollector() {
 		m_fault_process_pending = false;
 		m_buffer_cache.ProcessFaultBuffer();
 	}
+	m_image_heap.RunGarbageCollector();
 	m_texture_cache.ProcessDownloadImages();
 	m_texture_cache.RunGarbageCollector();
 	m_buffer_cache.RunGarbageCollector();

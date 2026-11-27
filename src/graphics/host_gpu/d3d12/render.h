@@ -54,6 +54,10 @@ class CommandScheduler;
 [[nodiscard]] inline bool HasShaderBufferWrites(const ShaderStageRuntime& runtime) {
 	return WritesMemory(runtime);
 }
+// An image binding without an image (the guest left the slot unbound) reads as zeros through a null view, as upstream binds Vulkan
+// null descriptors; its format and dimension follow the shader's declaration.
+void WriteNullImageView(ID3D12Device* device, const ShaderRecompiler::IR::ImageResource& resource, bool storage,
+                        D3D12_CPU_DESCRIPTOR_HANDLE destination);
 
 // The command list currently being recorded, plus the guest register state it records from.
 class CommandBuffer {
@@ -127,6 +131,9 @@ public:
 	void FindBuffers(std::span<PreparedBindings* const> stages);
 	void RebindBuffers(PreparedBindings& bindings);
 	void RebindImages(PreparedBindings& bindings);
+	// (Also the image heap's, as upstream's is public.)
+	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
+	                                            const ShaderRecompiler::IR::DescriptorValue& value);
 
 private:
 	// False, with nothing drawn, when the draw's indirect records need CPU counts.
@@ -155,8 +162,6 @@ private:
 
 	// Shared with the Vulkan renderer (renderer/pipeline/descriptors.cpp and
 	// renderer/{color,depth}RenderTarget.cpp).
-	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
-	                                            const ShaderRecompiler::IR::DescriptorValue& value);
 	void PrepareGraphicsBindings(std::span<PreparedBindings* const> stages, DrawTargets& targets);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,
 	                              uint32_t render_target_slot, bool ignore_target_mask = false,

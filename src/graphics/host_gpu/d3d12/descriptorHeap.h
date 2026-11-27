@@ -38,14 +38,16 @@ struct DescriptorRange {
 //
 // The first BindlessViews entries of the view heap hold persistent descriptors that shaders
 // index directly (the buffers guest memory addresses resolve to, see BdaPageTable). Entry 0 is a
-// null raw buffer view, so an unresolved address reads zeros.
+// null raw buffer view, so an unresolved address reads zeros. The ImageHeapViews after them are
+// the elements of the resident image heap (ImageHeap), null until it writes them.
 class DescriptorHeap {
 public:
 	DescriptorHeap(GraphicContext& graphics, CommandScheduler& scheduler);
 	~DescriptorHeap();
 	KYTY_CLASS_NO_COPY(DescriptorHeap);
 
-	static constexpr uint32_t BindlessViews = 1u << 16;
+	static constexpr uint32_t BindlessViews  = 1u << 16;
+	static constexpr uint32_t ImageHeapViews = 1u << 16; // ShaderRecompiler::IR::ImageHeapCapacity
 
 	[[nodiscard]] DescriptorRange AllocateViews(CommandBuffer& command, uint32_t count);
 	// Whether the current command list still has room for this many view and sampler descriptors (a list that runs out can't go on).
@@ -57,6 +59,10 @@ public:
 	// The first persistent descriptor, for a descriptor table over all of them (the heap is bound
 	// to `command` if it is not yet).
 	[[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE BindlessTable(CommandBuffer& command);
+	// The descriptor of a resident image heap element, and the table over all of them (the heap
+	// is bound to `command` if it is not yet).
+	[[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE ImageHeapView(uint32_t element) const noexcept;
+	[[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE ImageHeapTable(CommandBuffer& command);
 	[[nodiscard]] DescriptorRange AllocateSamplers(CommandBuffer& command, uint32_t count);
 	// The samplers (CPU handles from the sampler cache, in binding order) as a table in the shader-visible heap. The heap holds 2048 descriptors at
 	// most (a D3D12 limit) and a draw used to write its samplers anew, so one command list ran out of them. A set of samplers is written once per

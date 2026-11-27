@@ -469,7 +469,8 @@ void RootLayout::Add(const IR::CompiledShaderInfo& program, bool program_runtime
 	runtime_data   = runtime_data || program_runtime_data;
 	// Guest memory by address: through the descriptor heap, or the guest buffer table.
 	const bool table = ShaderRecompiler::GetHostShaderFeatures().guest_pointer_table;
-	const bool reads_address = program.info.uses_dma || program.info.uses_device_address;
+	// (Resident image heaps read their slot words by address too.)
+	const bool reads_address = program.info.uses_dma || program.info.uses_device_address || program.info.uses_image_heap;
 	heap_indexing = heap_indexing || (reads_address && !table);
 	guest_table   = guest_table || (reads_address && table);
 	// The lock words of emulated 64-bit image atomics are in the guest buffer table too.
@@ -479,6 +480,12 @@ void RootLayout::Add(const IR::CompiledShaderInfo& program, bool program_runtime
 	// (So are those of 64-bit buffer and group shared memory atomics.)
 	if (ShaderRecompiler::GetHostShaderFeatures().int64_atomics_lock) {
 		guest_table = guest_table || program.info.buffer_int64_atomics || program.info.shared_int64_atomics;
+	}
+	// The image heap's arrays, which the SPIR-V emitter's DefineDescriptors declares per kind.
+	for (const auto& image: program.info.images) {
+		if (image.heap && image.indirect_resources.empty()) {
+			image_heap_kinds |= uint64_t {1} << IR::ImageBindingIndex(*IR::DescriptorBindingForImage(image));
+		}
 	}
 	// The bindings in kind order, each sized as the SPIR-V emitter's DefineDescriptors declares
 	// it: buffers, images and samplers are arrays, every other kind is a single descriptor.
@@ -524,6 +531,10 @@ std::size_t PipelineCache::RootLayoutHash::operator()(const RootLayout& layout) 
 	              (layout.guest_table ? 16u : 0u) |
 	              (static_cast<uint32_t>(layout.mesh_scratch) << 5u) |
 	              (static_cast<uint32_t>(layout.tess_scratch) << 7u));
+	// (Only where there is one: the names of the other pipelines in the driver's library stay.)
+	if (layout.image_heap_kinds != 0) {
+		Mix(hash, static_cast<std::size_t>(layout.image_heap_kinds));
+	}
 	return hash;
 }
 
@@ -550,9 +561,9 @@ std::size_t PipelineCache::GraphicsKeyHash::operator()(const GraphicsKey& key) c
 	return hash;
 }
 
-PipelineCache::PipelineCache(GraphicContext& graphics)
+PipelineCache::PipelineCache(GraphicContext& graphics, IR::ImageHeapSource* image_heap)
     : m_graphics(graphics), m_compiler(graphics.device),
-      m_programs(ShaderLimits(graphics, m_compiler), nullptr, graphics) {
+      m_programs(ShaderLimits(graphics, m_compiler), image_heap, graphics) {
 	D3D12::Check(graphics.device->QueryInterface(IID_PPV_ARGS(&m_device)),
 	             "query ID3D12Device2");
 	// Shaders can only index the descriptor heap from shader model 6.6 (not on the Series X): below
@@ -1460,6 +1471,27 @@ ID3D12RootSignature* PipelineCache::GetRootSignature(const RootLayout& layout) {
 		parameter.ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 		parameter.DescriptorTable.NumDescriptorRanges = 1;
 		parameter.DescriptorTable.pDescriptorRanges   = &guest_range;
+		parameters.push_back(parameter);
+	}
+	// The resident image heap: an SRV range per image binding kind, each in its own space and all
+	// over the same descriptors (DescriptorHeap::ImageHeapView), which change as images come and go.
+	std::vector<D3D12_DESCRIPTOR_RANGE1> heap_ranges;
+	if (layout.image_heap_kinds != 0) {
+		static_assert(IR::ImageHeapCapacity == DescriptorHeap::ImageHeapViews);
+		for (auto kinds = layout.image_heap_kinds; kinds != 0; kinds &= kinds - 1) {
+			D3D12_DESCRIPTOR_RANGE1 range {};
+			range.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+			range.NumDescriptors     = IR::ImageHeapCapacity;
+			range.BaseShaderRegister = 0;
+			range.RegisterSpace      = IR::ImageHeapSpace + static_cast<uint32_t>(std::countr_zero(kinds));
+			range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+			range.OffsetInDescriptorsFromTableStart = 0;
+			heap_ranges.push_back(range);
+		}
+		D3D12_ROOT_PARAMETER1 parameter {};
+		parameter.ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+		parameter.DescriptorTable.NumDescriptorRanges = static_cast<UINT>(heap_ranges.size());
+		parameter.DescriptorTable.pDescriptorRanges   = heap_ranges.data();
 		parameters.push_back(parameter);
 	}
 	// The buffers of a mesh program run as a compute shader: root descriptors, whose registers

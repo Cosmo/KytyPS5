@@ -262,7 +262,13 @@ void DefineDescriptors(EmitterState& state) {
 			// Heap kinds alias one array; the root itself is never accessed.
 			auto& definition = state.heap_images[IR::ImageBindingIndex(*kind)];
 			if (image.indirect_resources.empty() && definition.variable == 0) {
+#if defined(KYTY_GPU_BACKEND_D3D12)
+				// Each kind in its own space, all over the same descriptors (RootLayout::image_heap_kinds).
+				DefineImageArray(state, definition, image, IR::ImageHeapCapacity,
+				                 IR::ImageHeapSpace + IR::ImageBindingIndex(*kind), 0u);
+#else
 				DefineImageArray(state, definition, image, IR::ImageHeapCapacity, IR::ImageHeapSet, 0u);
+#endif
 			}
 			continue;
 		}
@@ -418,6 +424,11 @@ void DefineDescriptors(EmitterState& state) {
 	}
 	// Mesh indices can come directly from a draw's buffer descriptor without a guest page table.
 	if (GetHostShaderFeatures().guest_pointer_table && info.uses_device_address &&
+	    state.guest_buffer_table == 0) {
+		DefineGuestBufferTable(state);
+	}
+	// Resident image heaps read their slot words by address too (EmitImageHeapEntry).
+	if (GetHostShaderFeatures().guest_pointer_table && info.uses_image_heap &&
 	    state.guest_buffer_table == 0) {
 		DefineGuestBufferTable(state);
 	}
@@ -893,10 +904,12 @@ void DefineModule(EmitterState& state) {
 		state.builder.RequireCapability(spv::CapabilityStorageBuffer16BitAccess);
 	}
 	// Guest memory is read through physical storage buffer pointers, or (where the host cannot use
-	// them) through the guest buffer table. Resident image heaps and ray queries read through pointers.
+	// them) through the guest buffer table. Resident image heaps read their slot words the same way;
+	// ray queries read through pointers.
 	const bool reads_address = state.program.info.uses_dma || state.program.info.uses_device_address;
-	const bool physical_pointers = (reads_address && state.guest_buffer_table == 0) ||
-	                               state.program.info.uses_image_heap || state.program.info.ray_query;
+	const bool physical_pointers =
+	    ((reads_address || state.program.info.uses_image_heap) && state.guest_buffer_table == 0) ||
+	    state.program.info.ray_query;
 	if (reads_address || physical_pointers) {
 		state.builder.RequireCapability(spv::CapabilityInt64);
 	}

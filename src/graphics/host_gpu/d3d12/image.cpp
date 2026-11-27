@@ -471,6 +471,7 @@ void Image::Transition(CommandBuffer& command, uint32_t resource, uint32_t state
 	                          : ImageSubresourceRange {0, backing.mip_levels, 0, backing.layers};
 
 	std::vector<D3D12_RESOURCE_BARRIER> barriers;
+	bool                                left_heap_read = false;
 	for (uint32_t plane = 0; plane < backing.planes; plane++) {
 		for (uint32_t level = levels.base_level; level < levels.base_level + levels.level_count;
 		     level++) {
@@ -481,6 +482,8 @@ void Image::Transition(CommandBuffer& command, uint32_t resource, uint32_t state
 				if (before == after) {
 					continue;
 				}
+				// Resident heaps sample in the read state; only leaving it invalidates them (as the Vulkan barriers out of the read layout).
+				left_heap_read = left_heap_read || ((before & HeapReadState) == HeapReadState && (after & HeapReadState) != HeapReadState);
 				D3D12_RESOURCE_BARRIER barrier {};
 				barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 				barrier.Transition.pResource   = target.resource;
@@ -491,6 +494,9 @@ void Image::Transition(CommandBuffer& command, uint32_t resource, uint32_t state
 				before = after;
 			}
 		}
+	}
+	if (left_heap_read) {
+		HeapChanged();
 	}
 	if (barriers.empty()) {
 		return;
@@ -562,6 +568,8 @@ void Image::Use(CommandBuffer& command, uint32_t state, std::optional<ImageSubre
 		backing.version++;
 		backing.resources[resource].version = backing.version;
 		backing.current                     = resource;
+		// The image's other resources and view copies are behind now, which a heap's views may read.
+		HeapChanged();
 	}
 }
 

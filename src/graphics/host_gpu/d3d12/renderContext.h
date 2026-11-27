@@ -10,7 +10,6 @@
 #ifdef KYTY_HAS_FSR
 #include "graphics/host_gpu/d3d12/fidelityfx.h"
 #endif
-#include "graphics/host_gpu/d3d12/imageHeap.h"
 #include "graphics/host_gpu/d3d12/occlusionQueries.h"
 #include "graphics/host_gpu/d3d12/pipelineCache.h"
 #include "graphics/host_gpu/d3d12/render.h"
@@ -19,6 +18,7 @@
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
+#include "graphics/host_gpu/renderer/pipeline/imageHeap.h"
 #include "graphics/host_gpu/renderer/resolveCache.h"
 #include "kernel/eventQueue.h"
 
@@ -96,14 +96,15 @@ private:
 	RenderExecutor            m_render_executor;
 	CommandScheduler          m_command_scheduler;
 	DescriptorHeap            m_descriptor_heap;
+	PageManager               m_page_manager;
+	// (Before the pipeline cache, which hands it to the program cache, as upstream.)
+	ImageHeap                 m_image_heap;
 	PipelineCache             m_pipeline_cache;
 	ComputeKernels            m_compute_kernels;
 	SamplerCache              m_sampler_cache;
-	PageManager               m_page_manager;
 	ResolveCache              m_resolve_cache;
 	BufferCache               m_buffer_cache;
 	TextureCache              m_texture_cache;
-	ImageHeap                 m_image_heap;
 	OcclusionQueries          m_occlusion_queries;
 	mutable std::shared_mutex m_mapped_ranges_mutex;
 	RangeSet                  m_mapped_ranges;

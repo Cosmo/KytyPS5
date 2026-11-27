@@ -108,7 +108,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::CpuPool::Allocate(ID3D12Device*     
 
 DescriptorHeap::DescriptorHeap(GraphicContext& graphics, CommandScheduler& scheduler)
     : m_graphics(graphics), m_scheduler(scheduler),
-      m_views(graphics, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, ViewCapacity, BindlessViews),
+      m_views(graphics, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, ViewCapacity, BindlessViews + ImageHeapViews),
       m_samplers(graphics, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, SamplerCapacity) {
 	D3D12_DESCRIPTOR_HEAP_DESC desc {};
 	desc.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -146,6 +146,17 @@ DescriptorHeap::DescriptorHeap(GraphicContext& graphics, CommandScheduler& sched
 	locks.Buffer.NumElements = IR::ImageAtomic64LockCount;
 	locks.Buffer.Flags       = D3D12_BUFFER_UAV_FLAG_RAW;
 	graphics.device->CreateUnorderedAccessView(m_atomic64_locks, nullptr, &locks, BindlessView(IR::ImageAtomic64LockSlot));
+
+	// The image heap's elements read zeros until it writes them (it never selects one it has not written).
+	static_assert(ImageHeapViews == IR::ImageHeapCapacity);
+	D3D12_SHADER_RESOURCE_VIEW_DESC null_image {};
+	null_image.Format                  = DXGI_FORMAT_R32_FLOAT;
+	null_image.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+	null_image.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	null_image.Texture2D.MipLevels     = 1;
+	for (uint32_t element = 0; element < ImageHeapViews; element++) {
+		graphics.device->CreateShaderResourceView(nullptr, &null_image, ImageHeapView(element));
+	}
 }
 
 uint32_t DescriptorHeap::AllocateBindlessView() {
@@ -175,6 +186,15 @@ D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::BindlessView(uint32_t index) const n
 D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap::BindlessTable(CommandBuffer& command) {
 	Bind(command);
 	return m_views.Base().gpu;
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::ImageHeapView(uint32_t element) const noexcept {
+	return m_views.Base().Cpu(BindlessViews + element);
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap::ImageHeapTable(CommandBuffer& command) {
+	Bind(command);
+	return m_views.Base().Gpu(BindlessViews);
 }
 
 DescriptorHeap::~DescriptorHeap() {

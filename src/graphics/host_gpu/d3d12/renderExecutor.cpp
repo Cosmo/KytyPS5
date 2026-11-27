@@ -100,8 +100,8 @@ void WriteRawView(ID3D12Device* device, const BufferBinding& binding,
 	return count;
 }
 
-// An image binding without an image (the guest left the slot unbound) reads as zeros through a null view, as upstream binds Vulkan
-// null descriptors; its format and dimension follow the shader's declaration.
+} // namespace
+
 void WriteNullImageView(ID3D12Device* device, const IR::ImageResource& resource, bool storage, D3D12_CPU_DESCRIPTOR_HANDLE destination) {
 	using Dimension    = ShaderRecompiler::Decoder::ImageDimension;
 	DXGI_FORMAT format = DXGI_FORMAT_R32_FLOAT;
@@ -164,8 +164,6 @@ void WriteNullImageView(ID3D12Device* device, const IR::ImageResource& resource,
 	}
 	device->CreateShaderResourceView(nullptr, &desc, destination);
 }
-
-} // namespace
 
 void RenderExecutor::MakeRoomForDescriptors(std::initializer_list<const PipelineCache::Pipeline*> pipelines) {
 	uint32_t views    = 0;
@@ -239,6 +237,11 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 	    graphics ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
 	                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
 	             : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+	// Images a resident image heap selects return to its read state first (Vulkan: before the
+	// bindings' own layouts), and keep it when a dispatch samples them too.
+	if (layout.image_heap_kinds != 0) {
+		m_context.GetImageHeap().Commit(buffer);
+	}
 	// Descriptors follow the root layout: stages in order, their bindings in declaration order.
 	for (auto* prepared: stages) {
 		EXIT_IF(prepared == nullptr || prepared->runtime == nullptr || !*prepared->runtime);
@@ -256,7 +259,9 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 			const bool  storage = binding.desc.type == TextureCache::BindingType::Storage;
 			const auto  state   = storage                             ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
 			                      : binding.image_id == m_read_only_depth ? ReadOnlyDepthState
-			                                                            : sampled_state;
+			                      : image.heap_refs.load(std::memory_order_relaxed) != 0u
+			                          ? static_cast<D3D12_RESOURCE_STATES>(Image::HeapReadState)
+			                          : sampled_state;
 			image.Use(buffer, state,
 			          ImageSubresourceRange {view.base_level, view.level_count, view.base_layer,
 			                                 view.layer_count},
@@ -323,6 +328,9 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 		}
 		for (uint32_t i = 0; i < program.info.images.size(); i++) {
 			const auto& resource = program.info.images[i];
+			if (resource.heap) {
+				continue; // (the image heap's table)
+			}
 			auto&       texture  = images.at(i);
 			const auto kind  = *IR::DescriptorBindingForImage(resource);
 			const auto start = image_starts[IR::ImageBindingIndex(kind)] + resource.descriptor_index;
@@ -393,6 +401,16 @@ void RenderExecutor::CommitBindings(CommandBuffer& buffer, bool graphics,
 		// Guest memory is read through the persistent descriptors at the start of the view heap.
 		EXIT_IF(parameter != layout.GuestTableParameter());
 		const auto table = heap.BindlessTable(buffer);
+		if (graphics) {
+			list->SetGraphicsRootDescriptorTable(parameter++, table);
+		} else {
+			list->SetComputeRootDescriptorTable(parameter++, table);
+		}
+	}
+	if (layout.image_heap_kinds != 0) {
+		// The resident image heap's elements, in the view heap after the persistent buffer views.
+		EXIT_IF(parameter != layout.ImageHeapParameter());
+		const auto table = heap.ImageHeapTable(buffer);
 		if (graphics) {
 			list->SetGraphicsRootDescriptorTable(parameter++, table);
 		} else {

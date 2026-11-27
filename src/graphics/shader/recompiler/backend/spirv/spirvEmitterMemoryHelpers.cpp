@@ -59,13 +59,11 @@ uint32_t EmitImageHeapEntry(EmitterState& state, uint32_t key, uint32_t mapping_
 	const auto offset = Unary(state, spv::OpUConvert, TypeU64(state),
 	                          Binary(state, spv::OpShiftLeftLogical, TypeU32(state), index,
 	                                 ConstantU32(state, 2u)));
-	const auto pointer = Unary(state, spv::OpConvertUToPtr, TypePhysicalU32Pointer(state),
-	                           Binary(state, spv::OpIAdd, TypeU64(state),
-	                                  PackU64(state, Mapping(1u), Mapping(2u)), offset));
-	const auto entry = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpLoad, TypeU32(state), entry, pointer,
-	                          spv::MemoryAccessAlignedMask, 4u);
-	return entry;
+	// Through a pointer, or where the host has none through the guest buffer table: the slot words'
+	// address is then their buffer's descriptor slot and the byte offset, the same in every lane.
+	const auto address = Binary(state, spv::OpIAdd, TypeU64(state),
+	                            PackU64(state, Mapping(1u), Mapping(2u)), offset);
+	return LoadGuestPointerDword(state, address, false, true);
 }
 
 uint32_t EmitIndirectResourceIndex(EmitterState& state, uint32_t key, uint32_t mapping_offset,

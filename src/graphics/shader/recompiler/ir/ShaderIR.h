@@ -352,6 +352,10 @@ inline constexpr uint32_t ImageBindingCount           = 50u;
 inline constexpr uint32_t ImageHeapSet                = 1u;
 inline constexpr uint32_t ImageHeapCapacity           = 65536u;
 inline constexpr uint32_t ImageHeapKindShift          = 20u;
+// D3D12: the array of each image binding kind is in register space ImageHeapSpace +
+// ImageBindingIndex(kind) (shader registers of different types may not alias), and all of them
+// are one table over the heap's descriptors.
+inline constexpr uint32_t ImageHeapSpace              = 1100u;
 
 enum class DescriptorBindingKind : uint32_t {
 	Buffers  = 0u,

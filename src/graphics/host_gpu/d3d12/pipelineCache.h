@@ -63,6 +63,10 @@ struct RootLayout {
 	// descriptors, the guest buffer table (HostShaderFeatures::guest_pointer_table), which follows
 	// the other tables.
 	bool               guest_table    = false;
+	// The image binding kinds (bit ImageBindingIndex) whose resident image heap arrays the programs
+	// declare (ShaderRecompiler::IR::ImageHeapSpace): one table after the guest buffer table, a
+	// range per kind over the same descriptors.
+	uint64_t           image_heap_kinds = 0;
 	MeshScratch        mesh_scratch   = MeshScratch::None;
 	// The buffers of a tessellated draw (ShaderRecompiler::IR::TessEmulation), root descriptors after the tables: the capture draw's
 	// (parameters, the capture written), the hull pass's (parameters, the capture and the slots read, the records written) and the
@@ -79,10 +83,14 @@ struct RootLayout {
 		return (push_constants ? 1u : 0u) + (runtime_data ? 1u : 0u) + (views.empty() ? 0u : 1u) +
 		       (samplers.empty() ? 0u : 1u);
 	}
+	// The root parameter of the image heap table, which follows the guest buffer table.
+	[[nodiscard]] uint32_t ImageHeapParameter() const noexcept {
+		return GuestTableParameter() + (guest_table ? 1u : 0u);
+	}
 	// The root parameter of the first mesh scratch buffer, which follows the tables: the records, the indices (compute only) and
 	// the primitive IDs (IR::MeshEmulation).
 	[[nodiscard]] uint32_t MeshScratchParameter() const noexcept {
-		return GuestTableParameter() + (guest_table ? 1u : 0u);
+		return ImageHeapParameter() + (image_heap_kinds != 0 ? 1u : 0u);
 	}
 	// The root parameter of the first tessellation buffer (a layout has mesh or tessellation buffers, not both).
 	[[nodiscard]] uint32_t TessScratchParameter() const noexcept { return MeshScratchParameter(); }
@@ -101,7 +109,8 @@ struct RootLayout {
 
 class PipelineCache {
 public:
-	explicit PipelineCache(GraphicContext& graphics);
+	// image_heap: the resident image heap the programs map GPU-indexed image tables to.
+	PipelineCache(GraphicContext& graphics, ShaderRecompiler::IR::ImageHeapSource* image_heap);
 	~PipelineCache();
 	// Whether the device has blend factors for the constant's alpha on color channels (not the Xbox: the pipelines use the
 	// constant color in their place, and SetDynamicState makes that exact where it can).

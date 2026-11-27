@@ -91,6 +91,10 @@ public:
 #endif
 
 #if defined(KYTY_GPU_BACKEND_D3D12)
+	// The state resident image heaps sample their images' views in (any stage); leaving it, or a
+	// write, queues a heap change.
+	static constexpr uint32_t HeapReadState =
+	    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 	// Records the transition of `range` (all subresources when empty) to `state`, a
 	// D3D12_RESOURCE_STATES value, on the resource `view` reads (the current contents when empty).
 	// A resource of another format family is first brought up to date; a write state makes the

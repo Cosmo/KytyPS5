@@ -2,18 +2,24 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
+#if defined(KYTY_GPU_BACKEND_D3D12)
+#include "graphics/host_gpu/d3d12/renderContext.h"
+#else
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#endif
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
 #include <bit>
+#include <fmt/format.h>
 #include <iterator>
 #include <xxhash.h>
 
@@ -82,6 +88,11 @@ size_t ImageHeap::KeyHash::operator()(const Key& key) const noexcept {
 
 ImageHeap::ImageHeap(RenderContext& context, PageManager& page_manager)
     : m_context(context), m_page_manager(page_manager) {
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// The elements are persistent descriptors of the view heap (DescriptorHeap::ImageHeapView),
+	// null until written. Slot word 0 selects element 0, which stays a null image.
+	m_elements.emplace_back();
+#else
 	auto& graphics = context.GetGraphics();
 	vk::PhysicalDeviceVulkan12Properties limits {};
 	vk::PhysicalDeviceProperties2        properties {};
@@ -128,14 +139,17 @@ ImageHeap::ImageHeap(RenderContext& context, PageManager& page_manager)
 	m_elements.emplace_back();
 	m_writes.push_back({0u, {nullptr, nullptr, vk::ImageLayout::eShaderReadOnlyOptimal}});
 	WriteDescriptors();
+#endif
 }
 
 ImageHeap::~ImageHeap() {
 	for (const auto& memory: m_memories) Unwatch(*memory);
+#if !defined(KYTY_GPU_BACKEND_D3D12)
 	auto& graphics             = m_context.GetGraphics();
 	graphics.image_heap_layout = nullptr;
 	graphics.device.destroyDescriptorPool(m_pool, nullptr);
 	graphics.device.destroyDescriptorSetLayout(m_layout, nullptr);
+#endif
 }
 
 bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& result) {
@@ -161,6 +175,13 @@ bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& 
 		if (memory == m_memories.end()) {
 			std::scoped_lock lock {m_mutex};
 			memory = m_memories.insert(m_memories.end(), std::make_unique<Memory>());
+#if defined(KYTY_GPU_BACKEND_D3D12)
+			// Which games take this route.
+			[[maybe_unused]] static const bool logged = [size] {
+				Log::WriteToConsoleAndLog(fmt::format("GPU: resident image heap in use (first table {} bytes)\n", size));
+				return true;
+			}();
+#endif
 		}
 		Resize(**memory, request.base, size);
 	}
@@ -203,7 +224,14 @@ bool ImageHeap::Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& 
 	}
 	if (std::ranges::find(m_active, view->get()) == m_active.end()) m_active.push_back(view->get());
 	const auto& selected = **view;
-	result = {.slots      = selected.buffer->BufferDeviceAddress(),
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// DXIL has no pointers: shaders read the slot words through the buffer's persistent descriptor
+	// slot (the guest buffer table, or the descriptor heap), at an offset from 0.
+	const uint64_t slots = uint64_t {selected.buffer->BindlessIndex()} << 32u;
+#else
+	const uint64_t slots = selected.buffer->BufferDeviceAddress();
+#endif
+	result = {.slots      = slots,
 	          .slot_count = static_cast<uint32_t>(selected.slots.size() - 1u),
 	          .kinds      = selected.kinds};
 	return true;
@@ -556,19 +584,79 @@ void ImageHeap::Rebind(RenderExecutor& executor) {
 			image.heap_refs.fetch_add(1u, std::memory_order_relaxed);
 			element.image      = binding.image_id;
 			element.serial     = image.serial;
+#if !defined(KYTY_GPU_BACKEND_D3D12)
 			binding.layout     = image.ReadLayout();
+#endif
 			binding.image_view = textures.FindTexture(binding.image_id, binding.desc);
 			if (binding.desc.info.metadata.kind == ImageMetadataKind::Dcc) m_dcc.push_back(index);
 			m_away.emplace_back(image.serial, binding.image_id);
 		} else if (!binding.desc.info.data.Empty()) {
 			m_held.push_back(index);
 		}
+#if defined(KYTY_GPU_BACKEND_D3D12)
+		m_elements[index].view = binding.image_view;
+		m_writes.push_back(index);
+#else
 		m_writes.push_back({index, {nullptr, binding.image_view, binding.layout}});
+#endif
 	}
 	m_pending.clear();
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// The slots go up now: D3D12 records nothing that may restart the command list once the
+	// draw's recording began (stream uploads can), and every program of the draw acquired its views.
+	Upload();
+#else
 	WriteDescriptors();
+#endif
 }
 
+#if defined(KYTY_GPU_BACKEND_D3D12)
+void ImageHeap::Upload() {
+	for (auto* view: m_active) {
+		if (view->dirty_begin == view->dirty_end) continue;
+		const auto slots  = std::span(view->slots).subspan(view->dirty_begin,
+		                                                   view->dirty_end - view->dirty_begin);
+		auto&      stream = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
+		const auto offset = stream.Copy(slots.data(), slots.size_bytes(), sizeof(uint32_t));
+		// (After the copy into the stream, which may have started a new command list.)
+		view->buffer->CopyFrom(m_context.GetCommandScheduler().Current(), stream, offset,
+		                       view->dirty_begin * sizeof(uint32_t), slots.size_bytes());
+		view->dirty_begin = view->dirty_end = 0;
+	}
+}
+
+void ImageHeap::WriteDescriptors(CommandBuffer& buffer) {
+	if (m_writes.empty()) return;
+	auto&      textures = m_context.GetTextureCache();
+	auto&      heap     = m_context.GetDescriptorHeap();
+	auto*      device   = m_context.GetGraphics().device;
+	const auto null     = [&](uint32_t index) {
+		const auto& key = m_elements[index].key;
+		const auto  resource = IR::ImageHeapResource(
+		    {.dimension = key.dimension, .depth_compare = key.depth_view, .r128 = key.r128}, m_elements[index].kind);
+		WriteNullImageView(device, resource, false, heap.ImageHeapView(index));
+	};
+	// An element reads its view as it is when it is written (the state first: a copied view's
+	// copy is made there). One of an image this draw renders to or writes is null until a later
+	// commit, as such an image's state belongs to the draw.
+	std::erase_if(m_writes, [&](uint32_t index) {
+		const auto& element = m_elements[index];
+		auto*       image   = element.image ? textures.m_slot_images.try_get(element.image) : nullptr;
+		if (element.refs == 0u || image == nullptr || image->serial != element.serial) {
+			if (index != 0u) null(index);
+			return true;
+		}
+		if (image->binding.is_target || image->binding.shader_write || image->binding.force_general) {
+			null(index);
+			return false;
+		}
+		image->Use(buffer, Image::HeapReadState, std::nullopt, element.view);
+		device->CopyDescriptorsSimple(1, heap.ImageHeapView(index), image->ShaderResourceView(element.view),
+		                              D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		return true;
+	});
+}
+#else
 void ImageHeap::WriteDescriptors() {
 	if (m_writes.empty()) return;
 	std::vector<vk::WriteDescriptorSet> writes(m_writes.size());
@@ -583,7 +671,17 @@ void ImageHeap::WriteDescriptors() {
 	                                                    writes.data(), 0, nullptr);
 	m_writes.clear();
 }
+#endif
 
+#if defined(KYTY_GPU_BACKEND_D3D12)
+void ImageHeap::Commit(CommandBuffer& buffer) {
+	KYTY_PROFILER_FUNCTION();
+	// (Rebind uploaded the slots.) Shaders read them through a raw UAV (DescriptorHeap's persistent
+	// buffer views).
+	for (auto* view: m_active) {
+		view->buffer->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	}
+#else
 void ImageHeap::Commit(CommandBuffer& buffer, vk::PipelineBindPoint bind_point,
                        vk::PipelineLayout layout) {
 	KYTY_PROFILER_FUNCTION();
@@ -597,6 +695,7 @@ void ImageHeap::Commit(CommandBuffer& buffer, vk::PipelineBindPoint bind_point,
 		                       slots.size_bytes());
 		view->dirty_begin = view->dirty_end = 0;
 	}
+#endif
 	m_active.clear();
 	Retire();
 	// Images that left the read layout since discovery, such as by its own uploads, return to it
@@ -629,12 +728,32 @@ void ImageHeap::Commit(CommandBuffer& buffer, vk::PipelineBindPoint bind_point,
 		    image->binding.force_general) {
 			return false;
 		}
+#if defined(KYTY_GPU_BACKEND_D3D12)
+		m_ready.push_back(away.second);
+#else
 		image->Transit(image->ReadLayout(), vk::AccessFlagBits2::eShaderRead, std::nullopt,
 		               buffer.Handle());
+#endif
 		return true;
 	});
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// D3D12 keeps a state per resource of an image, and its views can be on different ones (or read
+	// a copy): each element's view goes to the read state.
+	if (!m_ready.empty()) {
+		std::ranges::sort(m_ready);
+		for (uint32_t index = 1; index < m_elements.size(); ++index) {
+			const auto& element = m_elements[index];
+			if (element.refs == 0u || !element.image || !std::ranges::binary_search(m_ready, element.image)) continue;
+			auto& image = textures.m_slot_images[element.image];
+			if (image.serial == element.serial) image.Use(buffer, Image::HeapReadState, std::nullopt, element.view);
+		}
+		m_ready.clear();
+	}
+	WriteDescriptors(buffer);
+#else
 	buffer.Handle().bindDescriptorSets(bind_point, layout, IR::ImageHeapSet, 1, &m_set, 0,
 	                                   nullptr);
+#endif
 }
 
 void ImageHeap::UnmapMemory(uint64_t address, uint64_t size) {

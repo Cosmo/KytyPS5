@@ -358,6 +358,7 @@ if(KYTY_GPU_BACKEND STREQUAL "D3D12")
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineState.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineCacheFile.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/descriptors.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/imageHeap.cpp"
 		"${KYTY_THIRD_PARTY_DIR}/D3D12MemoryAllocator/src/D3D12MemAlloc.cpp"
 	)
 elseif(KYTY_GPU_BACKEND STREQUAL "Vulkan")
