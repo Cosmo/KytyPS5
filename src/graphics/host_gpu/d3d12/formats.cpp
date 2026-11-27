@@ -95,6 +95,9 @@ FormatInfo GetFormatInfo(vk::Format format) {
 		case F::eR32G32Uint: return Color(DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_UINT);
 		case F::eR32G32Sint: return Color(DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_SINT);
 		case F::eR32G32Sfloat: return Color(DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_FLOAT);
+		// The view of a 64-bit image atomic's image (descriptors.cpp StorageViewFormat): DXGI has no 64-bit format; the shader reads and
+		// writes two dwords per texel under a lock (HostShaderFeatures::image_atomic64_lock), on the image's own 32_32 resource.
+		case F::eR64Uint: return Color(DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_UINT);
 
 		// 96-bit textures are 128-bit resources (Expanded96 in image.cpp): a 96-bit texture removes the Xbox's device. Uploads add the
 		// fourth channel as 1, which is what the PS5 reads there; vertex input of these formats stays 96-bit (VertexFormat).
