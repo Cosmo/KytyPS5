@@ -130,7 +130,9 @@ public:
 		}
 	}
 
-	Presenter::Frame* Acquire() {
+	// A free frame, one of `width` x `height` in `family` if there is one (as upstream's since bec67b786: its image is kept, not made
+	// anew by Frame::Configure).
+	Presenter::Frame* Acquire(uint32_t width = 0, uint32_t height = 0, DXGI_FORMAT family = DXGI_FORMAT_UNKNOWN) {
 		m_mutex.Lock();
 		EXIT_IF(m_frames.empty());
 		// A synchronized flip may need more frames than the swap chain has buffers.
@@ -139,7 +141,14 @@ public:
 			m_free.push_back(frame.get());
 			m_frames.push_back(std::move(frame));
 		}
-		auto* frame = m_free.back();
+		const auto compatible = std::ranges::find_if(m_free, [&](const Presenter::Frame* candidate) {
+			return candidate->image != nullptr && candidate->width == width && candidate->height == height &&
+			       candidate->format.family == family;
+		});
+		auto* frame = compatible == m_free.end() ? m_free.back() : *compatible;
+		if (compatible != m_free.end()) {
+			*compatible = m_free.back();
+		}
 		m_free.pop_back();
 		EXIT_IF(frame->busy);
 		frame->busy = true;
@@ -826,21 +835,22 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	// No HDR output here (IsHdrSupported): an HDR10 or linear frame is converted to SDR when it is shown (FrameBlitter::Record).
 	// (No headset either: the OpenXR output is Vulkan only, and the headset port shows like the main one.)
 	EXIT_IF(buffer.IsInvalid());
-	auto*             frame = m_impl->frames.Acquire();
+	auto frame_format = info.pixel_format;
+	switch (frame_format) {
+		case vk::Format::eR8G8B8A8Srgb: frame_format = vk::Format::eR8G8B8A8Unorm; break;
+		case vk::Format::eB8G8R8A8Srgb: frame_format = vk::Format::eB8G8R8A8Unorm; break;
+		default: break;
+	}
+	const auto        frame_info = D3D12::GetFormatInfo(frame_format);
+	auto*             frame      = m_impl->frames.Acquire(info.extent.width, info.extent.height, frame_info.family);
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
 #ifdef KYTY_HAS_FSR
 	frame->generated_valid = false;
 	frame->guest_sequence = main_bus ? ++m_impl->guest_sequence : 0;
 	auto* fx = main_bus ? m_impl->renderer.GetFidelityFx() : nullptr;
 #endif
-	auto&             image        = m_impl->ResolveSurface(info);
-	auto              frame_format = info.pixel_format;
-	switch (frame_format) {
-		case vk::Format::eR8G8B8A8Srgb: frame_format = vk::Format::eR8G8B8A8Unorm; break;
-		case vk::Format::eB8G8R8A8Srgb: frame_format = vk::Format::eB8G8R8A8Unorm; break;
-		default: break;
-	}
-	if (image.backing.resources.empty() || !D3D12::GetFormatInfo(frame_format).Supported()) {
+	auto& image = m_impl->ResolveSurface(info);
+	if (image.backing.resources.empty() || !frame_info.Supported()) {
 		// An image the backend cannot hold (an unsupported format): the frame stays black.
 		frame->blank = true;
 		frame->color = {0.0f, 0.0f, 0.0f, 1.0f};
