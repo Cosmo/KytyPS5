@@ -200,8 +200,10 @@ void BdaPageTable::ProcessFaults() {
 		const auto* faults = std::bit_cast<const uint64_t*>(mapped);
 		const auto  count  = static_cast<uint32_t>(faults[0]);
 		for (uint32_t index = 1; index <= count && index < MaxPageFaults; ++index) {
-			fault_ranges.Add(faults[index], BufferCache::CACHING_PAGESIZE);
-			LOGF("Accessed non-GPU cached memory at 0x%016" PRIx64 "\n", faults[index]);
+			// As upstream's (2016f8e2f): a record is a packed page offset, the extended memory after the lower range.
+			const auto address = BufferCache::GuestAddress(faults[index]);
+			fault_ranges.Add(address, BufferCache::CACHING_PAGESIZE);
+			LOGF("Accessed non-GPU cached memory at 0x%016" PRIx64 "\n", address);
 		}
 		fault_ranges.ForEach([this](uint64_t start, uint64_t end) {
 			EXIT_IF(end - start > std::numeric_limits<uint32_t>::max());
