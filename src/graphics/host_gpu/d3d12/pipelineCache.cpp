@@ -691,36 +691,46 @@ void PipelineCache::InitializeDiskCache() {
 }
 
 void PipelineCache::Save() {
-	Common::LockGuard lock(m_mutex);
-	const auto        changes = m_changes.load();
-	if (!m_cache_file.Enabled() || changes == m_saved_changes) {
-		return;
-	}
-	const auto     translations = m_compiler.SaveCache();
-	const uint64_t size         = translations.size();
-	// The pipelines the file had, and those made since without it.
-	uint64_t pipelines = m_file_pipelines + m_compute_pipelines.size() +
-	                     m_graphics_pipelines.size() - m_cached_pipelines;
-	std::vector<uint8_t> payload(sizeof(pipelines) + sizeof(size));
-	std::memcpy(payload.data(), &pipelines, sizeof(pipelines));
-	std::memcpy(payload.data() + sizeof(pipelines), &size, sizeof(size));
-	payload.insert(payload.end(), translations.begin(), translations.end());
-	if (m_library != nullptr) {
-		const auto offset       = payload.size();
-		const auto library_size = m_library->GetSerializedSize();
-		payload.resize(offset + library_size);
-		if (FAILED(m_library->Serialize(payload.data() + offset, library_size))) {
-			m_cache_file.Log("failed to serialize the pipeline library");
-			payload.resize(offset);
+	// Draws and dispatches look their pipelines up under m_mutex: only the payload is made under it,
+	// and the file is written after, so frames don't wait for the disk (as upstream's 1b7ea3680,
+	// which writes on its store thread). Saves never overlap (ScheduleSave, the destructor).
+	std::vector<uint8_t> payload;
+	std::string          signature;
+	uint64_t             pipelines = 0;
+	uint64_t             changes   = 0;
+	{
+		Common::LockGuard lock(m_mutex);
+		changes = m_changes.load();
+		if (!m_cache_file.Enabled() || changes == m_saved_changes) {
+			return;
 		}
-	} else {
-		pipelines = AppendRecords(payload); // the pipelines' descriptions instead
+		const auto     translations = m_compiler.SaveCache();
+		const uint64_t size         = translations.size();
+		// The pipelines the file had, and those made since without it.
+		pipelines = m_file_pipelines + m_compute_pipelines.size() + m_graphics_pipelines.size() - m_cached_pipelines;
+		payload.resize(sizeof(pipelines) + sizeof(size));
 		std::memcpy(payload.data(), &pipelines, sizeof(pipelines));
+		std::memcpy(payload.data() + sizeof(pipelines), &size, sizeof(size));
+		payload.insert(payload.end(), translations.begin(), translations.end());
+		if (m_library != nullptr) {
+			const auto offset       = payload.size();
+			const auto library_size = m_library->GetSerializedSize();
+			payload.resize(offset + library_size);
+			if (FAILED(m_library->Serialize(payload.data() + offset, library_size))) {
+				m_cache_file.Log("failed to serialize the pipeline library");
+				payload.resize(offset);
+			}
+		} else {
+			pipelines = AppendRecords(payload); // the pipelines' descriptions instead
+			std::memcpy(payload.data(), &pipelines, sizeof(pipelines));
+		}
+		m_cache_file.Log("saving {} bytes of translated shaders and {} pipelines ({} were loaded)",
+		                 translations.size(), m_compute_pipelines.size() + m_graphics_pipelines.size(),
+		                 m_loaded_pipelines);
+		signature = std::string(CacheSignature());
 	}
-	m_cache_file.Log("saving {} bytes of translated shaders and {} pipelines ({} were loaded)",
-	                 translations.size(), m_compute_pipelines.size() + m_graphics_pipelines.size(),
-	                 m_loaded_pipelines);
-	if (m_cache_file.Save(CacheSignature(), payload)) {
+	if (m_cache_file.Save(signature, payload)) {
+		Common::LockGuard lock(m_mutex);
 		m_saved_changes   = changes;
 		m_saved_pipelines = pipelines;
 	}
