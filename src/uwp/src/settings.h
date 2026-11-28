@@ -179,8 +179,6 @@ struct AppSettings {
 	bool gpu_memory_log = false;
 	// The settings page, Developer: DRED and the GPU trace, so a GPU hang or crash names the draw (Config::GpuCrashDiagnostics). Off.
 	bool gpu_crash_diagnostics = false;
-	// The settings page, Developer: the games' compiled shaders are kept across builds of the app (Config::PipelineCacheAnyBuild). Off.
-	bool shader_cache_any_build = false;
 	// Debugging the pager, only in the file: the limit of the app's memory in MB for the pager instead of the OS's (a PC has none to speak of). 0: the OS's.
 	uint32_t app_memory_limit_mb = 0;
 	// Testing, only in the file: press Cross (A on an Xbox controller) every this many milliseconds, so that nobody has to click through the menus

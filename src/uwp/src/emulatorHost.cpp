@@ -300,7 +300,6 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.short_videos                = settings.short_videos;
 		config.gpu_memory_log              = settings.gpu_memory_log;
 		config.gpu_crash_diagnostics       = settings.gpu_crash_diagnostics;
-		config.pipeline_cache_any_build    = settings.shader_cache_any_build;
 		config.app_memory_usage            = [] { return static_cast<uint64_t>(winrt::Windows::System::MemoryManager::AppMemoryUsage()); };
 		config.app_memory_limit_bytes      = settings.app_memory_limit_mb != 0 ? static_cast<uint64_t>(settings.app_memory_limit_mb) << 20u
 		                                                                       : static_cast<uint64_t>(winrt::Windows::System::MemoryManager::AppMemoryUsageLimit());

@@ -437,10 +437,6 @@ bool GpuMemoryLog() {
 	return g_config != nullptr && g_config->gpu_memory_log;
 }
 
-bool PipelineCacheAnyBuild() {
-	return g_config != nullptr && g_config->pipeline_cache_any_build;
-}
-
 bool GpuCrashDiagnostics() {
 	return g_config != nullptr && g_config->gpu_crash_diagnostics;
 }

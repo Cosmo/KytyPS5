@@ -22,7 +22,6 @@
 #include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/recompiler/ir/TessEmulation.h"
 #include "graphics/shader/rectListShader.h"
-#include "kytyGitVersion.h"
 #include "xbox/lazyCounters.h"
 
 #include <algorithm>
@@ -612,21 +611,18 @@ PipelineCache::PipelineCache(GraphicContext& graphics, IR::ImageHeapSource* imag
 }
 
 std::string PipelineCache::CacheSignature() const {
-	// The mesh draw constants now hold a buffer descriptor and offset, so an older cached
-	// pipeline cannot be used even when the developer setting keeps caches across builds.
-	return fmt::format("KytyD3D12PC3:{}:{}\n", Config::PipelineCacheAnyBuild() ? "any-build" : KYTY_GIT_REVISION,
-	                   m_compiler.CacheSignature());
+	// Kept across builds of the app, as upstream's (d58aefde4): the translations are keyed by their SPIR-V and the translator's
+	// signature, and a pipeline's name holds its shaders' and root signature's hashes, so a build that translates or binds
+	// differently looks up other entries. The number goes up when the file's layout changes.
+	return fmt::format("KytyD3D12PC4:{}\n", m_compiler.CacheSignature());
 }
 
 // The cache file holds a u64 count of its pipelines, a u64 size and the saved translations
 // (DxilCompiler), then the serialized pipeline library.
 void PipelineCache::InitializeDiskCache() {
-	m_cache_file = PipelineCacheFile("D3D12 pipeline cache", ".d3d12.bin");
+	m_cache_file = PipelineCacheFile("D3D12 pipeline cache", ".d3d12.bin", PipelineCacheFile::Builds::Any);
 	if (!m_cache_file.Enabled()) {
 		return;
-	}
-	if (Config::PipelineCacheAnyBuild()) {
-		m_cache_file.Log("kept across builds (developer setting): translations of another build may draw wrongly or crash");
 	}
 	// This driver removes the device in CreatePipelineLibrary. Read its pipeline records directly
 	// from the cache payload so we don't keep another copy of the whole record section.
@@ -958,13 +954,22 @@ ID3D12RootSignature* PipelineCache::RootSignatureFromBlob(uint64_t hash, std::sp
 	if (!inserted) {
 		created->Release(); // another thread made it meanwhile
 	} else {
+		m_root_blob_of[created] = hash; // (pipeline names hold it: RootBlobHash)
 		if (m_library == nullptr && m_cache_file.Enabled()) {
-			m_root_blob_of[created] = hash;
 			m_blobs.try_emplace(hash, blob.begin(), blob.end());
 		}
 	}
 	found->second->AddRef(); // the caller's
 	return found->second;
+}
+
+uint64_t PipelineCache::RootNameHash(const RootLayout& layout, ID3D12RootSignature* root) {
+	auto            hash = static_cast<uint64_t>(RootLayoutHash {}(layout));
+	std::lock_guard lock(m_record_mutex);
+	if (const auto found = m_root_blob_of.find(root); found != m_root_blob_of.end()) {
+		hash ^= found->second + 0x9e3779b97f4a7c15ull + (hash << 6u) + (hash >> 2u);
+	}
+	return hash;
 }
 
 void PipelineCache::RecordPipeline(const std::wstring& name, const D3D12_PIPELINE_STATE_STREAM_DESC& desc) {
@@ -1619,7 +1624,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	stream.root.value = pipeline->root_signature;
 	stream.cs.value   = Bytecode(shader.dxil);
 	PipelineName name;
-	name.Add(RootLayoutHash {}(pipeline->layout));
+	name.Add(RootNameHash(pipeline->layout, pipeline->root_signature));
 	name.Add(stream.cs.value);
 	const auto loaded_before = m_loaded_pipelines;
 	pipeline->pipeline = LoadOrCreate(name.Get(L'C'), {sizeof(stream), &stream}, {&shader.dxil});
@@ -1655,7 +1660,7 @@ PipelineCache::Pipeline& PipelineCache::GetMeshComputePipeline(const ShaderVerte
 	stream.root.value = pipeline->root_signature;
 	stream.cs.value   = Bytecode(shader.dxil);
 	PipelineName name;
-	name.Add(RootLayoutHash {}(pipeline->layout));
+	name.Add(RootNameHash(pipeline->layout, pipeline->root_signature));
 	name.Add(stream.cs.value);
 	const auto loaded_before = m_loaded_pipelines;
 	pipeline->pipeline = LoadOrCreate(name.Get(L'C'), {sizeof(stream), &stream}, {&shader.dxil});
@@ -1691,7 +1696,7 @@ PipelineCache::Pipeline& PipelineCache::GetTessHullPipeline(const ShaderVertexIn
 	stream.root.value = pipeline->root_signature;
 	stream.cs.value   = Bytecode(shader.dxil);
 	PipelineName name;
-	name.Add(RootLayoutHash {}(pipeline->layout));
+	name.Add(RootNameHash(pipeline->layout, pipeline->root_signature));
 	name.Add(stream.cs.value);
 	const auto loaded_before = m_loaded_pipelines;
 	pipeline->pipeline = LoadOrCreate(name.Get(L'C'), {sizeof(stream), &stream}, {&shader.dxil});
@@ -1901,7 +1906,7 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 		}
 	}
 
-	const auto root_layout_hash = RootLayoutHash {}(pipeline->layout);
+	const auto root_layout_hash = RootNameHash(pipeline->layout, pipeline->root_signature);
 	if (native_mesh) {
 		MeshPipelineStream stream {};
 		stream.root.value = pipeline->root_signature;

@@ -196,10 +196,6 @@ struct ConfigOptions {
 	// Debugging: where the GPU memory is (images and buffers by kind and size) in the log every 10 seconds. It walks every image and buffer under the
 	// texture cache's lock, so it is off unless a setting turns it on.
 	bool gpu_memory_log = false;
-	// Development: the pipeline cache of a game (its translated shaders) is kept across builds, also dirty ones; only the shader compiler's own
-	// signature still ties it. A build that translates shaders differently then uses the old translations, which can draw wrongly or crash, so it
-	// is off unless a setting turns it on.
-	bool pipeline_cache_any_build = false;
 	// Debugging: DRED and the GPU trace (a marker before and after every draw and dispatch), so that a GPU hang or a device removal names the draw
 	// it happened in. They cost time on every draw, so they are off unless a setting turns them on (gpu_hang_exit_seconds also needs the trace).
 	bool gpu_crash_diagnostics = false;
@@ -324,7 +320,6 @@ void SetTextureFiltering(uint32_t lod_bias, bool anisotropic);
 bool GpuMemorySavings();
 uint32_t SwapPoolMb();
 bool GpuMemoryLog();
-bool PipelineCacheAnyBuild();
 bool GpuCrashDiagnostics();
 bool VideoDecodeThreads();
 bool VideoHardwareDecode();

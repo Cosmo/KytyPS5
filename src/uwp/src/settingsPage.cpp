@@ -1313,16 +1313,6 @@ xaml::UIElement CreateSettingsPage(std::function<void(bool folders_changed)> bac
 	    {L"Submits recorded work after this many draws so the GPU can start before a long command buffer ends.",
 	     L"Extra submissions cost CPU time. Use 0 for normal batching. Applies when a game starts."});
 	AddSwitch(
-	    testing, explanation, L"Keep compiled shaders across app builds", settings.shader_cache_any_build,
-	    [state, save](bool on) {
-		    state->settings.shader_cache_any_build = on;
-		    save();
-	    },
-	    {L"Games start without compiling their shaders again after an app update, unless the update brings a new shader translator.",
-	     L"If the update changed how shaders are translated, games can crash or show wrong images.",
-	     L"In that case, turn this off or remove the compiled shaders. The game compiles its shaders again on its next start.",
-	     L"Turning this on or off also makes each game compile its shaders once more."});
-	AddSwitch(
 	    testing, explanation, L"Remote Controllers", settings.dsu_enabled,
 	    [state, save, place_entries](bool on) {
 		    state->settings.dsu_enabled = on;

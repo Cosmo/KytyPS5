@@ -134,7 +134,6 @@ AppSettings LoadSettings() {
 	read("short_videos", settings.short_videos);
 	read("gpu_memory_log", settings.gpu_memory_log);
 	read("gpu_crash_diagnostics", settings.gpu_crash_diagnostics);
-	read("shader_cache_any_build", settings.shader_cache_any_build);
 	read("app_memory_limit_mb", settings.app_memory_limit_mb);
 	read("auto_press_ms", settings.auto_press_ms);
 	read("auto_press_hold_ms", settings.auto_press_hold_ms);
@@ -234,7 +233,6 @@ void SaveSettings(const AppSettings& settings) {
 	json["short_videos"]               = settings.short_videos;
 	json["gpu_memory_log"]             = settings.gpu_memory_log;
 	json["gpu_crash_diagnostics"]      = settings.gpu_crash_diagnostics;
-	json["shader_cache_any_build"]     = settings.shader_cache_any_build;
 	json["impulse_triggers"]           = settings.impulse_triggers;
 	json["haptic_rumble"]              = settings.haptic_rumble;
 	json["motion_stick_up_forward"]    = settings.motion_stick_up_forward;

@@ -270,6 +270,9 @@ private:
 	void                 RecordPipeline(const std::wstring& name, const D3D12_PIPELINE_STATE_STREAM_DESC& desc);
 	// The root signature made from `blob` (one per blob, shared by the renderer and the prewarm threads).
 	ID3D12RootSignature* RootSignatureFromBlob(uint64_t hash, std::span<const uint8_t> blob);
+	// What a pipeline's name holds of its root signature: the layout and the serialized blob, so that a build that lays out or
+	// serializes it differently looks up other pipelines in a cache kept across builds.
+	[[nodiscard]] uint64_t RootNameHash(const RootLayout& layout, ID3D12RootSignature* root);
 	// Builds a pipeline from its record; nullptr when the record doesn't fit this build.
 	ID3D12PipelineState* BuildFromRecord(const PipelineRecord& record);
 	uint64_t             AppendRecords(std::vector<uint8_t>& payload); // returns how many it wrote

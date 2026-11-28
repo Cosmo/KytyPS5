@@ -48,7 +48,7 @@ PipelineCacheFile::PipelineCacheFile(std::string label, std::string_view suffix,
 		Log("disabled (unknown git revision)");
 		return;
 	}
-	if (builds == Builds::Same && git_hash.ends_with("-dirty") && !Config::PipelineCacheAnyBuild()) {
+	if (builds == Builds::Same && git_hash.ends_with("-dirty")) {
 		Log("disabled (dirty build)");
 		return;
 	}
