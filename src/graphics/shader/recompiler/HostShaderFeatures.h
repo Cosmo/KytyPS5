@@ -76,6 +76,10 @@ struct HostShaderFeatures {
 	// The host's tessellator is not used (the Series X's emits no domain points): a tessellated draw's LS, HS and TES run as the
 	// capture draw, compute shader and vertex stage of IR::TessEmulation, and their keys hold the whole tessellation layout.
 	bool tess_compute_emulation = false;
+	// Compute shaders have no derivatives (D3D12 below shader model 6.6): a compute program's LOD query (image_get_lod) takes the
+	// coordinates' derivatives from its quad (lanes 4n to 4n + 3, as the guest GPU's compute quads are) and works out the level
+	// itself, instead of the host's derivative groups.
+	bool compute_lod_from_quads = false;
 };
 
 void                                    SetHostShaderFeatures(const HostShaderFeatures& features);

@@ -591,6 +591,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics, IR::ImageHeapSource* imag
 	features.realtime_clock_placeholder       = true; // (no shader clock in DXIL)
 	features.speculative_buffer_loads         = true; // (buffer views read 0 past their end: far fewer blocks for the driver to compile)
 	features.tess_compute_emulation           = true; // (the Series X's tessellator emits no domain points: compute passes on both devices, one path)
+	features.compute_lod_from_quads           = !m_compiler.SupportsComputeDerivatives(); // (derivatives in compute shaders: shader model 6.6)
 	// 64-bit image atomics under a lock; they would need shader model 6.6 and its typed 64-bit atomics. (The lock words are in the
 	// guest buffer table.)
 	features.image_atomic64_lock = features.guest_pointer_table;
@@ -1406,9 +1407,9 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 const PipelineCache::Shader& PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs, ShaderComputeInputInfo& input_info) {
 	const auto program = m_programs.GetComputeProgram(regs, input_info);
 	if (!program) input_info.stage.module = nullptr;
-	if (program && input_info.stage.module->info.info.compute_derivatives) {
+	if (program && input_info.stage.module->info.info.compute_derivatives && ShaderRecompiler::GetHostShaderFeatures().compute_lod_from_quads) {
 		static std::atomic_bool warned = false;
-		WarnOnce(warned, "a compute shader takes derivatives in quads (shader model 6.6 and up)");
+		WarnOnce(warned, "a compute shader queries texture levels: its quads' coordinates stand in for the derivatives (shader model 6.6 has them)");
 	}
 	const auto* shader = Translate(program, ShaderType::Compute);
 	// No program: the dispatch is skipped (ray tracing isn't implemented).

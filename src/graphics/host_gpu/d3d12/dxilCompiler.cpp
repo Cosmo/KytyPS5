@@ -310,6 +310,10 @@ bool DxilCompiler::SupportsDivergentLaneIndex() const noexcept {
 	return m_shader_model >= SHADER_MODEL_6_7;
 }
 
+bool DxilCompiler::SupportsComputeDerivatives() const noexcept {
+	return m_shader_model >= SHADER_MODEL_6_6;
+}
+
 bool DxilCompiler::SupportsHelperLanesInWaveOps() const noexcept {
 	return m_shader_model >= SHADER_MODEL_6_7;
 }

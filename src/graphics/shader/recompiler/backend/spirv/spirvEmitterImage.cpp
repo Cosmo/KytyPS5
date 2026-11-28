@@ -177,6 +177,54 @@ uint32_t RowCenter(EmitterState& state, ImageDimension dimension) {
 	return ImageDimensionInfoFor(dimension).one_dimensional ? ConstantF32Value(state, 0.5f) : 0u;
 }
 
+// The LOD query of a compute program where compute shaders have no derivatives (HostShaderFeatures::compute_lod_from_quads):
+// the coordinates' coarse derivatives across the lane's quad (lanes 4n to 4n + 3, the guest GPU's compute quads; x from position
+// 0 to 1, y from 0 to 2) in texels of level 0 give the level as a sampler picks it (half the log2 of the larger squared length).
+// The result is that level within the image's levels, then the level itself (from -64 up: no derivative reads as far below).
+// The sampler's LOD bias and clamps are left out.
+uint32_t QuadImageLod(ValueEmitContext& ctx, const IR::MemoryInfo& mem, const IR::Inst& address, uint32_t resource,
+                      uint32_t array_index) {
+	auto&       state     = ctx.state;
+	const auto& candidate = state.program.info.images[resource];
+	const auto& info      = ImageDimensionInfoFor(candidate.dimension);
+	const auto  type_f    = TypeF32(state);
+	const auto  type_u    = TypeU32(state);
+	const auto  image     = LoadImageDescriptor(state, resource, 0u, array_index);
+	const auto  size      = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpImageQuerySizeLod, ImageViewSizeType(state, candidate.dimension), size, image,
+	                          ConstantU32(state, 0));
+	const auto quad_base = Binary(state, spv::OpBitwiseAnd, type_u, EmitSubgroupLocalInvocationId(state), ConstantU32(state, ~3u));
+	const auto read      = [&](uint32_t value, uint8_t position) {
+		const ShuffleLanes lanes {.in_quad = true, .quad = {position, position, position, position}};
+		return EmitSubgroupShuffle(state, type_f, value, Binary(state, spv::OpBitwiseOr, type_u, quad_base, ConstantU32(state, position)),
+		                           lanes);
+	};
+	auto length_x = ZeroF32(state);
+	auto length_y = ZeroF32(state);
+	for (uint32_t i = 0; i < info.spatial_components; i++) {
+		const auto coord  = mem.image_address_components > i ? AddressF32(ctx, mem, address, i) : ZeroF32(state);
+		const auto origin = read(coord, 0);
+		const auto texels = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, type_u, texels, size, i);
+		const auto extent = Unary(state, spv::OpConvertUToF, type_f, texels);
+		const auto dx = Binary(state, spv::OpFMul, type_f, Binary(state, spv::OpFSub, type_f, read(coord, 1), origin), extent);
+		const auto dy = Binary(state, spv::OpFMul, type_f, Binary(state, spv::OpFSub, type_f, read(coord, 2), origin), extent);
+		length_x      = Binary(state, spv::OpFAdd, type_f, length_x, Binary(state, spv::OpFMul, type_f, dx, dx));
+		length_y      = Binary(state, spv::OpFAdd, type_f, length_y, Binary(state, spv::OpFMul, type_f, dy, dy));
+	}
+	const auto rho2   = EmitGlsl<GLSLstd450FMax, IR::Type::F32>(state, length_x, length_y);
+	const auto level  = EmitGlsl<GLSLstd450FMax, IR::Type::F32>(
+	    state, Binary(state, spv::OpFMul, type_f, EmitGlsl<GLSLstd450Log2, IR::Type::F32>(state, rho2), ConstantF32Value(state, 0.5f)),
+	    ConstantF32Value(state, -64.0f));
+	const auto levels = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpImageQueryLevels, type_u, levels, image);
+	const auto last   = Binary(state, spv::OpFSub, type_f, Unary(state, spv::OpConvertUToF, type_f, levels), ConstantF32Value(state, 1.0f));
+	const auto within = EmitGlsl<GLSLstd450FClamp, IR::Type::F32>(state, level, ZeroF32(state), last);
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 2), result, within, level);
+	return result;
+}
+
 uint32_t CoordU32(ValueEmitContext& ctx, const IR::MemoryInfo& mem, const IR::Inst& address,
                   ImageDimension dimension) {
 	const auto& info = ImageDimensionInfoFor(dimension);
@@ -1397,9 +1445,13 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 	}
 	if (op == IR::ValueOpcode::ImageQueryLod) {
 		state.builder.RequireCapability(spv::CapabilityImageQuery);
-		const auto sampler = LoadSamplerDescriptor(state, mem.sampler);
+		const bool from_quads = state.program.stage == ShaderType::Compute && GetHostShaderFeatures().compute_lod_from_quads;
+		const auto sampler    = from_quads ? 0u : LoadSamplerDescriptor(state, mem.sampler);
 		const auto lod = EmitImageAccess(ctx, inst, TypeF32Vector(state, 2),
 		    [&](uint32_t resource, uint32_t array_index) {
+			    if (from_quads) {
+				    return QuadImageLod(ctx, mem, *address, resource, array_index);
+			    }
 			    const auto& candidate = state.program.info.images[resource];
 			    const auto query = state.builder.AllocateId();
 			    state.builder.AddFunction(

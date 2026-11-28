@@ -965,7 +965,9 @@ void DefineModule(EmitterState& state) {
 	if (state.program.info.subgroup_arithmetic) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformArithmetic);
 	}
-	if (state.program.info.compute_derivatives && state.program.stage == ShaderType::Compute) {
+	// (Without them the LOD queries read their quads: HostShaderFeatures::compute_lod_from_quads.)
+	if (state.program.info.compute_derivatives && state.program.stage == ShaderType::Compute &&
+	    !GetHostShaderFeatures().compute_lod_from_quads) {
 		state.builder.RequireCapability(spv::CapabilityComputeDerivativeGroupQuadsKHR);
 		state.builder.RequireExtension("SPV_KHR_compute_shader_derivatives");
 	}
@@ -1025,7 +1027,8 @@ void DefineModule(EmitterState& state) {
 			state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeEarlyFragmentTests);
 		}
 	}
-	if (state.program.info.compute_derivatives && state.program.stage == ShaderType::Compute) {
+	if (state.program.info.compute_derivatives && state.program.stage == ShaderType::Compute &&
+	    !GetHostShaderFeatures().compute_lod_from_quads) {
 		state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeDerivativeGroupQuadsKHR);
 	}
 	state.builder.AddName(state.main_func, "main");

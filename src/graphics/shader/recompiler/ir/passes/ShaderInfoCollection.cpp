@@ -575,7 +575,14 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 				info.subgroup_local_invocation_id = true;
 			}
 			break;
-		case ValueOpcode::ImageQueryLod: info.compute_derivatives = true; break;
+		case ValueOpcode::ImageQueryLod:
+			info.compute_derivatives = true;
+			// (Without derivatives in compute shaders the query reads its quad's coordinates: HostShaderFeatures::compute_lod_from_quads.)
+			if (program.stage == ShaderType::Compute && GetHostShaderFeatures().compute_lod_from_quads) {
+				info.subgroup_shuffle             = true;
+				info.subgroup_local_invocation_id = true;
+			}
+			break;
 		case ValueOpcode::ImageGatherRaw:
 			info.image_gather_extended = true;
 			break;

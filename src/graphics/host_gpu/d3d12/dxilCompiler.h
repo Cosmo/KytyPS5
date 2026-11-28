@@ -107,6 +107,8 @@ public:
 	[[nodiscard]] bool SupportsHeapIndexing() const noexcept;
 	// WaveReadLaneAt with a lane number that differs from lane to lane (shader model 6.7 and later).
 	[[nodiscard]] bool SupportsDivergentLaneIndex() const noexcept;
+	// Derivatives (and implicit-LOD queries) in compute shaders (shader model 6.6 and later).
+	[[nodiscard]] bool SupportsComputeDerivatives() const noexcept;
 	// Wave operations that include a pixel shader's helper lanes (shader model 6.7 and later).
 	[[nodiscard]] bool SupportsHelperLanesInWaveOps() const noexcept;
 	// Comparison samples with a bias or gradients (SampleCmpBias, SampleCmpGrad: shader model 6.8 and later).
