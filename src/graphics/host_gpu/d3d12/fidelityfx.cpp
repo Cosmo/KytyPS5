@@ -185,7 +185,24 @@ struct Effect {
 		scheduler.Wait(tick);
 		tick = scheduler.CurrentTick();
 	}
+
+	// Destroys the context once the GPU is done with its dispatches.
+	void Release(RenderContext& renderer) {
+		renderer.GetCommandScheduler().Wait(*std::max_element(ticks.begin(), ticks.end()));
+		if (ready) {
+			ffxFsr3ContextDestroy(context.get());
+			ready = false;
+		}
+	}
 };
+
+// An upscaling context per PSSR context, as upstream's (e35360fa4; a library has at most four): each keeps its own history and
+// sizes, so a game that alternates PSSR contexts neither loses the history nor makes the context anew.
+struct Upscaler {
+	uint64_t pssr_context = 0;
+	Effect   effect;
+};
+constexpr size_t MaxUpscalers = 4;
 
 float Elapsed(Clock::time_point& previous) {
 	const auto now = Clock::now();
@@ -205,7 +222,7 @@ struct FidelityFx::Impl {
 	explicit Impl(RenderContext& owner): renderer(owner) {}
 
 	RenderContext& renderer;
-	Effect upscale;
+	std::vector<std::unique_ptr<Upscaler>> upscalers; // the oldest first
 	Effect interpolate;
 	std::array<Texture, 4> inputs;
 	Texture output;
@@ -213,7 +230,6 @@ struct FidelityFx::Impl {
 	uint32_t output_width = 0;
 	uint32_t output_height = 0;
 	uint32_t requests_since_flip = 0;
-	uint64_t previous_upscale_owner = 0;
 	uint64_t previous_interpolate_owner = 0;
 	bool pending = false;
 	bool has_color = false;
@@ -227,6 +243,33 @@ struct FidelityFx::Impl {
 
 	FfxResource ReadInput(size_t slot) const {
 		return Wrap(inputs[slot].image.Get(), FFX_RESOURCE_STATE_COMPUTE_READ);
+	}
+
+	// The upscaling context of a PSSR context, or nullptr.
+	Effect* FindUpscaler(uint64_t pssr_context) {
+		const auto found = std::ranges::find_if(upscalers, [&](const auto& upscaler) { return upscaler->pssr_context == pssr_context; });
+		return found != upscalers.end() ? &(*found)->effect : nullptr;
+	}
+
+	// The upscaling context of a PSSR context, a new one if it has none (the oldest goes when there are MaxUpscalers).
+	Effect& UpscalerOf(uint64_t pssr_context) {
+		if (auto* found = FindUpscaler(pssr_context)) {
+			return *found;
+		}
+		if (upscalers.size() == MaxUpscalers) {
+			upscalers.front()->effect.Release(renderer);
+			upscalers.erase(upscalers.begin());
+		}
+		auto& created        = upscalers.emplace_back(std::make_unique<Upscaler>());
+		created->pssr_context = pssr_context;
+		return created->effect;
+	}
+
+	// The PSSR context's upscaling starts over (its history no longer fits).
+	void ResetUpscaler(uint64_t pssr_context) {
+		if (auto* found = FindUpscaler(pssr_context)) {
+			found->reset = true;
+		}
 	}
 };
 
@@ -246,7 +289,7 @@ bool FidelityFx::BeginPssr(const Pssr::Request& request, uint32_t width, uint32_
 	    request.width > width || request.height > height || width > 3840 || height > 2160 ||
 	    !std::isfinite(request.jitter[0]) || !std::isfinite(request.jitter[1]) ||
 	    !std::isfinite(request.motion_scale[0]) || !std::isfinite(request.motion_scale[1])) {
-		fx.upscale.reset = true;
+		fx.ResetUpscaler(request.context);
 		return false;
 	}
 	return true;
@@ -260,7 +303,7 @@ bool FidelityFx::CopyInput(CommandBuffer& command, Input input, D3D12_CPU_DESCRI
 	const auto slot = static_cast<size_t>(input);
 	auto& texture = fx.inputs[slot];
 	if (!texture.Ensure(fx.renderer, formats[slot], width, height)) {
-		fx.upscale.reset = true;
+		fx.ResetUpscaler(fx.request.context);
 		return false;
 	}
 	auto& kernels = fx.renderer.GetComputeKernels();
@@ -281,7 +324,7 @@ bool FidelityFx::CopyInput(CommandBuffer& command, Input input, D3D12_CPU_DESCRI
 
 D3D12_CPU_DESCRIPTOR_HANDLE FidelityFx::Upscale(CommandBuffer& command) {
 	auto& fx = *m_impl;
-	auto& effect = fx.upscale;
+	auto& effect = fx.UpscalerOf(fx.request.context);
 	if (!fx.pending || !fx.has_color || !fx.output.Ensure(fx.renderer, DXGI_FORMAT_R16G16B16A16_FLOAT, fx.output_width, fx.output_height, true)) {
 		effect.reset = true;
 		return {};
@@ -313,7 +356,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE FidelityFx::Upscale(CommandBuffer& command) {
 	params.upscaleSize = {fx.output_width, fx.output_height};
 	params.frameTimeDelta = Elapsed(fx.upscale_time);
 	params.preExposure = std::isfinite(fx.request.pre_exposure) && fx.request.pre_exposure > 0 ? fx.request.pre_exposure : 1.0f;
-	params.reset = effect.reset || fx.previous_upscale_owner != fx.request.context || (fx.request.flags & Pssr::kReset);
+	params.reset = effect.reset || (fx.request.flags & Pssr::kReset);
 	params.cameraNear = CameraNear;
 	params.cameraFar = CameraFar;
 	params.cameraFovAngleVertical = CameraFov;
@@ -326,7 +369,6 @@ D3D12_CPU_DESCRIPTOR_HANDLE FidelityFx::Upscale(CommandBuffer& command) {
 		Transition(list, fx.inputs[i].image.Get(), ComputeRead, UnorderedAccess);
 	}
 	effect.reset = result != FFX_OK;
-	fx.previous_upscale_owner = fx.request.context;
 	if (effect.reset) {
 		Log::WriteToConsoleAndLog(fmt::format("FSR: an upscaling dispatch failed (FidelityFX error 0x{:08x})\n", static_cast<unsigned>(result)));
 		return {};
