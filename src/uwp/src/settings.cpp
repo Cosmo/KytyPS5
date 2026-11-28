@@ -137,6 +137,8 @@ AppSettings LoadSettings() {
 	read("shader_cache_any_build", settings.shader_cache_any_build);
 	read("app_memory_limit_mb", settings.app_memory_limit_mb);
 	read("auto_press_ms", settings.auto_press_ms);
+	read("auto_press_hold_ms", settings.auto_press_hold_ms);
+	read("auto_press_sequence", settings.auto_press_sequence);
 	read("impulse_triggers", settings.impulse_triggers);
 	read("haptic_rumble", settings.haptic_rumble);
 	read("motion_stick_up_forward", settings.motion_stick_up_forward);

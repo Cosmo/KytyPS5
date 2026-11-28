@@ -305,7 +305,7 @@ void EmulatorHost::Start(winrt::Windows::UI::Xaml::Controls::SwapChainPanel cons
 		config.app_memory_limit_bytes      = settings.app_memory_limit_mb != 0 ? static_cast<uint64_t>(settings.app_memory_limit_mb) << 20u
 		                                                                       : static_cast<uint64_t>(winrt::Windows::System::MemoryManager::AppMemoryUsageLimit());
 		StartMemoryWatch();
-		Pad::StartAutoPress(settings.auto_press_ms);
+		Pad::StartAutoPress(settings.auto_press_ms, settings.auto_press_hold_ms, settings.auto_press_sequence);
 		if (settings.frame_dump_after_s != 0) {
 			std::thread([seconds = settings.frame_dump_after_s] {
 				std::this_thread::sleep_for(std::chrono::seconds(seconds));

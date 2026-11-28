@@ -186,6 +186,10 @@ struct AppSettings {
 	// Testing, only in the file: press Cross (A on an Xbox controller) every this many milliseconds, so that nobody has to click through the menus
 	// (Pad::StartAutoPress). 0: off.
 	uint32_t auto_press_ms = 0;
+	// Testing, only in the file: with auto_press_ms, every second press is held this many milliseconds. 0: all are short.
+	uint32_t auto_press_hold_ms = 0;
+	// Testing, only in the file: with auto_press_ms, the buttons pressed in turn, e.g. "cross,circle,triangle,cross,cross:2500" (":<ms>" holds one).
+	std::string auto_press_sequence;
 };
 [[nodiscard]] AppSettings LoadSettings();
 void                      SaveSettings(const AppSettings& settings);

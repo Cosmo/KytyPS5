@@ -9,8 +9,12 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 // The app's pad state goes to the emulator's controller library as host input (the library's keyboard-style path): each player's to the pad of
 // the player's user (Libs::Controller::HostPlayerId), player 1's always connected once the emulator started, the others' while their
@@ -220,29 +224,68 @@ void SetPlayerMotion(int player, const std::array<float, 3>& accel, const std::a
 	motion.settled    = false; // the emulated motion starts again from a sample at rest when the real one stops
 }
 
-void StartAutoPress(uint32_t interval_ms) {
+struct AutoPressStep {
+	uint32_t button;
+	DWORD    hold_ms;
+};
+
+// "cross,circle,triangle,cross,cross:2500": the steps of an auto press sequence; an unknown button name leaves the step out.
+static std::vector<AutoPressStep> ParseAutoPressSequence(const std::string& text, DWORD tap_ms) {
+	static const std::pair<const char*, uint32_t> names[] = {{"cross", PAD_BUTTON_CROSS},       {"circle", PAD_BUTTON_CIRCLE},
+	                                                         {"triangle", PAD_BUTTON_TRIANGLE}, {"square", PAD_BUTTON_SQUARE},
+	                                                         {"options", PAD_BUTTON_OPTIONS}};
+	std::vector<AutoPressStep> steps;
+	size_t                     start = 0;
+	while (start <= text.size()) {
+		const auto end   = std::min(text.find(',', start), text.size());
+		const auto step  = text.substr(start, end - start);
+		const auto colon = step.find(':');
+		const auto name  = step.substr(0, colon);
+		for (const auto& [known, button]: names) {
+			if (name == known) {
+				const DWORD hold = colon == std::string::npos ? tap_ms : static_cast<DWORD>(std::strtoul(step.c_str() + colon + 1, nullptr, 10));
+				steps.push_back({button, hold != 0 ? hold : tap_ms});
+			}
+		}
+		start = end + 1;
+	}
+	return steps;
+}
+
+void StartAutoPress(uint32_t interval_ms, uint32_t hold_ms, const std::string& sequence) {
 	static std::atomic_bool started = false;
 	if (interval_ms == 0 || started.exchange(true)) {
 		return;
 	}
-	Log("auto press: Cross (A on an Xbox controller) is pressed every %u ms\n", interval_ms);
-	constexpr DWORD HOLD_MS = 120;
-	std::thread([interval_ms] {
+	constexpr DWORD TAP_MS = 120;
+	auto            steps  = ParseAutoPressSequence(sequence, TAP_MS);
+	if (!steps.empty()) {
+		Log("auto press: the sequence \"%s\" is pressed, a button every %u ms, and starts over\n", sequence.c_str(), interval_ms);
+	} else if (hold_ms != 0) {
+		// With a hold, every second press is held: some prompts want the button held down.
+		steps = {{PAD_BUTTON_CROSS, TAP_MS}, {PAD_BUTTON_CROSS, hold_ms}};
+		Log("auto press: Cross (A on an Xbox controller) is pressed, %u ms later held for %u ms, and so on\n", interval_ms, hold_ms);
+	} else {
+		steps = {{PAD_BUTTON_CROSS, TAP_MS}};
+		Log("auto press: Cross (A on an Xbox controller) is pressed every %u ms\n", interval_ms);
+	}
+	std::thread([interval_ms, steps = std::move(steps)] {
 		uint32_t presses = 0;
 		for (;;) {
 			Sleep(interval_ms);
 			if (C::GetActiveControllerId() == -1) {
 				continue; // the game's controller library does not exist yet
 			}
-			const auto id = C::HOST_INPUT_CONTROLLER_ID;
+			const auto  id   = C::HOST_INPUT_CONTROLLER_ID;
+			const auto& step = steps[presses % steps.size()];
 			{
 				std::lock_guard lock(g_mutex);
-				C::SetButton(id, PAD_BUTTON_CROSS, true);
+				C::SetButton(id, step.button, true);
 			}
-			Sleep(HOLD_MS);
+			Sleep(step.hold_ms);
 			{
 				std::lock_guard lock(g_mutex);
-				C::SetButton(id, PAD_BUTTON_CROSS, false);
+				C::SetButton(id, step.button, false);
 			}
 			if (++presses == 1 || presses % 30 == 0) {
 				Log("auto press: %u presses so far\n", presses);

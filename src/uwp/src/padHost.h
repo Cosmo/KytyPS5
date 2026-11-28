@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 
 // The controller state the app's input code (input.cpp) hands to whoever consumes it: up to four local players, each with a PS5 pad state
 // already mapped from the Xbox controller, and what the game asks of the controller in return (rumble, adaptive trigger resistance).
@@ -73,8 +74,10 @@ struct HostPadFeedback {
 };
 
 // Testing without a person at the controller: presses the confirm button (Cross on the PS5 pad, A on an Xbox controller) for a moment every
-// interval_ms, once the game's controller library exists, so that a game gets through its menus by itself. Does nothing for 0 or when it runs already.
-void StartAutoPress(uint32_t interval_ms);
+// interval_ms, once the game's controller library exists, so that a game gets through its menus by itself. With hold_ms, every second press is held
+// that long (prompts that want the button held). With a sequence ("cross,circle,triangle,cross,cross:2500"), its buttons are pressed in turn,
+// interval_ms apart, each for 120 ms or the milliseconds after its colon, and then it starts over. Does nothing for 0 or when it runs already.
+void StartAutoPress(uint32_t interval_ms, uint32_t hold_ms, const std::string& sequence = {});
 
 void                          SetPlayerConnected(int player, bool connected);
 void                          SetPlayerState(int player, const HostPadState& state);
