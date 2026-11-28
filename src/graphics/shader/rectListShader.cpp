@@ -1,6 +1,7 @@
 #include "graphics/shader/rectListShader.h"
 
 #include "common/assert.h"
+#include "graphics/shader/recompiler/HostShaderFeatures.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/shader.h"
@@ -129,6 +130,82 @@ public:
 					value = Interpolate(input0, input1, input2, corners.weights);
 				}
 				Store(outputs[i], value);
+			}
+			builder.AddFunction(spv::OpEmitVertex);
+		}
+		builder.AddFunction(spv::OpEndPrimitive);
+
+		builder.AddFunction(spv::OpReturn);
+		builder.AddFunction(spv::OpFunctionEnd);
+		return builder.Build();
+	}
+
+	// Emits the triangle with its last vertex first (2, 0, 1: the same winding), so that the host, which takes flat values from a
+	// primitive's first vertex, takes them from the last as the guest asked. A strip's odd triangles reach the geometry shader with
+	// their last vertex second, so those start at 1 (as Mesa's d3d12 driver does, d3d12_emit_triangles); the parity is the primitive
+	// ID's, which a strip cut does not reset (Mesa's limit too).
+	std::vector<uint32_t> EmitLastVertexFirst(bool strip) {
+		geometry_vertices = 3;
+		read_primitive_id = strip;
+		DefineEntry(spv::ExecutionModelGeometry);
+		const auto first =
+		    strip ? Result(spv::OpISub, int_type, Int(2), Result(spv::OpBitwiseAnd, int_type, Load(int_type, primitive_id), Int(1)))
+		          : Int(2);
+		for (uint32_t k = 0; k < 3; k++) {
+			const auto vertex = Result(spv::OpSMod, int_type, Result(spv::OpIAdd, int_type, first, Int(k)), Int(3));
+			Store(Access(ptr_output_vec4_float, gl_out, Int(0)),
+			      Load(vec4_float_type, Access(ptr_input_vec4_float, gl_in, vertex, Int(0))));
+			for (uint32_t i = 0; i < parameters.size(); i++) {
+				Store(outputs[i], Load(vec4_float_type, Access(ptr_input_vec4_float, inputs[i], vertex)));
+			}
+			builder.AddFunction(spv::OpEmitVertex);
+		}
+		builder.AddFunction(spv::OpEndPrimitive);
+
+		builder.AddFunction(spv::OpReturn);
+		builder.AddFunction(spv::OpFunctionEnd);
+		return builder.Build();
+	}
+
+	// Draws each point as a square of its point size in pixels (at least 1), its corners a triangle strip; they all take the point's
+	// parameters. The size is the vertex stage's parameter at PointSizeParameterLocation, the viewport's size the host's runtime data
+	// (spirv_to_dxil's dxil_spirv_vertex_runtime_data: viewport_width at byte 20, viewport_height at 24) in descriptor set
+	// runtime_data_set, binding 0.
+	std::vector<uint32_t> EmitPointSquares(uint32_t runtime_data_set) {
+		input_vertices    = 1;
+		geometry_vertices = 4;
+		read_point_size   = true;
+		ptr_input_float   = Pointer(spv::StorageClassInput, float_type);
+		const auto runtime_type =
+		    builder.DecoratedType(spv::OpTypeStruct,
+		                          {{spv::OpMemberDecorate, {0u, spv::DecorationOffset, 20u}},
+		                           {spv::OpMemberDecorate, {1u, spv::DecorationOffset, 24u}},
+		                           {spv::OpDecorate, {spv::DecorationBlock}}},
+		                          float_type, float_type);
+		const auto runtime_data = AddInterface(spv::StorageClassUniform, runtime_type);
+		Decorate(runtime_data, spv::DecorationDescriptorSet, runtime_data_set);
+		Decorate(runtime_data, spv::DecorationBinding, 0u);
+		DefineEntry(spv::ExecutionModelGeometry);
+
+		const auto ptr_uniform_float = Pointer(spv::StorageClassUniform, float_type);
+		const auto float_one         = Constant(float_type, std::bit_cast<uint32_t>(1.0f));
+		const auto float_zero        = Constant(float_type, 0u);
+		const auto position = Load(vec4_float_type, Access(ptr_input_vec4_float, gl_in, Int(0), Int(0)));
+		const auto read     = Load(float_type, Access(ptr_input_float, point_size, Int(0)));
+		const auto size     = Result(spv::OpSelect, float_type, Result(spv::OpFOrdLessThan, bool_type, read, float_one), float_one, read);
+		// Half the square in clip space: size / 2 pixels are size / viewport of the -1 to 1 range, times w.
+		const auto w      = Result(spv::OpCompositeExtract, float_type, position, 3u);
+		const auto width  = Load(float_type, Access(ptr_uniform_float, runtime_data, Int(0)));
+		const auto height = Load(float_type, Access(ptr_uniform_float, runtime_data, Int(1)));
+		const auto half_x = Result(spv::OpFMul, float_type, Result(spv::OpFDiv, float_type, size, width), w);
+		const auto half_y = Result(spv::OpFMul, float_type, Result(spv::OpFDiv, float_type, size, height), w);
+		const auto left   = Result(spv::OpFNegate, float_type, half_x);
+		const auto top    = Result(spv::OpFNegate, float_type, half_y);
+		for (const auto& [x, y]: {std::pair {left, top}, std::pair {half_x, top}, std::pair {left, half_y}, std::pair {half_x, half_y}}) {
+			const auto offset = Result(spv::OpCompositeConstruct, vec4_float_type, x, y, float_zero, float_zero);
+			Store(Access(ptr_output_vec4_float, gl_out, Int(0)), Result(spv::OpFAdd, vec4_float_type, position, offset));
+			for (uint32_t i = 0; i < parameters.size(); i++) {
+				Store(outputs[i], Load(vec4_float_type, Access(ptr_input_vec4_float, inputs[i], Int(0))));
 			}
 			builder.AddFunction(spv::OpEmitVertex);
 		}
@@ -270,10 +347,10 @@ private:
 		if (model == spv::ExecutionModelTessellationControl) {
 			builder.AddExecutionMode(main, spv::ExecutionModeOutputVertices, 4u);
 		} else if (model == spv::ExecutionModelGeometry) {
-			builder.AddExecutionMode(main, spv::ExecutionModeTriangles);
+			builder.AddExecutionMode(main, input_vertices == 1 ? spv::ExecutionModeInputPoints : spv::ExecutionModeTriangles);
 			builder.AddExecutionMode(main, spv::ExecutionModeInvocations, 1u);
 			builder.AddExecutionMode(main, spv::ExecutionModeOutputTriangleStrip);
-			builder.AddExecutionMode(main, spv::ExecutionModeOutputVertices, 4u);
+			builder.AddExecutionMode(main, spv::ExecutionModeOutputVertices, geometry_vertices);
 		} else {
 			builder.AddExecutionMode(main, spv::ExecutionModeQuads);
 			builder.AddExecutionMode(main, spv::ExecutionModeSpacingEqual);
@@ -295,8 +372,15 @@ private:
 			tess_coord = AddInterface(spv::StorageClassInput, vec3_float_type);
 			Decorate(tess_coord, spv::DecorationBuiltIn, spv::BuiltInTessCoord);
 		}
-		gl_in =
-		    AddInterface(spv::StorageClassInput, Array(per_vertex_type, tess_control ? 3u : 4u));
+		if (read_primitive_id) {
+			primitive_id = AddInterface(spv::StorageClassInput, int_type);
+			Decorate(primitive_id, spv::DecorationBuiltIn, spv::BuiltInPrimitiveId);
+		}
+		if (read_point_size) {
+			point_size = AddInterface(spv::StorageClassInput, Array(float_type, input_vertices));
+			Decorate(point_size, spv::DecorationLocation, ShaderRecompiler::PointSizeParameterLocation);
+		}
+		gl_in = AddInterface(spv::StorageClassInput, Array(per_vertex_type, tess_control ? input_vertices : 4u));
 
 		inputs.resize(parameters.size());
 		std::array<uint32_t, ShaderVertexInputInfo::RES_MAX> locations {};
@@ -308,7 +392,7 @@ private:
 				continue;
 			}
 			inputs[i] = AddInterface(spv::StorageClassInput,
-			                         Array(vec4_float_type, tess_control ? 3u : 4u));
+			                         Array(vec4_float_type, tess_control ? input_vertices : 4u));
 			Decorate(inputs[i], spv::DecorationLocation, location);
 			locations[location] = inputs[i];
 		}
@@ -351,6 +435,12 @@ private:
 	std::vector<uint32_t>                 inputs;
 	std::vector<uint32_t>                 outputs;
 	uint32_t                              main                  = 0;
+	uint32_t                              input_vertices        = 3; // a control or geometry shader's input vertices
+	uint32_t                              geometry_vertices     = 4; // a geometry shader's output vertices
+	bool                                  read_primitive_id     = false;
+	bool                                  read_point_size       = false;
+	uint32_t                              primitive_id          = 0;
+	uint32_t                              point_size            = 0;
 	uint32_t                              void_type             = 0;
 	uint32_t                              bool_type             = 0;
 	uint32_t                              uint_type             = 0;
@@ -394,17 +484,22 @@ std::vector<RectListParameter> RectListParameters(
 	return parameters;
 }
 
-RectListShaders BuildRectListShaders(std::span<const RectListParameter> parameters,
-                                     uint32_t                           param_export_mask) {
+// The parameters the vertex stage exports, one per output location.
+static std::vector<RectListParameter> ExportedParameters(std::span<const RectListParameter> parameters, uint32_t param_export_mask) {
 	std::vector<RectListParameter> exported;
 	std::array<bool, 32>           output_locations {};
 	for (const auto& parameter: parameters) {
-		if ((param_export_mask & (1u << parameter.input_location)) != 0 &&
-		    !output_locations[parameter.output_location]) {
+		if ((param_export_mask & (1u << parameter.input_location)) != 0 && !output_locations[parameter.output_location]) {
 			exported.push_back(parameter);
 			output_locations[parameter.output_location] = true;
 		}
 	}
+	return exported;
+}
+
+RectListShaders BuildRectListShaders(std::span<const RectListParameter> parameters,
+                                     uint32_t                           param_export_mask) {
+	const auto      exported = ExportedParameters(parameters, param_export_mask);
 	RectListEmitter control(exported, spv::ExecutionModelTessellationControl);
 	RectListEmitter evaluation(exported, spv::ExecutionModelTessellationEvaluation);
 	return {control.EmitControl(), evaluation.EmitEvaluation()};
@@ -412,17 +507,23 @@ RectListShaders BuildRectListShaders(std::span<const RectListParameter> paramete
 
 std::vector<uint32_t> BuildRectListGeometryShader(std::span<const RectListParameter> parameters,
                                                   uint32_t                           param_export_mask) {
-	std::vector<RectListParameter> exported;
-	std::array<bool, 32>           output_locations {};
-	for (const auto& parameter: parameters) {
-		if ((param_export_mask & (1u << parameter.input_location)) != 0 &&
-		    !output_locations[parameter.output_location]) {
-			exported.push_back(parameter);
-			output_locations[parameter.output_location] = true;
-		}
-	}
+	const auto      exported = ExportedParameters(parameters, param_export_mask);
 	RectListEmitter geometry(exported, spv::ExecutionModelGeometry);
 	return geometry.EmitGeometry();
+}
+
+std::vector<uint32_t> BuildLastVertexFirstGeometryShader(std::span<const RectListParameter> parameters, uint32_t param_export_mask,
+                                                         bool strip) {
+	const auto      exported = ExportedParameters(parameters, param_export_mask);
+	RectListEmitter geometry(exported, spv::ExecutionModelGeometry);
+	return geometry.EmitLastVertexFirst(strip);
+}
+
+std::vector<uint32_t> BuildPointSquareGeometryShader(std::span<const RectListParameter> parameters, uint32_t param_export_mask,
+                                                     uint32_t runtime_data_set) {
+	const auto      exported = ExportedParameters(parameters, param_export_mask);
+	RectListEmitter geometry(exported, spv::ExecutionModelGeometry);
+	return geometry.EmitPointSquares(runtime_data_set);
 }
 
 } // namespace Libs::Graphics

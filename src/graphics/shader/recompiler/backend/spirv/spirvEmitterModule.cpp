@@ -832,6 +832,18 @@ void DefineOutputs(EmitterState& state) {
 			}
 		}
 	}
+	// HostShaderFeatures::point_size_parameter: the point size goes to a parameter as well, which the geometry shader drawing the
+	// points as squares reads (spirv_to_dxil drops the point size itself).
+	const bool parameter_at_location = std::ranges::any_of(state.program.info.outputs, [](const auto& output) {
+		return output.kind == IR::StageOutputKind::Parameter && output.index == PointSizeParameterLocation;
+	});
+	if (GetHostShaderFeatures().point_size_parameter && state.program.stage == ShaderType::Vertex && state.point_size_variable != 0 &&
+	    !parameter_at_location) {
+		state.point_size_parameter_variable =
+		    DefineInterfaceVariable(state, TypeF32(state), spv::StorageClassOutput, "pointSizeParameter");
+		state.builder.AddAnnotation(spv::OpDecorate, state.point_size_parameter_variable, spv::DecorationLocation,
+		                            PointSizeParameterLocation);
+	}
 }
 
 } // namespace

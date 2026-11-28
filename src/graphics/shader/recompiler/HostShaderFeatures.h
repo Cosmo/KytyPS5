@@ -1,6 +1,8 @@
 #ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_HOSTSHADERFEATURES_H_
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_HOSTSHADERFEATURES_H_
 
+#include <cstdint>
+
 namespace Libs::Graphics::ShaderRecompiler {
 
 // What the host GPU's shaders can do, where it changes the SPIR-V the recompiler emits. The
@@ -80,7 +82,14 @@ struct HostShaderFeatures {
 	// coordinates' derivatives from its quad (lanes 4n to 4n + 3, as the guest GPU's compute quads are) and works out the level
 	// itself, instead of the host's derivative groups.
 	bool compute_lod_from_quads = false;
+	// The host draws points 1 pixel wide (D3D12 has no point sizes): a vertex stage that writes a point size also exports it as the
+	// parameter at PointSizeParameterLocation (when it exports no parameter there itself), for the geometry shader that draws each
+	// point as a square of that size.
+	bool point_size_parameter = false;
 };
+
+// Where a vertex stage exports its point size with point_size_parameter.
+constexpr uint32_t PointSizeParameterLocation = 31;
 
 void                                    SetHostShaderFeatures(const HostShaderFeatures& features);
 [[nodiscard]] const HostShaderFeatures& GetHostShaderFeatures();

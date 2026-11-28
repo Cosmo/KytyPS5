@@ -190,6 +190,7 @@ struct EmitterState {
 	uint32_t                   helper_invocation_variable            = 0;
 	uint32_t                   per_vertex_variable                   = 0;
 	uint32_t                   point_size_variable                   = 0;
+	uint32_t                   point_size_parameter_variable         = 0; // HostShaderFeatures::point_size_parameter
 	uint32_t                   clip_distance_variable                = 0;
 	uint32_t                   invalid_position_clip_distance        = UINT32_MAX;
 	uint32_t                   user_clip_planes                      = 0;

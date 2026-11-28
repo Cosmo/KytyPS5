@@ -460,6 +460,9 @@ void EmitAuxPositionExport(ValueEmitContext& ctx, uint32_t data, const IR::Expor
 		state.builder.AddFunction(spv::OpBitcast, TypeF32(state), f32, raw);
 		if (output.point_size) {
 			state.builder.AddFunction(spv::OpStore, state.point_size_variable, f32);
+			if (state.point_size_parameter_variable != 0) {
+				state.builder.AddFunction(spv::OpStore, state.point_size_parameter_variable, f32);
+			}
 			continue;
 		}
 		auto StoreDistance = [&](IR::StageOutputKind kind, uint32_t index) {

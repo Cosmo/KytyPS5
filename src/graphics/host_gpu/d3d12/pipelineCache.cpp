@@ -592,6 +592,7 @@ PipelineCache::PipelineCache(GraphicContext& graphics, IR::ImageHeapSource* imag
 	features.speculative_buffer_loads         = true; // (buffer views read 0 past their end: far fewer blocks for the driver to compile)
 	features.tess_compute_emulation           = true; // (the Series X's tessellator emits no domain points: compute passes on both devices, one path)
 	features.compute_lod_from_quads           = !m_compiler.SupportsComputeDerivatives(); // (derivatives in compute shaders: shader model 6.6)
+	features.point_size_parameter             = true; // (D3D12 has no point sizes: GeometryStage::PointSquares)
 	// 64-bit image atomics under a lock; they would need shader model 6.6 and its typed 64-bit atomics. (The lock words are in the
 	// guest buffer table.)
 	features.image_atomic64_lock = features.guest_pointer_table;
@@ -1747,16 +1748,15 @@ static bool UsesBallot(std::span<const uint32_t> spirv) {
 }
 
 const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms& programs,
-                                                         bool rect_list, bool sample_rate_shading,
+                                                         GeometryStage geometry_stage, bool sample_rate_shading,
                                                          bool                         clip_halfz,
                                                          const ShaderVertexInputInfo& vertex_info,
-                                                         const ShaderPixelInputInfo* ps_input_info) {
+                                                         const ShaderPixelInputInfo*  ps_input_info) {
 	const auto& vertex = programs.vertex[0];
 	const auto& pixel  = programs.pixel;
 	const bool  ps     = ps_input_info != nullptr;
 	auto [found, inserted] =
-	    m_linked.try_emplace(
-	        LinkKey {vertex.id, ps ? pixel.id : 0, rect_list, sample_rate_shading, clip_halfz});
+	    m_linked.try_emplace(LinkKey {vertex.id, ps ? pixel.id : 0, geometry_stage, sample_rate_shading, clip_halfz});
 	if (!inserted) {
 		return found->second;
 	}
@@ -1773,11 +1773,22 @@ const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms&
 	    {emulated ? *vertex.mesh_fetch : *vertex.spirv, mesh && !emulated ? Kind::Mesh : Kind::Vertex,
 	     true, false, clip_halfz}};
 	std::vector<uint32_t>           geometry;
-	if (rect_list) {
+	if (geometry_stage != GeometryStage::None) {
 		const auto parameters = ps_input_info != nullptr
 		                            ? RectListParameters(*ps_input_info, ps_input_info->stage.module->info)
 		                            : std::vector<RectListParameter> {};
-		geometry = BuildRectListGeometryShader(parameters, vertex_info.stage.module->info.param_export_mask);
+		const auto export_mask = vertex_info.stage.module->info.param_export_mask;
+		switch (geometry_stage) {
+			case GeometryStage::None: break;
+			case GeometryStage::RectList: geometry = BuildRectListGeometryShader(parameters, export_mask); break;
+			case GeometryStage::LastVertexFirst:
+			case GeometryStage::LastVertexFirstStrip:
+				geometry = BuildLastVertexFirstGeometryShader(parameters, export_mask, geometry_stage == GeometryStage::LastVertexFirstStrip);
+				break;
+			case GeometryStage::PointSquares:
+				geometry = BuildPointSquareGeometryShader(parameters, export_mask, D3D12::RuntimeDataSpace);
+				break;
+		}
 		stages.push_back({geometry, Kind::Geometry});
 	}
 	if (ps) {
@@ -1787,7 +1798,7 @@ const PipelineCache::LinkedPrograms& PipelineCache::Link(const GraphicsPrograms&
 	auto  dxil    = m_compiler.CompileLinked(stages, vertex.id ^ (pixel.id * 31), &linked.from_cache);
 	m_new_shaders += linked.from_cache ? 0 : dxil.size();
 	linked.vertex = std::move(dxil[0]);
-	if (rect_list) {
+	if (geometry_stage != GeometryStage::None) {
 		linked.geometry = std::move(dxil[1]);
 	}
 	if (ps) {
@@ -1817,15 +1828,54 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 	const bool  native_mesh = mesh && !emulated;
 	// Mesh programs expand rect lists themselves. (A tessellated draw's topology is a patch list too.)
 	const bool  rect_list = !mesh && role == TessRole::None && params.topology == vk::PrimitiveTopology::ePatchList;
+	auto        geometry_stage = rect_list ? GeometryStage::RectList : GeometryStage::None;
+	// The geometry shaders below forward the position and the parameters only: a vertex stage with other outputs or user clip planes, or
+	// a pixel stage that reads the primitive ID, keeps the host's behaviour (as do mesh and tessellated draws).
+	const auto& vertex_outputs = vs_input_info.stage.module->info.info.outputs;
+	const bool  plain_stages =
+	    !mesh && role == TessRole::None && vs_input_info.user_clip_planes == 0 &&
+	    std::ranges::all_of(vertex_outputs,
+	                        [](const auto& output) {
+		                        return output.kind == IR::StageOutputKind::Position || output.kind == IR::StageOutputKind::Parameter ||
+		                               output.kind == IR::StageOutputKind::PointSize;
+	                        }) &&
+	    (ps_input_info == nullptr || std::ranges::none_of(ps_input_info->stage.module->info.info.inputs, [](const auto& input) {
+		     return input.kind == IR::StageInputKind::PrimitiveId;
+	     }));
+	// The guest's point sizes: D3D12 draws points 1 pixel wide, so a geometry shader draws each point as a square of its size, which
+	// the vertex stage also exports as a parameter (HostShaderFeatures::point_size_parameter; not where it exports one there itself).
 	if (params.topology == vk::PrimitiveTopology::ePointList &&
-	    std::ranges::any_of(vs_input_info.stage.module->info.info.outputs,
-	                        [](const auto& output) { return output.kind == IR::StageOutputKind::PointSize; })) {
-		static std::atomic_bool warned = false;
-		WarnOnce(warned, "point sizes are unsupported (D3D12 has none); points are drawn 1 pixel wide");
+	    std::ranges::any_of(vertex_outputs, [](const auto& output) { return output.kind == IR::StageOutputKind::PointSize; })) {
+		const bool size_exported = std::ranges::none_of(vertex_outputs, [](const auto& output) {
+			return output.kind == IR::StageOutputKind::Parameter && output.index == ShaderRecompiler::PointSizeParameterLocation;
+		});
+		if (plain_stages && size_exported) {
+			geometry_stage = GeometryStage::PointSquares;
+			static std::atomic_bool noted = false;
+			WarnOnce(noted, "point sizes: a geometry shader draws each point as a square of its size");
+		} else {
+			static std::atomic_bool warned = false;
+			WarnOnce(warned, "point sizes are unsupported for this draw's stages; points are drawn 1 pixel wide");
+		}
 	}
-	const auto& linked = Link(programs, rect_list, params.sample_shading_enable,
-	                          params.negative_one_to_one, vs_input_info, ps_input_info);
-
+	// The guest's last provoking vertex: D3D12 takes flat values from a primitive's first vertex, so a geometry shader passes each
+	// triangle on with its last vertex first. Lines, fans and rect lists keep the first vertex.
+	if (params.provoking_vtx_last && ps_input_info != nullptr && params.topology != vk::PrimitiveTopology::ePointList &&
+	    std::ranges::any_of(RectListParameters(*ps_input_info, ps_input_info->stage.module->info), &RectListParameter::flat)) {
+		const bool list  = params.topology == vk::PrimitiveTopology::eTriangleList;
+		const bool strip = params.topology == vk::PrimitiveTopology::eTriangleStrip;
+		if (plain_stages && (list || strip)) {
+			geometry_stage = strip ? GeometryStage::LastVertexFirstStrip : GeometryStage::LastVertexFirst;
+			static std::atomic_bool noted = false;
+			WarnOnce(noted, "the last provoking vertex: a geometry shader puts each triangle's last vertex first");
+		} else {
+			static std::atomic_bool warned = false;
+			WarnOnce(warned, "the last provoking vertex is unsupported for this draw's stages or topology; using the first");
+		}
+	}
+	const auto& linked = Link(programs, geometry_stage, params.sample_shading_enable, params.negative_one_to_one, vs_input_info,
+	                          ps_input_info);
+	const bool  has_geometry = geometry_stage != GeometryStage::None;
 	auto pipeline             = std::make_unique<Pipeline>();
 	pipeline->layout.graphics = true;
 	const char* vertex_name = mesh ? "ms" : role == TessRole::Capture ? "ls" : role == TessRole::Domain ? "ds" : "vs";
@@ -1840,7 +1890,7 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 		Log::WriteToConsoleAndLog(fmt::format("GPU watchdog: watching {}{}\n", std::string(pipeline->trace.name.begin(), pipeline->trace.name.end()),
 		                                      linked.overridden ? " (shader override)" : " (its pixel shader uses a ballot)"));
 	}
-	if (rect_list) {
+	if (has_geometry) {
 		pipeline->trace.dxil.push_back(&linked.geometry);
 	}
 	if (ps_input_info != nullptr) {
@@ -1880,7 +1930,7 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 	// The vertex stage reads the user clip planes from the push constants (PushData::UserClipPlaneDword).
 	pipeline->layout.push_constants = pipeline->layout.push_constants || vs_input_info.user_clip_planes != 0;
 	pipeline->root_signature = GetRootSignature(pipeline->layout);
-	if (pipeline->root_signature == nullptr || !linked.vertex.IsValid() || (ps_input_info != nullptr && !linked.pixel.IsValid()) || (rect_list && !linked.geometry.IsValid())) {
+	if (pipeline->root_signature == nullptr || !linked.vertex.IsValid() || (ps_input_info != nullptr && !linked.pixel.IsValid()) || (has_geometry && !linked.geometry.IsValid())) {
 		return pipeline; // reported where it failed; the draws that need it are skipped
 	}
 
@@ -1937,6 +1987,11 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 	stream.gs.value   = Bytecode(linked.geometry);
 	stream.ps.value   = Bytecode(linked.pixel);
 	SetOutputState(stream, key);
+	if (geometry_stage == GeometryStage::PointSquares) {
+		// The guest does not cull points (nor fill them as lines): their squares face whichever way the strip winds.
+		stream.rasterizer.value.CullMode = D3D12_CULL_MODE_NONE;
+		stream.rasterizer.value.FillMode = D3D12_FILL_MODE_SOLID;
+	}
 	stream.input_layout.value = {elements.data(), static_cast<UINT>(elements.size())};
 	stream.strip_cut.value    = static_cast<D3D12_INDEX_BUFFER_STRIP_CUT_VALUE>(key.strip_cut);
 	// An emulated mesh program's draw takes the primitives it outputs (RecordEmulatedMeshDraw), not the guest's input topology.
@@ -2008,10 +2063,6 @@ void PipelineCache::SetOutputState(Stream& stream, const GraphicsKey& key) const
 	rasterizer.SlopeScaledDepthBias  = key.slope_scaled;
 	rasterizer.DepthClipEnable       = params.depth_clip_enable ? TRUE : FALSE;
 	rasterizer.MultisampleEnable     = params.samples > 1 ? TRUE : FALSE;
-	if (params.provoking_vtx_last) {
-		static std::atomic_bool warned = false;
-		WarnOnce(warned, "the last provoking vertex is unsupported; using the first");
-	}
 
 	stream.depth_stencil.value = key.depth_stencil;
 	stream.depth_format.value  = DepthViewFormat(rendering);

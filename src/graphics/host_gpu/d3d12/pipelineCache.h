@@ -224,11 +224,14 @@ private:
 		bool              overridden = false; // a stage was replaced by a file of the shader_override folder
 		bool              watched    = false; // the GPU watchdog counts its finished draws
 	};
-	// Vertex and pixel program ids, rect list, sample-rate shading, OpenGL clip-space depth.
-	using LinkKey = std::tuple<uint64_t, uint64_t, bool, bool, bool>;
+	// The geometry shader a pipeline adds (rectListShader.h): none, rect lists' quads, triangles' or strips' last vertex first
+	// (the guest's last provoking vertex), or points as squares (the guest's point sizes).
+	enum class GeometryStage : uint8_t { None, RectList, LastVertexFirst, LastVertexFirstStrip, PointSquares };
+	// Vertex and pixel program ids, geometry stage, sample-rate shading, OpenGL clip-space depth.
+	using LinkKey = std::tuple<uint64_t, uint64_t, GeometryStage, bool, bool>;
 
 	const Shader*         Translate(const CompiledProgram& program, ShaderType stage);
-	const LinkedPrograms& Link(const GraphicsPrograms& programs, bool rect_list,
+	const LinkedPrograms& Link(const GraphicsPrograms& programs, GeometryStage geometry_stage,
 	                           bool sample_rate_shading, bool clip_halfz,
 	                           const ShaderVertexInputInfo& vertex_info,
 	                           const ShaderPixelInputInfo*  ps_input_info);
