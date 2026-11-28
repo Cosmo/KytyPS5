@@ -684,6 +684,10 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 		// The D3D12 renderer draws fans as triangle lists it makes from their vertices on the CPU.
 		if (ucfg.GetPrimType() == Prospero::PrimitiveType::kTriFan ||
 		    ucfg.GetPrimType() == Prospero::PrimitiveType::kPolygon) {
+			static std::once_flag logged;
+			std::call_once(logged, [] {
+				Log::WriteToConsoleAndLog("GPU: indirect triangle fans or polygons: their records are read on the CPU\n");
+			});
 			return std::nullopt;
 		}
 #endif

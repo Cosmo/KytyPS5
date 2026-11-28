@@ -486,6 +486,12 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 				report_once("a merged geometry stage needs more group shared memory than the host compute shaders have; its draws are skipped");
 				return {};
 			}
+			if (indirect_draw) {
+				static std::atomic_bool logged = false;
+				if (!logged.exchange(true, std::memory_order_relaxed)) {
+					Log::WriteToConsoleAndLog("Shaders: indirect mesh draws run as compute shaders: their records are read on the CPU\n");
+				}
+			}
 		} else {
 			const auto logical_threads =
 			    mesh.threads_num[0] * mesh.threads_num[1] * mesh.threads_num[2];

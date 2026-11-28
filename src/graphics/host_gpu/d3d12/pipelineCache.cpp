@@ -1406,6 +1406,10 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 const PipelineCache::Shader& PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs, ShaderComputeInputInfo& input_info) {
 	const auto program = m_programs.GetComputeProgram(regs, input_info);
 	if (!program) input_info.stage.module = nullptr;
+	if (program && input_info.stage.module->info.info.compute_derivatives) {
+		static std::atomic_bool warned = false;
+		WarnOnce(warned, "a compute shader takes derivatives in quads (shader model 6.6 and up)");
+	}
 	const auto* shader = Translate(program, ShaderType::Compute);
 	// No program: the dispatch is skipped (ray tracing isn't implemented).
 	static const Shader skipped;
@@ -1812,6 +1816,12 @@ PipelineCache::CreateGraphicsPipeline(const GraphicsKey& key, const ShaderVertex
 	const bool  native_mesh = mesh && !emulated;
 	// Mesh programs expand rect lists themselves. (A tessellated draw's topology is a patch list too.)
 	const bool  rect_list = !mesh && role == TessRole::None && params.topology == vk::PrimitiveTopology::ePatchList;
+	if (params.topology == vk::PrimitiveTopology::ePointList &&
+	    std::ranges::any_of(vs_input_info.stage.module->info.info.outputs,
+	                        [](const auto& output) { return output.kind == IR::StageOutputKind::PointSize; })) {
+		static std::atomic_bool warned = false;
+		WarnOnce(warned, "point sizes are unsupported (D3D12 has none); points are drawn 1 pixel wide");
+	}
 	const auto& linked = Link(programs, rect_list, params.sample_shading_enable,
 	                          params.negative_one_to_one, vs_input_info, ps_input_info);
 
