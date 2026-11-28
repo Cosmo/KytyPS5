@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/d3d12/gpuTrace.h"
 #include "graphics/host_gpu/frameDump.h"
 #include "graphics/host_gpu/d3d12/renderContext.h"
+#include "graphics/shader/recompiler/ir/MeshEmulation.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
@@ -543,6 +544,50 @@ ID3D12CommandSignature* RenderExecutor::MeshDrawSignature(const PipelineCache::P
 		             "create mesh draw command signature");
 	}
 	return signature.Get();
+}
+
+ID3D12CommandSignature* RenderExecutor::MeshEmulationDispatchSignature(const PipelineCache::Pipeline& compute) {
+	auto& signature = m_mesh_emulation_signatures[compute.root_signature];
+	if (signature == nullptr) {
+		// A command is the draw parameters and the chunk, then the groups twice: [x y z][x y z]. A pipeline with spirv_to_dxil's
+		// runtime data takes the first three as its group counts.
+		constexpr uint32_t           Parameters = ShaderRecompiler::IR::MeshEmulation::DrawDwordCount;
+		D3D12_INDIRECT_ARGUMENT_DESC arguments[3] {};
+		UINT                         count = 0;
+		arguments[count].Type                             = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+		arguments[count].Constant.RootParameterIndex      = 0; // the push constants, which the draw parameters start
+		arguments[count].Constant.DestOffsetIn32BitValues = 0;
+		arguments[count].Constant.Num32BitValuesToSet     = Parameters;
+		count++;
+		if (compute.layout.runtime_data) {
+			arguments[count].Type                             = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+			arguments[count].Constant.RootParameterIndex      = compute.layout.RuntimeDataParameter();
+			arguments[count].Constant.DestOffsetIn32BitValues = 0;
+			arguments[count].Constant.Num32BitValuesToSet     = 3;
+			count++;
+		}
+		arguments[count++].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+		D3D12_COMMAND_SIGNATURE_DESC desc {};
+		desc.ByteStride       = (Parameters + 6u) * sizeof(uint32_t);
+		desc.NumArgumentDescs = count;
+		desc.pArgumentDescs   = arguments;
+		D3D12::Check(m_context.GetGraphics().device->CreateCommandSignature(&desc, compute.root_signature, IID_PPV_ARGS(&signature)),
+		             "create mesh emulation dispatch command signature");
+	}
+	return signature.Get();
+}
+
+Buffer& RenderExecutor::GrowBuffer(std::unique_ptr<Buffer>& buffer, uint64_t size, const char* name) {
+	if (buffer == nullptr || buffer->Size() < size) {
+		if (buffer != nullptr) {
+			// (The list may still read the old one.)
+			m_context.GetCommandScheduler().DeferOperation([old = std::move(buffer)]() mutable { old.reset(); });
+		}
+		buffer = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(), MemoryUsage::DeviceLocal, 0,
+		                                  std::max<uint64_t>(size, 4096));
+		buffer->SetName("{}", name);
+	}
+	return *buffer;
 }
 
 void RenderExecutor::RecordDispatchIndirect(CommandBuffer&                 buffer,

@@ -658,13 +658,16 @@ static void LogDrawConsumed(const char* name, uint32_t count) {
 
 // Vulkan offsets for a prepared draw, or nullopt when its indirect records need the CPU:
 // quad-list draws for counts, tessellation draws for the index/SGPR prolog and mesh draws without
-// room for the task payload. Indirect records carry their own offsets.
+// room for the task payload. Indirect records carry their own offsets. `index_limit` and
+// `index_element_size`: an indexed draw's INDEX_BUFFER_SIZE and index size, 0 otherwise.
 static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        ucfg,
                                                    const ShaderVertexInputInfo& vs,
                                                    DrawOffsetSource             source,
                                                    int32_t                      first_vertex,
                                                    uint32_t                     first_instance,
-                                                   const DrawIndirectArgs&      indirect) {
+                                                   const DrawIndirectArgs&      indirect,
+                                                   [[maybe_unused]] uint32_t index_limit,
+                                                   [[maybe_unused]] uint32_t index_element_size) {
 	if ((indirect.address != 0 || source == DrawOffsetSource::IndirectArgs) &&
 	    ucfg.GetIndexOffset() != 0) {
 		static std::once_flag warning_once;
@@ -687,6 +690,17 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 			static std::once_flag logged;
 			std::call_once(logged, [] {
 				Log::WriteToConsoleAndLog("GPU: indirect triangle fans or polygons: their records are read on the CPU\n");
+			});
+			return std::nullopt;
+		}
+		// A mesh program run as a compute shader takes indexed records on the GPU, in chunks
+		// (RenderExecutor::EmulatedMeshIndirectChunks).
+		if (vs.logical_stage == ShaderType::Mesh && vs.mesh.compute_emulation &&
+		    RenderExecutor::EmulatedMeshIndirectChunks(vs, indirect.count, index_limit) == 0) {
+			static std::once_flag logged;
+			std::call_once(logged, [] {
+				Log::WriteToConsoleAndLog("GPU: indirect mesh draws run as compute shaders that are not indexed, or need more "
+				                          "chunks than the GPU's: their records are read on the CPU\n");
 			});
 			return std::nullopt;
 		}
@@ -787,7 +801,8 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 
 	LogDrawStateIfNeeded(buffer, draw, state, m_targets, args.index_type_and_size, args.index_addr);
 	const auto emit = ResolveDrawEmit(ucfg, state.vertex_info[0], args.offset_source,
-	                                  args.base_vertex, args.first_instance, args.indirect);
+	                                  args.base_vertex, args.first_instance, args.indirect, args.index_count,
+	                                  index_source.guest_element_size);
 	if (emit) {
 		ExecutePreparedDraw(buffer, draw, state, *emit, index_source);
 	}
@@ -871,7 +886,7 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	LogDrawStateIfNeeded(buffer, draw, state, m_targets, 0, nullptr);
 	const auto emit = ResolveDrawEmit(ucfg, state.vertex_info[0], args.offset_source,
 	                                  static_cast<int32_t>(args.first_vertex), args.first_instance,
-	                                  args.indirect);
+	                                  args.indirect, 0, 0);
 	if (emit) {
 		ExecutePreparedDraw(buffer, draw, state, *emit, {});
 	}

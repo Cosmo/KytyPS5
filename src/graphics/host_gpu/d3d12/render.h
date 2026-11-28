@@ -159,6 +159,11 @@ public:
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	                                            const ShaderRecompiler::IR::DescriptorValue& value);
 
+	// The chunks per record an indirect draw of a mesh program run as a compute shader takes on the GPU
+	// (RecordEmulatedMeshDrawIndirect): enough for the groups of INDEX_BUFFER_SIZE indices; 0 when the CPU reads its records (they
+	// are not indexed, so their counts have no limit, or the chunks would be more than MaxMeshIndirectChunks).
+	[[nodiscard]] static uint32_t EmulatedMeshIndirectChunks(const ShaderVertexInputInfo& vs, uint32_t records, uint32_t index_limit);
+
 private:
 	// False, with nothing drawn, when the draw's indirect records need CPU counts.
 	bool DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args);
@@ -231,6 +236,11 @@ private:
 	// The command signature of indirect mesh draws with `pipeline`: each sets the mesh program's draw parameters (the first push
 	// constants) and launches its groups (the mesh_records kernel's commands).
 	[[nodiscard]] ID3D12CommandSignature* MeshDrawSignature(const PipelineCache::Pipeline& pipeline);
+	// The command signature of the chunks of indirect mesh draws run as compute shaders with `compute` (the mesh_emulation_records
+	// kernel's dispatch commands): each sets the draw parameters and the chunk (the first push constants) and launches its groups.
+	[[nodiscard]] ID3D12CommandSignature* MeshEmulationDispatchSignature(const PipelineCache::Pipeline& compute);
+	// `buffer` at least `size` bytes: a smaller one is replaced (released once the GPU is done with it).
+	Buffer& GrowBuffer(std::unique_ptr<Buffer>& buffer, uint64_t size, const char* name);
 	// Before work records into the command list: a new list when the descriptor tables of these pipelines might not fit into the
 	// current one (it holds 2048 samplers at most).
 	void MakeRoomForDescriptors(std::initializer_list<const PipelineCache::Pipeline*> pipelines);
@@ -247,6 +257,19 @@ private:
 	                            const PipelineCache::Pipeline& graphics,
 	                            std::span<const uint32_t> draw_data, uint32_t groups,
 	                            uint32_t instances);
+	// Makes the scratch buffers of mesh programs run as compute shaders (and the primitive IDs' with `primitive_ids`).
+	void PrepareMeshScratchBuffers(bool primitive_ids);
+	// The same for the guest's indirect records (`records` at `records_offset`, indexed), in `chunks` per record
+	// (EmulatedMeshIndirectChunks): first the mesh_emulation_records kernel works out each chunk's commands on the GPU (before the
+	// compute shader's bindings are committed, as the kernel sets its own), then the chunks are drawn. `index_data` is the guest index
+	// buffer's bindless address (draw parameters 3 and 4).
+	void RecordEmulatedMeshChunks(CommandBuffer& buffer, const ShaderVertexInputInfo& vs_input_info, const Buffer& records,
+	                              uint64_t records_offset, const DrawIndirectArgs& indirect, uint32_t chunks, uint32_t index_size,
+	                              uint32_t index_limit, uint64_t index_data);
+	void RecordEmulatedMeshDrawIndirect(CommandBuffer& buffer, const ShaderVertexInputInfo& vs_input_info,
+	                                    const PipelineCache::Pipeline& compute, const PipelineCache::Pipeline& graphics,
+	                                    uint32_t chunk_count);
+
 
 	// A tessellated draw (ShaderRecompiler::IR::TessEmulation) as the CPU works it out before its passes are recorded.
 	struct TessDraw {
@@ -329,6 +352,9 @@ private:
 	// The commands of the indirect mesh draw being recorded (see MeshDrawSignature), and those signatures by root signature.
 	std::unique_ptr<Buffer> m_mesh_draw_commands;
 	std::unordered_map<ID3D12RootSignature*, D3D12::ComPtr<ID3D12CommandSignature>> m_mesh_signatures;
+	// By the compute pipeline's root signature (see MeshEmulationDispatchSignature).
+	std::unordered_map<ID3D12RootSignature*, D3D12::ComPtr<ID3D12CommandSignature>> m_mesh_emulation_signatures;
+
 
 	friend class CommandProcessor;
 };

@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "gpu_tiler_shaders/gpu_tiler_draw_records_spv.h"
+#include "gpu_tiler_shaders/gpu_tiler_mesh_emulation_records_spv.h"
 #include "gpu_tiler_shaders/gpu_tiler_mesh_records_spv.h"
 #include "gpu_blit_shaders/gpu_tess_scan_spv.h"
 #include "gpu_blit_shaders/gpu_tess_tessellate_spv.h"
@@ -381,6 +382,37 @@ std::string DescribeDraw(const GraphicContext& graphics, const CommandBuffer& bu
 	return text;
 }
 
+// What one draw of a mesh program run as a compute shader may use of the device's memory; a bigger draw takes more chunks.
+constexpr uint64_t MeshRecordBytes = uint64_t {32} << 20u;
+constexpr uint64_t MeshIndexBytes  = uint64_t {8} << 20u;
+constexpr uint32_t MaxDispatch     = D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
+// The chunks one indirect draw of it may take on the GPU (RenderExecutor::EmulatedMeshIndirectChunks); a bigger one goes to the CPU.
+constexpr uint32_t MaxMeshIndirectChunks = 1024;
+
+// The scratch a mesh program run as a compute shader takes per group, and the groups (times instances) one chunk holds; nullopt
+// when a group does not fit.
+struct MeshScratch {
+	uint32_t primitive_slots = 0;
+	uint32_t primitive_size  = 0; // points, lines or triangles: 1, 2 or 3 indices, as the program outputs them
+	uint64_t group_records   = 0;
+	uint64_t group_indices   = 0;
+	uint64_t budget          = 0;
+};
+std::optional<MeshScratch> MeshScratchFor(const ShaderVertexInputInfo& vs_input_info) {
+	const auto& mesh   = vs_input_info.mesh;
+	const auto  layout = IR::MeshEmulation::LayoutFor(vs_input_info.stage.module->info.info.outputs);
+	MeshScratch scratch;
+	scratch.primitive_slots = mesh.EmulatedPrimitiveSlots();
+	scratch.primitive_size  = mesh.output_primitive_size;
+	scratch.group_records   = uint64_t {mesh.EmulatedVertexSlots()} * layout.StrideDwords() * sizeof(uint32_t);
+	scratch.group_indices   = uint64_t {scratch.primitive_slots} * scratch.primitive_size * sizeof(uint32_t);
+	if (scratch.group_records == 0 || scratch.group_indices == 0 || scratch.group_records > MeshRecordBytes ||
+	    scratch.group_indices > MeshIndexBytes) {
+		return std::nullopt;
+	}
+	scratch.budget = std::min(MeshRecordBytes / scratch.group_records, MeshIndexBytes / scratch.group_indices);
+	return scratch;
+}
 } // namespace
 
 bool WritesMemory(const ShaderStageRuntime& runtime) {
@@ -498,40 +530,20 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
                                             const PipelineCache::Pipeline& graphics,
                                             std::span<const uint32_t> draw_data, uint32_t groups,
                                             uint32_t instances) {
-	// What one draw may use of the device's memory; a bigger draw takes more chunks.
-	constexpr uint64_t RecordBytes = uint64_t {32} << 20u;
-	constexpr uint64_t IndexBytes  = uint64_t {8} << 20u;
-	constexpr uint32_t MaxDispatch = D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
-
-	const auto& mesh            = vs_input_info.mesh;
-	const auto  layout          = IR::MeshEmulation::LayoutFor(vs_input_info.stage.module->info.info.outputs);
-	const auto  primitive_slots = mesh.EmulatedPrimitiveSlots();
-	// Points, lines or triangles (1, 2 or 3 indices each), as the program outputs them.
-	const auto  primitive_size  = mesh.output_primitive_size;
-	const uint64_t group_records =
-	    uint64_t {mesh.EmulatedVertexSlots()} * layout.StrideDwords() * sizeof(uint32_t);
-	const uint64_t group_indices = uint64_t {primitive_slots} * primitive_size * sizeof(uint32_t);
-	if (group_records == 0 || group_indices == 0 || group_records > RecordBytes ||
-	    group_indices > IndexBytes) {
+	const auto scratch = MeshScratchFor(vs_input_info);
+	if (!scratch) {
 		static std::atomic_bool warned = false;
 		WarnOnce(warned, "a mesh group is too big for the compute emulation; its draws are skipped");
 		CountSkippedDraw("mesh group size");
 		return;
 	}
 	EXIT_IF(draw_data.size() != IR::PushData::MeshDrawDwordCount);
-	if (m_mesh_records == nullptr) {
-		m_mesh_records = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(),
-		                                          MemoryUsage::DeviceLocal, 0, RecordBytes);
-		m_mesh_indices = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(),
-		                                          MemoryUsage::DeviceLocal, 0, IndexBytes);
-	}
+	const auto primitive_slots = scratch->primitive_slots;
+	const auto primitive_size  = scratch->primitive_size;
 	// The primitive IDs: one dword per primitive slot, no more slots than indices. A program without them has the records bound
 	// there (its shaders do not read that register).
-	const bool primitive_ids = mesh.output_primitive_id;
-	if (primitive_ids && m_mesh_primitive_ids == nullptr) {
-		m_mesh_primitive_ids = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(),
-		                                                MemoryUsage::DeviceLocal, 0, IndexBytes);
-	}
+	const bool primitive_ids = vs_input_info.mesh.output_primitive_id;
+	PrepareMeshScratchBuffers(primitive_ids);
 	auto*      list    = buffer.Handle();
 	auto&      trace   = D3D12::GetGpuTrace();
 	const auto records = m_mesh_records->GpuAddress();
@@ -539,7 +551,7 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 	const auto ids     = primitive_ids ? m_mesh_primitive_ids->GpuAddress() : records;
 
 	// The chunk: `chunk_groups` groups of each of `chunk_instances` instances, as many as fit.
-	const uint64_t budget = std::min(RecordBytes / group_records, IndexBytes / group_indices);
+	const uint64_t budget = scratch->budget;
 	const uint32_t chunk_instances_max =
 	    static_cast<uint32_t>(std::min<uint64_t>({instances, budget, MaxDispatch}));
 	const uint32_t chunk_groups_max = static_cast<uint32_t>(
@@ -605,6 +617,132 @@ void RenderExecutor::RecordEmulatedMeshDraw(CommandBuffer&                 buffe
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, instances);
+}
+void RenderExecutor::PrepareMeshScratchBuffers(bool primitive_ids) {
+	if (m_mesh_records == nullptr) {
+		m_mesh_records = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(),
+		                                          MemoryUsage::DeviceLocal, 0, MeshRecordBytes);
+		m_mesh_indices = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(),
+		                                          MemoryUsage::DeviceLocal, 0, MeshIndexBytes);
+	}
+	if (primitive_ids && m_mesh_primitive_ids == nullptr) {
+		m_mesh_primitive_ids = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(),
+		                                                MemoryUsage::DeviceLocal, 0, MeshIndexBytes);
+	}
+}
+
+uint32_t RenderExecutor::EmulatedMeshIndirectChunks(const ShaderVertexInputInfo& vs, uint32_t records, uint32_t index_limit) {
+	const auto& mesh    = vs.mesh;
+	const auto  scratch = MeshScratchFor(vs);
+	if (index_limit == 0 || !scratch || mesh.primitives_per_group == 0) {
+		return 0;
+	}
+	const uint64_t primitives = mesh.InputPrimitiveCount(index_limit);
+	const uint64_t groups     = primitives == 0 ? 0 : (primitives - 1u) / mesh.primitives_per_group + 1u;
+	const uint64_t per_chunk  = std::min<uint64_t>(scratch->budget, MaxDispatch);
+	const uint64_t chunks     = std::max<uint64_t>(1, (groups + per_chunk - 1u) / per_chunk);
+	return uint64_t {records} * chunks > MaxMeshIndirectChunks ? 0u : static_cast<uint32_t>(chunks);
+}
+
+// The commands of the mesh_emulation_records kernel (gpu_tiler_mesh_emulation_records.comp): per chunk a dispatch command, then
+// per chunk a draw command.
+constexpr uint32_t MeshDispatchWords = IR::MeshEmulation::DrawDwordCount + 6u;
+constexpr uint32_t MeshChunkDrawWords = 7u;
+static_assert(MeshDispatchWords == 14u);
+
+void RenderExecutor::RecordEmulatedMeshChunks(CommandBuffer& buffer, const ShaderVertexInputInfo& vs_input_info, const Buffer& records,
+                                              uint64_t records_offset, const DrawIndirectArgs& indirect, uint32_t chunks,
+                                              uint32_t index_size, uint32_t index_limit, uint64_t index_data) {
+	const auto&    mesh    = vs_input_info.mesh;
+	const auto     scratch = MeshScratchFor(vs_input_info);
+	const uint32_t count   = indirect.count * chunks;
+	EXIT_IF(!scratch || chunks == 0);
+	auto& commands = GrowBuffer(m_mesh_draw_commands, uint64_t {count} * (MeshDispatchWords + MeshChunkDrawWords) * sizeof(uint32_t),
+	                            "indirect mesh draw records");
+	auto&          kernels = m_context.GetComputeKernels();
+	const auto     base    = records_offset & ~uint64_t {15}; // (root descriptor alignment)
+	const uint32_t constants[] {static_cast<uint32_t>((records_offset - base) / 4),
+	                            indirect.count,
+	                            indirect.stride / 4,
+	                            index_size,
+	                            index_limit,
+	                            mesh.InputPrimitiveSize(),
+	                            mesh.primitives_per_group * mesh.InputPrimitiveStep(),
+	                            static_cast<uint32_t>(std::min<uint64_t>(scratch->budget, UINT32_MAX)),
+	                            chunks,
+	                            scratch->primitive_slots * scratch->primitive_size,
+	                            static_cast<uint32_t>(index_data),
+	                            static_cast<uint32_t>(index_data >> 32u)};
+	ComputeKernels::Bindings bindings;
+	bindings.input        = &records;
+	bindings.input_offset = base;
+	bindings.output       = &commands;
+	bindings.constants    = constants;
+	kernels.Dispatch(buffer, kernels.Get(GPU_TILER_MESH_EMULATION_RECORDS_SPV), bindings, (count + 63u) / 64u, 1, 1);
+	commands.Use(buffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+}
+
+void RenderExecutor::RecordEmulatedMeshDrawIndirect(CommandBuffer& buffer, const ShaderVertexInputInfo& vs_input_info,
+                                                    const PipelineCache::Pipeline& compute, const PipelineCache::Pipeline& graphics,
+                                                    uint32_t chunk_count) {
+	const auto scratch = MeshScratchFor(vs_input_info);
+	EXIT_IF(!scratch || m_mesh_draw_commands == nullptr);
+	const auto primitive_size = scratch->primitive_size;
+	const bool primitive_ids  = vs_input_info.mesh.output_primitive_id;
+	PrepareMeshScratchBuffers(primitive_ids);
+	auto*      list     = buffer.Handle();
+	auto&      trace    = D3D12::GetGpuTrace();
+	const auto records  = m_mesh_records->GpuAddress();
+	const auto indices  = m_mesh_indices->GpuAddress();
+	const auto ids      = primitive_ids ? m_mesh_primitive_ids->GpuAddress() : records;
+	auto*      commands = m_mesh_draw_commands->Resource();
+
+	list->IASetPrimitiveTopology(primitive_size == 1u   ? D3D_PRIMITIVE_TOPOLOGY_POINTLIST
+	                             : primitive_size == 2u ? D3D_PRIMITIVE_TOPOLOGY_LINELIST
+	                                                    : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	auto*          dispatch_signature = MeshEmulationDispatchSignature(compute);
+	auto*          draw_signature     = DrawSignature(graphics, true, MeshChunkDrawWords * sizeof(uint32_t));
+	const uint64_t draws              = uint64_t {chunk_count} * MeshDispatchWords * sizeof(uint32_t);
+	// A draw command starts with the runtime data, which a pipeline without it skips.
+	const uint64_t skip = graphics.layout.runtime_data ? 0u : 2u * sizeof(uint32_t);
+	// As many indices as a chunk can have.
+	const D3D12_INDEX_BUFFER_VIEW view {indices, static_cast<UINT>(std::min(scratch->budget * scratch->group_indices, MeshIndexBytes)),
+	                                    DXGI_FORMAT_R32_UINT};
+	const auto& compute_layout = compute.layout;
+	for (uint32_t chunk = 0; chunk < chunk_count; chunk++) {
+		// The compute shader writes the chunk's vertices and triangles (a chunk past the record's has no groups).
+		m_mesh_records->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		m_mesh_indices->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		if (primitive_ids) {
+			m_mesh_primitive_ids->Use(buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		}
+		// (Root descriptors are set after the transitions, as in RecordEmulatedMeshDraw.)
+		list->SetComputeRootUnorderedAccessView(compute_layout.MeshScratchParameter(), records);
+		list->SetComputeRootUnorderedAccessView(compute_layout.MeshScratchParameter() + 1, indices);
+		list->SetComputeRootUnorderedAccessView(compute_layout.MeshScratchParameter() + 2, ids);
+		auto slot = trace.Begin(list, &compute.trace);
+		list->SetPipelineState(compute.pipeline);
+		list->ExecuteIndirect(dispatch_signature, 1, commands, uint64_t {chunk} * MeshDispatchWords * sizeof(uint32_t), nullptr, 0);
+		trace.End(list, slot);
+		m_statistics.dispatches++;
+		buffer.GlobalMemoryBarrier();
+
+		// One indexed draw of the chunk's slots.
+		m_mesh_records->Use(buffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+		m_mesh_indices->Use(buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+		if (primitive_ids) {
+			m_mesh_primitive_ids->Use(buffer, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		}
+		list->SetGraphicsRootShaderResourceView(graphics.layout.MeshScratchParameter(), records);
+		list->SetGraphicsRootShaderResourceView(graphics.layout.MeshScratchParameter() + 1, ids);
+		list->IASetIndexBuffer(&view);
+		slot = trace.Begin(list, &graphics.trace);
+		list->SetPipelineState(graphics.pipeline);
+		list->ExecuteIndirect(draw_signature, 1, commands, draws + uint64_t {chunk} * MeshChunkDrawWords * sizeof(uint32_t) + skip,
+		                      nullptr, 0);
+		trace.End(list, slot);
+	}
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 }
 
 // As upstream's Vulkan renderer (renderer/renderCommands.cpp): a rect-list draw with copy_depth_to_color copies the depth target's
@@ -861,6 +999,15 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		log_skip("a mesh draw without groups");
 		return;
 	}
+	// An indirect draw of a mesh program run as a compute shader: its records' chunks, which the mesh_emulation_records kernel works
+	// out on the GPU (RecordEmulatedMeshChunks). (ResolveDrawEmit sends records that need more to the CPU.)
+	const uint32_t mesh_chunks =
+	    emulated_mesh && mesh_indirect ? EmulatedMeshIndirectChunks(vs_input_info, emit.indirect.count, draw.index_count) : 0;
+	if (emulated_mesh && mesh_indirect && mesh_chunks == 0) {
+		log_skip("an indirect mesh draw too big for the compute emulation's chunks");
+		CountSkippedDraw("mesh draw size");
+		return;
+	}
 	m_statistics.draws++;
 
 	// What is drawn: the guest draw, or the triangle list replacing its fans. Reading guest
@@ -1112,6 +1259,11 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	runtime.first_vertex = emulated_mesh || tessellation ? 0u : static_cast<uint32_t>(vertex_offset);
 	runtime.base_instance   = emulated_mesh || tessellation ? 0u : emit.first_instance;
 	runtime.is_indexed_draw = (draw.indexed || emulated_mesh || tessellation) ? 1u : 0u;
+	if (emulated_mesh && mesh_indirect) {
+		// (Before the compute shader's bindings: the kernel's dispatch sets its own.)
+		RecordEmulatedMeshChunks(buffer, vs_input_info, *indirect_records.first, indirect_records.second, emit.indirect, mesh_chunks,
+		                         index_source.guest_element_size, draw.index_count, mesh_index_data);
+	}
 	if (emulated_mesh) {
 		// The compute shader is the mesh program's own stage: its bindings go to the compute root
 		// signature; the pixel stage's go to the graphics one below.
@@ -1176,8 +1328,11 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	auto& occlusion_queries = m_context.GetOcclusionQueries();
 	if (emulated_mesh) {
 		const int32_t occlusion_query = occlusion_queries.Begin(list);
-		RecordEmulatedMeshDraw(buffer, vs_input_info, *mesh_compute, pipeline, draw_data,
-		                       mesh_groups, draw.instance_count);
+		if (mesh_indirect) {
+			RecordEmulatedMeshDrawIndirect(buffer, vs_input_info, *mesh_compute, pipeline, emit.indirect.count * mesh_chunks);
+		} else {
+			RecordEmulatedMeshDraw(buffer, vs_input_info, *mesh_compute, pipeline, draw_data, mesh_groups, draw.instance_count);
+		}
 		occlusion_queries.End(list, occlusion_query);
 		if (writes_memory) {
 			buffer.GlobalMemoryBarrier();

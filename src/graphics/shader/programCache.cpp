@@ -486,12 +486,6 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 				report_once("a merged geometry stage needs more group shared memory than the host compute shaders have; its draws are skipped");
 				return {};
 			}
-			if (indirect_draw) {
-				static std::atomic_bool logged = false;
-				if (!logged.exchange(true, std::memory_order_relaxed)) {
-					Log::WriteToConsoleAndLog("Shaders: indirect mesh draws run as compute shaders: their records are read on the CPU\n");
-				}
-			}
 		} else {
 			const auto logical_threads =
 			    mesh.threads_num[0] * mesh.threads_num[1] * mesh.threads_num[2];
@@ -510,11 +504,17 @@ ShaderProgramCache::GraphicsPrograms ShaderProgramCache::GetGraphicsPrograms(
 				}
 				return {};
 			}
-			// The records' draw parameters come per record (HostShaderFeatures::indirect_mesh_parameters_in_push_data), without
-			// a first instance: a packet that patches one has its records read on the CPU.
-			if (indirect_draw && indirect_offsets.instance == ShaderIndirectOffsets::None) {
-				vertex_info[0].indirect_offsets = indirect_offsets;
-				vertex_info[0].indirect_draw    = true;
+		}
+		// The records' draw parameters come per record (HostShaderFeatures::indirect_mesh_parameters_in_push_data; with the
+		// compute emulation from the D3D12 renderer's mesh_emulation_records kernel), without a first instance: a packet that
+		// patches one has its records read on the CPU.
+		if (indirect_draw && indirect_offsets.instance == ShaderIndirectOffsets::None) {
+			vertex_info[0].indirect_offsets = indirect_offsets;
+			vertex_info[0].indirect_draw    = true;
+		} else if (indirect_draw) {
+			static std::atomic_bool logged = false;
+			if (!logged.exchange(true, std::memory_order_relaxed)) {
+				Log::WriteToConsoleAndLog("Shaders: indirect mesh draws whose packets patch a first instance: their records are read on the CPU\n");
 			}
 		}
 	}

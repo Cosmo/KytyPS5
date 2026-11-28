@@ -1,0 +1,95 @@
+#version 450
+
+// The D3D12 renderer's indirect mesh draws run as compute shaders (RenderExecutor::RecordEmulatedMeshDrawIndirect), the GPU's side
+// of what RecordEmulatedMeshDraw does on the CPU: each guest draw record's groups and instances go in chunks that fit the scratch
+// buffers, `chunks` per record, one invocation per chunk. A chunk is a dispatch command (the mesh program's draw parameters, the
+// chunk's first group, first instance and width, IR::MeshEmulation::DrawDwordCount of them as push constants, then its groups twice:
+// spirv_to_dxil's runtime data and the dispatch) and a draw command (spirv_to_dxil's first vertex and base instance, both 0, then an
+// indexed draw of the chunk's slots). A record with more chunks than `chunks` (only with instances) draws its first ones.
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Records { uint data[]; } records;
+layout(set = 0, binding = 1, std430) writeonly buffer Commands { uint data[]; } commands;
+
+layout(push_constant, std430) uniform Draws {
+	uint base;   // the first record's dword
+	uint count;  // records
+	uint stride; // in dwords
+	uint index_size;
+	uint index_limit;
+	uint primitive_size;
+	uint group_step;
+	uint budget; // groups (times instances) per chunk
+	uint chunks; // per record
+	uint indices_per_group;
+	uint index_address_low;
+	uint index_address_high;
+} params;
+
+const uint DispatchWords = 14u;
+const uint DrawWords     = 7u;
+const uint MaxDispatch   = 65535u;
+
+void main() {
+	const uint chunk = gl_GlobalInvocationID.x;
+	if (chunk >= params.count * params.chunks) {
+		return;
+	}
+	const uint draw = chunk / params.chunks;
+	const uint index = chunk % params.chunks;
+	// Indexed: index count, instances, first index, vertex offset, first instance (as gpu_tiler_mesh_records.comp).
+	const uint source    = params.base + draw * params.stride;
+	uint       count     = records.data[source];
+	const uint instances = records.data[source + 1u];
+	const uint first     = records.data[source + 2u];
+	count = min(count, params.index_limit - min(first, params.index_limit));
+	const uint shift  = params.index_size == 4u ? 2u : 1u;
+	const uint offset = first << shift;
+	const uint low    = params.index_address_low + offset;
+	const uint high   = params.index_address_high + (first >> (32u - shift)) + (low < params.index_address_low ? 1u : 0u);
+	const uint groups = count < params.primitive_size ? 0u : (count - params.primitive_size) / params.group_step + 1u;
+
+	// The chunks as RecordEmulatedMeshDraw takes them: instance rows of group columns.
+	uint chunk_groups    = 0u;
+	uint chunk_instances = 0u;
+	uint group_base      = 0u;
+	uint instance_base   = 0u;
+	uint width           = 0u;
+	if (groups != 0u && instances != 0u) {
+		const uint instances_max = min(min(instances, params.budget), MaxDispatch);
+		const uint groups_max    = min(min(groups, max(1u, params.budget / instances_max)), MaxDispatch);
+		const uint columns       = (groups + groups_max - 1u) / groups_max;
+		const uint rows          = (instances + instances_max - 1u) / instances_max;
+		if (index < columns * rows) {
+			instance_base   = (index / columns) * instances_max;
+			group_base      = (index % columns) * groups_max;
+			chunk_instances = min(instances_max, instances - instance_base);
+			chunk_groups    = min(groups_max, groups - group_base);
+			width           = chunk_groups;
+		}
+	}
+
+	const uint target = chunk * DispatchWords;
+	commands.data[target]       = count;
+	commands.data[target + 1u]  = records.data[source + 3u];
+	commands.data[target + 2u]  = params.index_size;
+	commands.data[target + 3u]  = low;
+	commands.data[target + 4u]  = high;
+	commands.data[target + 5u]  = group_base;
+	commands.data[target + 6u]  = instance_base;
+	commands.data[target + 7u]  = width;
+	for (uint i = 0u; i < 2u; i++) {
+		commands.data[target + 8u + i * 3u]  = chunk_groups;
+		commands.data[target + 9u + i * 3u]  = chunk_instances;
+		commands.data[target + 10u + i * 3u] = 1u;
+	}
+
+	const uint draws = params.count * params.chunks * DispatchWords + chunk * DrawWords;
+	commands.data[draws]      = 0u;
+	commands.data[draws + 1u] = 0u;
+	commands.data[draws + 2u] = chunk_groups * chunk_instances * params.indices_per_group;
+	commands.data[draws + 3u] = 1u;
+	commands.data[draws + 4u] = 0u;
+	commands.data[draws + 5u] = 0u;
+	commands.data[draws + 6u] = 0u;
+}
