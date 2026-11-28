@@ -684,12 +684,16 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 			return std::nullopt;
 		}
 #if defined(KYTY_GPU_BACKEND_D3D12)
-		// The D3D12 renderer draws fans as triangle lists it makes from their vertices on the CPU.
-		if (ucfg.GetPrimType() == Prospero::PrimitiveType::kTriFan ||
-		    ucfg.GetPrimType() == Prospero::PrimitiveType::kPolygon) {
+		// D3D12 has no fans: the GPU makes each record a triangle list's, except where that does not fit
+		// (RenderExecutor::IndirectFansOnGpu).
+		if (vs.logical_stage != ShaderType::Mesh &&
+		    (ucfg.GetPrimType() == Prospero::PrimitiveType::kTriFan ||
+		     ucfg.GetPrimType() == Prospero::PrimitiveType::kPolygon) &&
+		    !RenderExecutor::IndirectFansOnGpu(indirect.count, index_limit, index_element_size)) {
 			static std::once_flag logged;
 			std::call_once(logged, [] {
-				Log::WriteToConsoleAndLog("GPU: indirect triangle fans or polygons: their records are read on the CPU\n");
+				Log::WriteToConsoleAndLog("GPU: indirect triangle fans or polygons with 8-bit indices, or too many indices for the GPU's "
+				                          "index regions: their records are read on the CPU\n");
 			});
 			return std::nullopt;
 		}

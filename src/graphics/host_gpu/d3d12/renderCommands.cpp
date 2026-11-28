@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "gpu_tiler_shaders/gpu_tiler_draw_records_spv.h"
+#include "gpu_tiler_shaders/gpu_tiler_fan_records_spv.h"
 #include "gpu_tiler_shaders/gpu_tiler_mesh_emulation_records_spv.h"
 #include "gpu_tiler_shaders/gpu_tiler_mesh_records_spv.h"
 #include "gpu_blit_shaders/gpu_tess_scan_spv.h"
@@ -745,6 +746,97 @@ void RenderExecutor::RecordEmulatedMeshDrawIndirect(CommandBuffer& buffer, const
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 }
 
+// Non-indexed indirect fans draw the pattern's indices (m_fan_pattern), for fans of this many vertices at most: a longer one draws
+// its first ones.
+constexpr uint32_t FanPatternVertices = 65536;
+// What the index regions of an indirect draw of indexed fans may take together (a region per record, room for the triangles of
+// INDEX_BUFFER_SIZE indices); a bigger draw goes to the CPU.
+constexpr uint64_t FanRegionBytes = uint64_t {16} << 20u;
+constexpr uint32_t FanCommandWords = 7u;
+
+bool RenderExecutor::IndirectFansOnGpu(uint32_t records, uint32_t index_limit, uint32_t index_element_size) {
+	if (index_limit == 0) {
+		return true;
+	}
+	return (index_element_size == 2 || index_element_size == 4) &&
+	       uint64_t {records} * 3u * index_limit * sizeof(uint32_t) <= FanRegionBytes;
+}
+
+RenderExecutor::IndirectFans RenderExecutor::RecordIndirectFans(CommandBuffer& buffer, const DrawCallInfo& draw, const DrawEmitInfo& emit,
+                                                                const Buffer& records, uint64_t records_offset,
+                                                                const PreparedIndexBuffer& guest_indices, uint32_t index_element_size,
+                                                                bool restart) {
+	auto&          kernels  = m_context.GetComputeKernels();
+	auto*          pipeline = kernels.Get(GPU_TILER_FAN_RECORDS_SPV);
+	const auto&    indirect = emit.indirect;
+	const uint32_t count    = indirect.count;
+	IndirectFans   fans;
+	if (!draw.indexed) {
+		constexpr uint32_t Triangles = FanPatternVertices - 2u;
+		if (m_fan_pattern == nullptr) {
+			m_fan_pattern = std::make_unique<Buffer>(m_context.GetGraphics(), m_context.GetCommandScheduler(), MemoryUsage::DeviceLocal, 0,
+			                                         uint64_t {Triangles} * 3u * sizeof(uint32_t));
+			m_fan_pattern->SetName("indirect fan pattern");
+			const uint32_t           constants[] {2u, Triangles};
+			ComputeKernels::Bindings pattern;
+			pattern.input     = &records; // (not read)
+			pattern.output    = m_fan_pattern.get();
+			pattern.constants = constants;
+			kernels.Dispatch(buffer, pipeline, pattern, (Triangles + 63u) / 64u, 1, 1);
+		}
+		auto&          commands = GrowBuffer(m_draw_records, uint64_t {count} * FanCommandWords * sizeof(uint32_t), "indirect draw records");
+		const auto     base     = records_offset & ~uint64_t {15}; // (root descriptor alignment)
+		const uint32_t constants[] {0u, count, static_cast<uint32_t>((records_offset - base) / 4), indirect.stride / 4, 0u, FanPatternVertices};
+		ComputeKernels::Bindings bindings;
+		bindings.input        = &records;
+		bindings.input_offset = base;
+		bindings.output       = &commands;
+		bindings.constants    = constants;
+		kernels.Dispatch(buffer, pipeline, bindings, (count + 63u) / 64u, 1, 1);
+		commands.Use(buffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+		m_fan_pattern->Use(buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+		fans.commands = &commands;
+		fans.indices  = {m_fan_pattern->GpuAddress(), static_cast<UINT>(m_fan_pattern->Size()), DXGI_FORMAT_R32_UINT};
+		return fans;
+	}
+	// Indexed: the records are copied to the start of the output (the kernel's input is the guest's indices), the commands follow,
+	// then a region of triangles per record.
+	EXIT_IF(guest_indices.buffer == nullptr || (index_element_size != 2 && index_element_size != 4));
+	const uint32_t record_dwords = (count - 1u) * (indirect.stride / 4) + 5u;
+	const uint32_t command_base  = (record_dwords + 3u) & ~3u;
+	const uint32_t index_base    = (command_base + count * FanCommandWords + 3u) & ~3u;
+	const uint32_t region        = 3u * draw.index_count;
+	auto&          output        = GrowBuffer(m_draw_records, (uint64_t {index_base} + uint64_t {count} * region) * sizeof(uint32_t),
+	                                          "indirect draw records");
+	output.CopyFrom(buffer, records, records_offset, 0, uint64_t {record_dwords} * sizeof(uint32_t));
+	const auto     base = guest_indices.offset & ~uint64_t {15}; // (root descriptor alignment)
+	const uint32_t constants[] {1u,
+	                            count,
+	                            0u,
+	                            indirect.stride / 4,
+	                            command_base,
+	                            0u,
+	                            static_cast<uint32_t>((guest_indices.offset - base) / index_element_size),
+	                            index_element_size,
+	                            draw.index_count,
+	                            restart ? 1u : 0u,
+	                            index_element_size == 2 ? 0xffffu : UINT32_MAX,
+	                            index_base,
+	                            region};
+	ComputeKernels::Bindings bindings;
+	bindings.input        = guest_indices.buffer;
+	bindings.input_offset = base;
+	bindings.output       = &output;
+	bindings.constants    = constants;
+	kernels.Dispatch(buffer, pipeline, bindings, (count + 63u) / 64u, 1, 1);
+	output.Use(buffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT | D3D12_RESOURCE_STATE_INDEX_BUFFER);
+	fans.commands = &output;
+	fans.offset   = uint64_t {command_base} * sizeof(uint32_t);
+	fans.indices  = {output.GpuAddress() + uint64_t {index_base} * sizeof(uint32_t),
+	                 static_cast<UINT>(uint64_t {count} * region * sizeof(uint32_t)), DXGI_FORMAT_R32_UINT};
+	return fans;
+}
+
 // As upstream's Vulkan renderer (renderer/renderCommands.cpp): a rect-list draw with copy_depth_to_color copies the depth target's
 // values into its R32 float color target within the scissor, instead of drawing. The depth target's pending clear comes first.
 bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo& draw,
@@ -1017,7 +1109,14 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	int32_t               vertex_offset = emit.vertex_offset;
 	DrawIndexBufferSource indices       = index_source;
 	std::vector<uint32_t> fan_list;
-	if (!mesh && topology == vk::PrimitiveTopology::eTriangleFan) {
+	// An indirect draw of fans: the fan_records kernel makes each record a triangle list's (RecordIndirectFans, below).
+	const bool indirect_fans = !mesh && topology == vk::PrimitiveTopology::eTriangleFan && emit.indirect.address != 0;
+	const bool fan_restart   = indirect_fans && primitive_restart_enable;
+	if (indirect_fans) {
+		indexed                  = true;
+		topology                 = vk::PrimitiveTopology::eTriangleList;
+		primitive_restart_enable = false;
+	} else if (!mesh && topology == vk::PrimitiveTopology::eTriangleFan) {
 		// Legacy quads are drawn as fans of 4 vertices each.
 		const bool quads = buffer.GetUserConfig().GetPrimType() ==
 		                   Prospero::PrimitiveType::kQuadListLegacy;
@@ -1237,7 +1336,8 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	if (vertex_bindings.count != 0) {
 		list->IASetVertexBuffers(0, vertex_bindings.count, vertex_views.data());
 	}
-	if (index_binding.buffer != nullptr) {
+	// (The guest indices of indirect fans are the fan_records kernel's input; the draw has the kernel's indices.)
+	if (index_binding.buffer != nullptr && !indirect_fans) {
 		index_binding.buffer->Use(buffer, D3D12_RESOURCE_STATE_INDEX_BUFFER);
 		const D3D12_INDEX_BUFFER_VIEW view {index_binding.buffer->GpuAddress() + index_binding.offset,
 		                                    static_cast<UINT>(indices.size),
@@ -1386,6 +1486,14 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		indirect_offset    = 0;
 		indirect_signature = MeshDrawSignature(pipeline);
 		indirect_buffer->Use(buffer, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+	} else if (indirect_buffer != nullptr && indirect_fans) {
+		// Fans as triangle lists: the kernel's records (each after its runtime data, which a pipeline without it skips) and indices.
+		const auto fans = RecordIndirectFans(buffer, draw, emit, *indirect_buffer, indirect_offset, index_binding,
+		                                     index_source.guest_element_size, fan_restart);
+		list->IASetIndexBuffer(&fans.indices);
+		indirect_buffer    = fans.commands;
+		indirect_offset    = fans.offset + (pipeline.layout.runtime_data ? 0u : 2u * sizeof(uint32_t));
+		indirect_signature = DrawSignature(pipeline, true, 7u * sizeof(uint32_t));
 	} else if (indirect_buffer != nullptr) {
 		const uint32_t words = draw.indexed ? 5u : 4u;
 		if (pipeline.layout.runtime_data) {

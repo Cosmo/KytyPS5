@@ -1,0 +1,104 @@
+#version 450
+
+// The D3D12 renderer's indirect triangle fans and polygons (RenderExecutor::ExecutePreparedDraw). D3D12 has no fans: each guest draw
+// record becomes the record of an indexed triangle list draw, fan triangle i as (v[i + 1], v[i + 2], v[0]) as TriangulateFans makes
+// it on the CPU, after the two dwords of spirv_to_dxil's runtime data its draw sets (first vertex, base instance).
+//   mode 0, non-indexed records (the input): v[i] is i, the list's indices are the pattern (mode 2), the first vertex its base vertex.
+//   mode 1, indexed records (copied to the start of the output; the input is the guest's indices): each record's triangles go to a
+//           region of the output of their own, its fans split at the restart index.
+//   mode 2: the pattern, triangle t is (t + 1, t + 2, 0).
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Input { uint data[]; } input_data;
+layout(set = 0, binding = 1, std430) buffer Output { uint data[]; } output_data;
+
+layout(push_constant, std430) uniform Params {
+	uint mode;
+	uint count;        // records (mode 2: triangles)
+	uint base;         // the first record's dword (mode 0: in the input, mode 1: in the output)
+	uint stride;       // in dwords
+	uint commands;     // the first command's dword in the output
+	uint max_vertices; // mode 0: the pattern's vertices
+	uint index_first;  // mode 1: the input's first index, in indices
+	uint index_size;   // mode 1: 2 or 4
+	uint index_limit;  // mode 1: INDEX_BUFFER_SIZE
+	uint restart;      // mode 1: split the fans at restart_index
+	uint restart_index;
+	uint indices;      // mode 1: the first region's dword in the output
+	uint region;       // mode 1: dwords per region
+} params;
+
+const uint CommandWords = 7u;
+
+uint GuestIndex(uint index) {
+	const uint at = params.index_first + index;
+	if (params.index_size == 4u) {
+		return input_data.data[at];
+	}
+	const uint word = input_data.data[at >> 1u];
+	return (at & 1u) != 0u ? word >> 16u : word & 0xffffu;
+}
+
+void main() {
+	const uint id = gl_GlobalInvocationID.x;
+	if (id >= params.count) {
+		return;
+	}
+	if (params.mode == 2u) {
+		output_data.data[id * 3u]      = id + 1u;
+		output_data.data[id * 3u + 1u] = id + 2u;
+		output_data.data[id * 3u + 2u] = 0u;
+		return;
+	}
+	const uint source = params.base + id * params.stride;
+	const uint target = params.commands + id * CommandWords;
+	if (params.mode == 0u) {
+		// Vertex count, instances, first vertex, first instance.
+		const uint vertices       = min(input_data.data[source], params.max_vertices);
+		const uint first_vertex   = input_data.data[source + 2u];
+		const uint first_instance = input_data.data[source + 3u];
+		output_data.data[target]      = first_vertex;
+		output_data.data[target + 1u] = first_instance;
+		output_data.data[target + 2u] = vertices < 3u ? 0u : (vertices - 2u) * 3u;
+		output_data.data[target + 3u] = input_data.data[source + 1u];
+		output_data.data[target + 4u] = 0u;
+		output_data.data[target + 5u] = first_vertex;
+		output_data.data[target + 6u] = first_instance;
+		return;
+	}
+	// Index count, instances, first index, vertex offset, first instance. Indices past INDEX_BUFFER_SIZE are never read.
+	const uint first          = output_data.data[source + 2u];
+	const uint count          = min(output_data.data[source], params.index_limit - min(first, params.index_limit));
+	const uint instances      = output_data.data[source + 1u];
+	const uint vertex_offset  = output_data.data[source + 3u];
+	const uint first_instance = output_data.data[source + 4u];
+	const uint region         = params.indices + id * params.region;
+	uint       written        = 0u;
+	uint       fan_first      = 0u;
+	uint       fan_length     = 0u;
+	uint       previous       = 0u;
+	for (uint i = 0u; i < count; i++) {
+		const uint vertex = GuestIndex(first + i);
+		if (params.restart != 0u && vertex == params.restart_index) {
+			fan_length = 0u;
+			continue;
+		}
+		if (fan_length == 0u) {
+			fan_first = vertex;
+		} else if (fan_length >= 2u) {
+			output_data.data[region + written]      = previous;
+			output_data.data[region + written + 1u] = vertex;
+			output_data.data[region + written + 2u] = fan_first;
+			written += 3u;
+		}
+		previous = vertex;
+		fan_length++;
+	}
+	output_data.data[target]      = vertex_offset;
+	output_data.data[target + 1u] = first_instance;
+	output_data.data[target + 2u] = written;
+	output_data.data[target + 3u] = instances;
+	output_data.data[target + 4u] = id * params.region;
+	output_data.data[target + 5u] = vertex_offset;
+	output_data.data[target + 6u] = first_instance;
+}

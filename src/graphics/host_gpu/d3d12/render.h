@@ -159,6 +159,10 @@ public:
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	                                            const ShaderRecompiler::IR::DescriptorValue& value);
 
+	// Whether an indirect draw of fans or polygons, which D3D12 has not, becomes a triangle list's on the GPU (the fan_records kernel;
+	// otherwise the CPU reads its records, renderer/renderDraw.cpp's ResolveDrawEmit): not with 8-bit indices, nor with more index
+	// regions than FanRegionBytes holds. `index_limit`: INDEX_BUFFER_SIZE of an indexed draw, 0 otherwise.
+	[[nodiscard]] static bool IndirectFansOnGpu(uint32_t records, uint32_t index_limit, uint32_t index_element_size);
 	// The chunks per record an indirect draw of a mesh program run as a compute shader takes on the GPU
 	// (RecordEmulatedMeshDrawIndirect): enough for the groups of INDEX_BUFFER_SIZE indices; 0 when the CPU reads its records (they
 	// are not indexed, so their counts have no limit, or the chunks would be more than MaxMeshIndirectChunks).
@@ -269,7 +273,16 @@ private:
 	void RecordEmulatedMeshDrawIndirect(CommandBuffer& buffer, const ShaderVertexInputInfo& vs_input_info,
 	                                    const PipelineCache::Pipeline& compute, const PipelineCache::Pipeline& graphics,
 	                                    uint32_t chunk_count);
-
+	// An indirect draw of fans or polygons as triangle lists (IndirectFansOnGpu): the fan_records kernel's draw records (first
+	// vertex and base instance, then an indexed draw's arguments) and the index buffer they draw.
+	struct IndirectFans {
+		const Buffer*           commands = nullptr;
+		uint64_t                offset   = 0; // of the first record (its runtime data)
+		D3D12_INDEX_BUFFER_VIEW indices {};
+	};
+	[[nodiscard]] IndirectFans RecordIndirectFans(CommandBuffer& buffer, const DrawCallInfo& draw, const DrawEmitInfo& emit,
+	                                              const Buffer& records, uint64_t records_offset, const PreparedIndexBuffer& guest_indices,
+	                                              uint32_t index_element_size, bool restart);
 
 	// A tessellated draw (ShaderRecompiler::IR::TessEmulation) as the CPU works it out before its passes are recorded.
 	struct TessDraw {
@@ -354,7 +367,8 @@ private:
 	std::unordered_map<ID3D12RootSignature*, D3D12::ComPtr<ID3D12CommandSignature>> m_mesh_signatures;
 	// By the compute pipeline's root signature (see MeshEmulationDispatchSignature).
 	std::unordered_map<ID3D12RootSignature*, D3D12::ComPtr<ID3D12CommandSignature>> m_mesh_emulation_signatures;
-
+	// The triangle (t + 1, t + 2, 0) for every t: the indices of non-indexed indirect fans (see RecordIndirectFans), made by the first.
+	std::unique_ptr<Buffer> m_fan_pattern;
 
 	friend class CommandProcessor;
 };
