@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <deque>
 #include <fmt/format.h>
@@ -857,6 +858,32 @@ static void PatchIndirectDrawOffsets(CommandProcessor& cp, IndirectDrawRegisters
 	write(registers.draw_index, draw_index);
 }
 
+#if defined(KYTY_GPU_BACKEND_D3D12)
+// Indirect draw records the CPU reads, added up: a line every 10 seconds with how many and how long their reads took (a read of
+// what the GPU wrote waits for its download).
+static void NoteCpuIndirectRecords(uint32_t records, std::chrono::steady_clock::duration read) {
+	static std::mutex                            mutex;
+	static uint64_t                              packets = 0;
+	static uint64_t                              total   = 0;
+	static std::chrono::steady_clock::duration   waited {};
+	static std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+	std::scoped_lock                             lock(mutex);
+	packets++;
+	total += records;
+	waited += read;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - since >= std::chrono::seconds(10)) {
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "GPU: indirect draw records read on the CPU in the last {} s: {} packets, {} records, {:.1f} ms waiting for them\n",
+		    std::chrono::duration_cast<std::chrono::seconds>(now - since).count(), packets, total,
+		    std::chrono::duration<double, std::milli>(waited).count()));
+		packets = total = 0;
+		waited  = {};
+		since   = now;
+	}
+}
+#endif
+
 // Writes the GS user-data slots the packet patches; false when the shaders cannot read the
 // offsets from GPU records: a first-index or subdraw-index destination, or another stage's
 // user data.
@@ -927,6 +954,19 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		}
 	}
 
+#if defined(KYTY_GPU_BACKEND_D3D12)
+	// The records go to the CPU. Read first, timed: a record the GPU wrote waits for its download (the page fault), which the log adds up,
+	// to tell what reading them on the GPU would save.
+	{
+		const auto start = std::chrono::steady_clock::now();
+		uint32_t   sum   = 0;
+		for (uint32_t i = 0; i < draw_count; i++) {
+			sum += *reinterpret_cast<const volatile uint32_t*>(args_addr + static_cast<uint64_t>(i) * stride_in_bytes);
+		}
+		(void)sum;
+		NoteCpuIndirectRecords(draw_count, std::chrono::steady_clock::now() - start);
+	}
+#endif
 	const uint32_t max_indices = m_index_buffer_size != 0 ? m_index_buffer_size : UINT32_MAX;
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto addr = args_addr + static_cast<uint64_t>(i) * stride_in_bytes;
