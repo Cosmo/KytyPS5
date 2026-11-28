@@ -64,6 +64,10 @@ constexpr size_t GRAPH_FRAMES    = 120;
 constexpr double GRAPH_WINDOW_MS = 10000.0;
 constexpr double GRAPH_SLOT_MS   = 50.0;
 constexpr double STALL_MS        = 250.0;
+// Upstream's hitches (performanceOverlay.cpp): a frame of more than HITCH_MS that took at least twice the average of the frames before it (an
+// average that follows each frame by 5%, from HITCH_WARMUP_MS before the graph's time span).
+constexpr double HITCH_MS        = 50.0;
+constexpr double HITCH_WARMUP_MS = 2000.0;
 // The swap file's stripe at the bottom of the graph (Full): its height; the traffic at which its white is brightest; the share of a stretch
 // spent waiting at which its black is darkest.
 constexpr double SWAP_LANE_HEIGHT     = 4.0;
@@ -81,6 +85,8 @@ constexpr double CPU_CORE_PADDING   = 2.0;
 constexpr int32_t CPU_CORES_PER_ROW = 8;
 constexpr size_t CPU_THREADS        = 10;
 constexpr double CPU_THREAD_BAR     = 80.0;
+// The hitches panel's bars: narrower, so its labels fit beside values with decimals ("Showing frame", "38.7 ms").
+constexpr double HITCH_BAR          = 64.0;
 // The rows of the swap file in the statistics (OverlayMarkup): its group and its row in Waiting, and the gap above the group.
 constexpr std::array<int32_t, 5> SWAP_ROWS {18, 19, 20, 21, 32};
 constexpr uint32_t               SWAP_GAP_ROW = 17;
@@ -305,7 +311,8 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
   </Border>
   </StackPanel>
 
-  <!-- At the top right: Controllers, and the CPU panel when the settings show it, which then takes the corner. -->
+  <!-- At the top right: Controllers, and the hitches and CPU panels when the settings show them, which then take the corner, hitches above the
+       CPU (its height stays the same; the CPU panel's changes with the threads it lists). -->
   <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Right" VerticalAlignment="Top">
   <Border x:Name="ControllersPanel" MinWidth="220" VerticalAlignment="Top" Padding="12"
           Background="{StaticResource PanelBrush}">
@@ -319,6 +326,39 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
           <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+      </Grid>
+    </StackPanel>
+  </Border>
+
+  <StackPanel Spacing="12" VerticalAlignment="Top">
+  <!-- The slow frames (BuildHitchesPanel, UpdateHitchesPanel): upstream's hitches in the last GRAPH_WINDOW_MS (the graph's amber and red
+       marks), the last one and what its time went on, then what an average frame's goes on. A row is a label, a value and a bar for its
+       share of the frame. -->
+  <Border x:Name="HitchesPanel" Width="240" VerticalAlignment="Top" Padding="12" Background="{StaticResource PanelBrush}" Visibility="Collapsed">
+    <StackPanel Spacing="4">
+      <Grid>
+        <TextBlock Text="Hitches" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+        <TextBlock Text="last 10 s" Style="{StaticResource CaptionTextBlockStyle}" HorizontalAlignment="Right"
+                   Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+      </Grid>
+      <TextBlock x:Name="HitchCount" Typography.NumeralAlignment="Tabular" />
+      <TextBlock x:Name="HitchLast" Style="{StaticResource CaptionTextBlockStyle}" Typography.NumeralAlignment="Tabular" TextWrapping="NoWrap"
+                 TextTrimming="CharacterEllipsis" />
+      <Grid x:Name="HitchCauses" ColumnSpacing="8">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="64" />
+        </Grid.ColumnDefinitions>
+      </Grid>
+      <TextBlock Text="Per frame" Style="{StaticResource CaptionTextBlockStyle}" Margin="0,4,0,0"
+                 Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}" />
+      <Grid x:Name="FrameCauses" ColumnSpacing="8">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="64" />
         </Grid.ColumnDefinitions>
       </Grid>
     </StackPanel>
@@ -357,6 +397,7 @@ constexpr wchar_t OverlayMarkup[] = LR"xaml(
       </Grid>
     </StackPanel>
   </Border>
+  </StackPanel>
   </StackPanel>
 
   <Border x:Name="LogPanel" Grid.Row="2" Padding="12,8" Background="{StaticResource PanelBrush}">
@@ -764,6 +805,18 @@ xaml::Media::SolidColorBrush CpuBrush(uint8_t alpha, uint8_t red, uint8_t green,
 	return xaml::Media::SolidColorBrush(winrt::Windows::UI::ColorHelper::FromArgb(alpha, red, green, blue));
 }
 
+// Which of `frames` (oldest first) are hitches (HITCH_MS).
+std::vector<bool> Hitches(const std::vector<EmulatorHost::RecentFrame>& frames) {
+	std::vector<bool> hitches(frames.size(), false);
+	double            average = 0.0;
+	for (size_t i = 0; i < frames.size(); i++) {
+		const double ms = frames[i].time_ms;
+		hitches[i]      = average > 0.0 && ms > HITCH_MS && ms >= 2.0 * average;
+		average         = average > 0.0 ? average * 0.95 + ms * 0.05 : ms;
+	}
+	return hitches;
+}
+
 } // namespace
 
 struct GameOverlay::State {
@@ -907,8 +960,26 @@ struct GameOverlay::State {
 	ProcessorLoad             processor_load;
 	std::vector<ThreadRow>    cpu_threads;
 
+	// The hitches panel (BuildHitchesPanel): whether the settings show it, its parts, and its rows' values and bars, the last hitch's causes and
+	// an average frame's; the graph's amber marks for hitches shorter than a stall (made once, then moved).
+	struct CauseRow {
+		xaml::Controls::TextBlock value {nullptr};
+		xaml::Shapes::Rectangle   bar {nullptr};
+	};
+	bool                                 hitches_shown = false;
+	xaml::UIElement                      hitches_panel {nullptr};
+	xaml::Controls::TextBlock            hitch_count {nullptr};
+	xaml::Controls::TextBlock            hitch_last {nullptr};
+	xaml::Media::Brush                   hitch_last_brush {nullptr};
+	std::vector<CauseRow>                hitch_rows;
+	std::vector<CauseRow>                frame_rows;
+	xaml::Media::Brush                   hitch_fill_brush {nullptr};
+	std::vector<xaml::Shapes::Rectangle> hitch_blocks;
+
 	void BuildCpuPanel();
 	void UpdateCpuPanel();
+	void BuildHitchesPanel();
+	void UpdateHitchesPanel();
 	void ShowSystemCores(std::vector<bool> system);
 	void BuildDetailed(xaml::Controls::Panel const& row, xaml::Media::Brush const& background);
 	void Set(Stat stat, std::wstring const& text, Level level = Level::None);
@@ -1132,8 +1203,10 @@ void GameOverlay::State::UpdateFrame() {
 }
 
 // The graph, drawn with every frame the app shows while the overlay does (DrawGraphWhileShown): the last GRAPH_WINDOW_MS up to now at the
-// right, scrolling with time. Frames go into slots of GRAPH_SLOT_MS fixed to the clock, so a slot keeps its frames as it moves; each slot is
-// drawn at its longest frame. Stalls (frames of STALL_MS or more, and the one going on) are red blocks over the time they took.
+// right, scrolling with time. Time goes into slots of GRAPH_SLOT_MS fixed to the clock, so a slot keeps its value as it moves; each slot is
+// drawn at the longest frame that took any of its time, so a long frame keeps the line up for as long as it lasted (drawn only in the slot it
+// ended in, the line ran slanted across the slots before it). Stalls (frames of STALL_MS or more, and the one going on) are red blocks over the
+// time they took, hitches shorter than that (HITCH_MS) amber ones.
 void GameOverlay::State::DrawGraph() {
 	const double width  = graph.ActualWidth();
 	const double height = graph.ActualHeight();
@@ -1154,33 +1227,41 @@ void GameOverlay::State::DrawGraph() {
 	}
 	const double now     = EmulatorHost::ClockMs();
 	const double waiting = EmulatorHost::Get().MsSinceLastPresent();
-	const auto   recent  = EmulatorHost::Get().FramesSince(now - GRAPH_WINDOW_MS - GRAPH_SLOT_MS);
+	const double start   = now - GRAPH_WINDOW_MS - GRAPH_SLOT_MS;
+	const auto   recent  = EmulatorHost::Get().FramesSince(start - HITCH_WARMUP_MS);
+	const auto   hitches = Hitches(recent);
 	const auto   x_of    = [&](double ms) { return width * (1.0 - (now - ms) / GRAPH_WINDOW_MS); };
 	const auto   y_of    = [&](double time_ms) { return height - height * std::min(time_ms, GRAPH_MAX_MS) / GRAPH_MAX_MS; };
 
-	xaml::Media::PointCollection             points;
-	std::vector<std::pair<double, double>> stalls; // from, to (ClockMs)
-	int64_t                                  slot    = std::numeric_limits<int64_t>::min();
-	double                                   longest = 0.0;
-	const auto                               add_slot = [&] {
-		if (slot != std::numeric_limits<int64_t>::min()) {
-			points.Append({static_cast<float>(x_of((static_cast<double>(slot) + 0.5) * GRAPH_SLOT_MS)), static_cast<float>(y_of(longest))});
+	const auto first_slot = static_cast<int64_t>(std::floor(start / GRAPH_SLOT_MS));
+	const auto last_slot  = static_cast<int64_t>(std::floor(now / GRAPH_SLOT_MS));
+	std::vector<double> longest(static_cast<size_t>(last_slot - first_slot + 1), -1.0); // -1: no frame took any of the slot's time
+	std::vector<std::pair<double, double>> stalls;    // from, to (ClockMs)
+	std::vector<std::pair<double, double>> hitch_marks;
+	for (size_t i = 0; i < recent.size(); i++) {
+		const auto& frame = recent[i];
+		if (frame.presented_ms < start) {
+			continue;
 		}
-	};
-	for (const auto& frame: recent) {
-		const auto frame_slot = static_cast<int64_t>(std::floor(frame.presented_ms / GRAPH_SLOT_MS));
-		if (frame_slot != slot) {
-			add_slot();
-			slot    = frame_slot;
-			longest = frame.time_ms;
-		} else {
-			longest = std::max(longest, frame.time_ms);
+		const auto from = std::max(first_slot, static_cast<int64_t>(std::floor((frame.presented_ms - frame.time_ms) / GRAPH_SLOT_MS)));
+		const auto to   = std::min(last_slot, static_cast<int64_t>(std::floor(frame.presented_ms / GRAPH_SLOT_MS)));
+		for (auto slot = from; slot <= to; slot++) {
+			auto& value = longest[static_cast<size_t>(slot - first_slot)];
+			value       = std::max(value, frame.time_ms);
 		}
 		if (frame.time_ms >= STALL_MS) {
 			stalls.emplace_back(frame.presented_ms - frame.time_ms, frame.presented_ms);
+		} else if (hitches[i]) {
+			hitch_marks.emplace_back(frame.presented_ms - frame.time_ms, frame.presented_ms);
 		}
 	}
-	add_slot();
+	xaml::Media::PointCollection points;
+	for (size_t i = 0; i < longest.size(); i++) {
+		if (longest[i] >= 0.0) {
+			const double middle = (static_cast<double>(first_slot + static_cast<int64_t>(i)) + 0.5) * GRAPH_SLOT_MS;
+			points.Append({static_cast<float>(x_of(middle)), static_cast<float>(y_of(longest[i]))});
+		}
+	}
 	if (waiting >= STALL_MS) {
 		const double last = now - waiting;
 		points.Append({static_cast<float>(x_of(last)), 0.0f});
@@ -1189,25 +1270,30 @@ void GameOverlay::State::DrawGraph() {
 	}
 	frames.Points(points);
 
-	// The red blocks are made once and moved.
-	for (size_t i = 0; i < stalls.size(); i++) {
-		if (i == stall_blocks.size()) {
-			xaml::Shapes::Rectangle block;
-			block.Fill(stall_fill_brush);
-			stall_marks.Children().Append(block);
-			stall_blocks.push_back(block);
+	// The red and amber blocks are made once and moved (a hitch's at least 2 pixels wide, so a short one shows).
+	const auto place = [&](const std::vector<std::pair<double, double>>& spans, std::vector<xaml::Shapes::Rectangle>& blocks,
+	                       const xaml::Media::Brush& fill, double min_width) {
+		for (size_t i = 0; i < spans.size(); i++) {
+			if (i == blocks.size()) {
+				xaml::Shapes::Rectangle block;
+				block.Fill(fill);
+				stall_marks.Children().Append(block);
+				blocks.push_back(block);
+			}
+			const double right = std::clamp(x_of(spans[i].second), 0.0, width);
+			const double left  = std::clamp(std::min(x_of(spans[i].first), right - min_width), 0.0, width);
+			auto&        block = blocks[i];
+			block.Width(right - left);
+			block.Height(height);
+			xaml::Controls::Canvas::SetLeft(block, left);
+			block.Visibility(xaml::Visibility::Visible);
 		}
-		const double left  = std::clamp(x_of(stalls[i].first), 0.0, width);
-		const double right = std::clamp(x_of(stalls[i].second), 0.0, width);
-		auto&        block = stall_blocks[i];
-		block.Width(right - left);
-		block.Height(height);
-		xaml::Controls::Canvas::SetLeft(block, left);
-		block.Visibility(xaml::Visibility::Visible);
-	}
-	for (size_t i = stalls.size(); i < stall_blocks.size(); i++) {
-		stall_blocks[i].Visibility(xaml::Visibility::Collapsed);
-	}
+		for (size_t i = spans.size(); i < blocks.size(); i++) {
+			blocks[i].Visibility(xaml::Visibility::Collapsed);
+		}
+	};
+	place(stalls, stall_blocks, stall_fill_brush, 0.0);
+	place(hitch_marks, hitch_blocks, hitch_fill_brush, 2.0);
 	DrawSwap(width, height, x_of);
 }
 
@@ -1416,6 +1502,9 @@ void GameOverlay::State::UpdateRates(const MemoryTotals& totals) {
 	} else if (cpu_shown) {
 		UpdateCpuPanel();
 	}
+	if (hitches_shown) {
+		UpdateHitchesPanel();
+	}
 	sample = current;
 }
 
@@ -1609,6 +1698,132 @@ void GameOverlay::State::UpdateCpuPanel() {
 			row.bar.Width(percent / 100.0 * CPU_THREAD_BAR);
 		}
 	}
+}
+
+// The hitches panel's rows: the last hitch's causes and an average frame's, each a label, a value and a bar (as the CPU panel's threads).
+void GameOverlay::State::BuildHitchesPanel() {
+	const auto find    = [this](const wchar_t* name) { return root.FindName(name); };
+	const auto caption = xaml::Application::Current().Resources().Lookup(winrt::box_value(L"CaptionTextBlockStyle")).as<xaml::Style>();
+	hitches_panel      = find(L"HitchesPanel").as<xaml::UIElement>();
+	hitch_count        = find(L"HitchCount").as<xaml::Controls::TextBlock>();
+	hitch_last         = find(L"HitchLast").as<xaml::Controls::TextBlock>();
+	hitch_last_brush   = hitch_last.Foreground();
+	hitch_count.Text(L"–");
+	const auto build = [&](const wchar_t* name, std::initializer_list<const wchar_t*> labels, std::vector<CauseRow>& rows) {
+		auto    grid  = find(name).as<xaml::Controls::Grid>();
+		int32_t index = 0;
+		for (const auto* label: labels) {
+			xaml::Controls::RowDefinition definition;
+			definition.Height(xaml::GridLengthHelper::Auto());
+			grid.RowDefinitions().Append(definition);
+			xaml::Controls::TextBlock text;
+			text.Style(caption);
+			text.Text(label);
+			text.TextWrapping(xaml::TextWrapping::NoWrap);
+			text.TextTrimming(xaml::TextTrimming::CharacterEllipsis);
+			xaml::Controls::TextBlock value;
+			value.Style(caption);
+			value.Text(L"–");
+			value.HorizontalAlignment(xaml::HorizontalAlignment::Right);
+			xaml::Documents::Typography::SetNumeralAlignment(value, xaml::FontNumeralAlignment::Tabular);
+			xaml::Controls::Grid track;
+			track.Height(5.0);
+			track.VerticalAlignment(xaml::VerticalAlignment::Center);
+			track.Background(CpuBrush(0x24, 0xFF, 0xFF, 0xFF));
+			xaml::Shapes::Rectangle bar;
+			bar.HorizontalAlignment(xaml::HorizontalAlignment::Left);
+			bar.Fill(CpuBrush(0xFF, 0x7C, 0xC2, 0x4D));
+			bar.Width(0.0);
+			track.Children().Append(bar);
+			int32_t column = 0;
+			for (const auto& element: std::initializer_list<xaml::FrameworkElement> {text, value, track}) {
+				xaml::Controls::Grid::SetRow(element, index);
+				xaml::Controls::Grid::SetColumn(element, column++);
+				grid.Children().Append(element);
+			}
+			rows.push_back({value, bar});
+			index++;
+		}
+	};
+	build(L"HitchCauses", {L"Compiling", L"GPU wait", L"GPU readback", L"Screen wait", L"Showing frame", L"Game, other"}, hitch_rows);
+	build(L"FrameCauses", {L"GPU commands", L"Compiling", L"GPU wait", L"Screen wait", L"Showing frame"}, frame_rows);
+}
+
+// Four times a second: the hitches in the graph's time span (its amber and red marks), the last one's causes, or while the game stalls what
+// the time without a frame went on so far, and an average frame of the last second.
+void GameOverlay::State::UpdateHitchesPanel() {
+	using Work         = EmulatorHost::FrameWork;
+	auto&        host  = EmulatorHost::Get();
+	const double now   = EmulatorHost::ClockMs();
+	const auto frames  = host.FramesSince(now - GRAPH_WINDOW_MS - HITCH_WARMUP_MS);
+	const auto hitches = Hitches(frames);
+	size_t     count   = 0;
+	const EmulatorHost::RecentFrame* last = nullptr;
+	for (size_t i = 0; i < frames.size(); i++) {
+		if (hitches[i] && frames[i].presented_ms >= now - GRAPH_WINDOW_MS) {
+			count++;
+			last = &frames[i];
+		}
+	}
+	hitch_count.Text(std::to_wstring(count));
+
+	// Each row's time (blank without one) and its share of `total_ms` as its bar.
+	const auto show = [](std::vector<CauseRow>& rows, const std::vector<double>& values, double total_ms, const wchar_t* format) {
+		for (size_t i = 0; i < rows.size(); i++) {
+			const bool known = i < values.size() && total_ms > 0.0;
+			rows[i].value.Text(known ? Formatted(format, values[i]) : std::wstring(L"–"));
+			rows[i].bar.Width(known ? std::clamp(values[i] / total_ms, 0.0, 1.0) * HITCH_BAR : 0.0);
+		}
+	};
+	const auto ms = [](uint64_t ns) { return static_cast<double>(ns) / 1e6; };
+	// The causes, in the rows' order; the game and the rest is the time they leave (they overlap: a readback also waits for the GPU).
+	const auto causes = [&](const Work& work, double total_ms) {
+		const double present = ms(work.present_ns);
+		const double screen  = std::min(ms(work.screen_wait_ns), present);
+		const double counted = ms(work.compile_ns) + ms(work.gpu_wait_ns) + ms(work.readback_ns) + present;
+		return std::vector<double> {ms(work.compile_ns), ms(work.gpu_wait_ns), ms(work.readback_ns), screen, present - screen,
+		                            std::max(total_ms - counted, 0.0)};
+	};
+	const double waiting = host.MsSinceLastPresent();
+	if (host.FramesPresented() > 0 && waiting >= STALL_MS) {
+		hitch_last.Text(Formatted(L"No new frame for %.1f s", waiting / 1000.0));
+		hitch_last.Foreground(stall_brush);
+		show(hitch_rows, causes(host.WorkSinceLastPresent(), waiting), waiting, L"%.0f ms");
+	} else if (last != nullptr) {
+		hitch_last.Text(Formatted(L"Last %.0f ms · %.0f s ago", last->time_ms, (now - last->presented_ms) / 1000.0));
+		hitch_last.Foreground(hitch_last_brush);
+		show(hitch_rows, causes(last->work, last->time_ms), last->time_ms, L"%.0f ms");
+	} else {
+		hitch_last.Text(L"None");
+		hitch_last.Foreground(hitch_last_brush);
+		show(hitch_rows, {}, 0.0, L"");
+	}
+
+	// An average frame of the last second.
+	double frame_ms = 0.0;
+	Work   work;
+	size_t frames_counted = 0;
+	for (const auto& frame: frames) {
+		if (frame.presented_ms < now - 1000.0 * RATE_SECONDS) {
+			continue;
+		}
+		frame_ms += frame.time_ms;
+		work.compile_ns += frame.work.compile_ns;
+		work.gpu_wait_ns += frame.work.gpu_wait_ns;
+		work.screen_wait_ns += frame.work.screen_wait_ns;
+		work.present_ns += frame.work.present_ns;
+		work.gpu_thread_ns += frame.work.gpu_thread_ns;
+		frames_counted++;
+	}
+	if (frames_counted == 0) {
+		show(frame_rows, {}, 0.0, L"");
+		return;
+	}
+	const double n       = static_cast<double>(frames_counted);
+	const double present = ms(work.present_ns) / n;
+	const double screen  = std::min(ms(work.screen_wait_ns) / n, present);
+	show(frame_rows, {ms(work.gpu_thread_ns) / n, ms(work.compile_ns) / n, ms(work.gpu_wait_ns) / n, screen, present - screen}, frame_ms / n,
+	     L"%.1f ms");
 }
 
 // A panel per group list, beside the frame rate's box: each group a heading in bold (with a gap above it), over rows of a label and a value of
@@ -1898,6 +2113,7 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.fps_brush        = state.fps.Foreground();
 	state.stall_brush      = xaml::Media::SolidColorBrush(winrt::Windows::UI::Color {0xFF, 0xF0, 0x95, 0x95});
 	state.stall_fill_brush = xaml::Media::SolidColorBrush(winrt::Windows::UI::Color {0x47, 0xE2, 0x4B, 0x4A});
+	state.hitch_fill_brush = xaml::Media::SolidColorBrush(winrt::Windows::UI::Color {0x5C, 0xEF, 0x9F, 0x27});
 	state.statistics        = find(L"Statistics").as<xaml::Controls::Grid>();
 	state.draws             = find(L"Draws").as<xaml::Controls::TextBlock>();
 	state.skipped           = find(L"Skipped").as<xaml::Controls::TextBlock>();
@@ -1931,6 +2147,7 @@ GameOverlay::GameOverlay(xaml::Controls::Grid const& page, uint32_t index,
 	state.controllers      = find(L"Controllers").as<xaml::Controls::Grid>();
 	state.log              = find(L"Log").as<xaml::Controls::TextBlock>();
 	state.BuildCpuPanel();
+	state.BuildHitchesPanel();
 	state.BuildDetailed(find(L"TopRow").as<xaml::Controls::Panel>(),
 	                    state.root.Resources().Lookup(winrt::box_value(L"PanelBrush")).as<xaml::Media::Brush>());
 	page.Children().InsertAt(index, state.root);
@@ -2004,6 +2221,7 @@ void GameOverlay::Apply(const AppSettings& settings) {
 	state.log_shown          = settings.overlay_log;
 	state.controllers_shown  = settings.overlay_controllers;
 	state.cpu_shown          = settings.overlay_cpu;
+	state.hitches_shown      = settings.overlay_hitches;
 	state.swap_shown_in_graph = settings.overlay_swap;
 	state.log_lines          = std::clamp<size_t>(settings.overlay_log_lines, 2, LOG_LINES);
 	state.headset_mic_option = settings.headset_mic;
@@ -2023,6 +2241,7 @@ void GameOverlay::Apply(const AppSettings& settings) {
 	state.stats_panel.Width(state.detail == OVERLAY_FRAME_RATE ? std::numeric_limits<double>::quiet_NaN() : STATS_WIDTH);
 	state.controllers_panel.Visibility(VisibleIf(state.controllers_shown));
 	state.cpu_panel.Visibility(VisibleIf(state.cpu_shown && state.detail != OVERLAY_DETAILED));
+	state.hitches_panel.Visibility(VisibleIf(state.hitches_shown));
 	state.log_panel.Visibility(VisibleIf(state.log_shown));
 	state.SetScale(OverlaySizes[std::min<size_t>(settings.overlay_size, OverlaySizes.size() - 1)]);
 	if (Shown()) {
@@ -2074,6 +2293,14 @@ void AddOverlaySettings(xaml::Controls::Panel const& overlay, xaml::Controls::Pa
 		    changed();
 	    },
 	    {L"A panel with the load of each processor core and the busiest threads.", L"Detailed lists the threads itself and doesn't show it."});
+	AddSwitch(
+	    on_screen, explanation, L"Hitches on screen", settings->overlay_hitches,
+	    [settings, changed](bool on) {
+		    settings->overlay_hitches = on;
+		    changed();
+	    },
+	    {L"A panel with the slow frames of the last 10 seconds and what the last one's time went on, and where an average frame's goes.",
+	     L"The frame graph marks them in amber, stalls in red."});
 	// Off, or 2 to 20 lines in steps of 2 (overlay_log and overlay_log_lines; an odd number from the settings file shows as the next even one).
 	{
 		constexpr auto            MAX_LINES = static_cast<uint32_t>(LOG_LINES);

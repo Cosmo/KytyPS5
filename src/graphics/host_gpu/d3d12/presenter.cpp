@@ -764,6 +764,7 @@ struct Presenter::Impl {
 	}
 
 	void Present(bool interpolate = false);
+	void PresentFrame(bool interpolate);
 
 	// The game's picture (or the frame generated before it) onto rect of the back buffer: with FSR 1 when it is on and the picture is smaller than
 	// rect, else with the blitter. Not for HDR10 or linear pictures: FSR 1 has no conversion to SDR.
@@ -991,7 +992,17 @@ void Presenter::ClearLayer(int bus) {
 
 void Presenter::Impl::Present([[maybe_unused]] bool interpolate) {
 	KYTY_PROFILER_FUNCTION();
+	PresentFrame(interpolate);
+	if (window.frame_presented) {
+		window.frame_presented();
+	}
+}
 
+// As upstream's swapchain.cpp counts it: the time to show a frame, and in it the wait for a free swap chain image, which D3D12's Present
+// takes (Vulkan's acquire). Ends before frame_presented, which notes the frame with the counters so far.
+void Presenter::Impl::PresentFrame([[maybe_unused]] bool interpolate) {
+	using Common::DebugCounters::Counter;
+	const Common::DebugCounters::ScopedTimer present_time(Counter::PresentNs);
 	if (swapchain.NeedsResize()) {
 		present_scheduler.Wait(present_scheduler.CurrentTick() - 1);
 		swapchain.Resize();
@@ -1052,11 +1063,11 @@ void Presenter::Impl::Present([[maybe_unused]] bool interpolate) {
 			}
 		}
 	}
-	swapchain.Present();
-	renderer.GetPipelineCache().SaveWhenIdle();
-	if (window.frame_presented) {
-		window.frame_presented();
+	{
+		const Common::DebugCounters::ScopedTimer wait_time(Counter::PresentAcquireNs);
+		swapchain.Present();
 	}
+	renderer.GetPipelineCache().SaveWhenIdle();
 }
 
 void Presenter::Discard(Frame& frame) {

@@ -165,13 +165,26 @@ public:
 	[[nodiscard]] double MsSinceLastPresent() const;
 	// Any thread: the clock the presents are timed with, in milliseconds.
 	[[nodiscard]] static double ClockMs();
-	// Any thread: the frames presented since `since_ms` (ClockMs; as many as the history holds), oldest first: when each was presented and how
-	// long it took (the time since the one before), in milliseconds.
+	// The work the emulator did over a stretch of time, from upstream's counters (they count while CountersOn is on; the times overlap: a
+	// readback also waits for the GPU, say), in nanoseconds: the overlay's hitches.
+	struct FrameWork {
+		uint64_t compile_ns     = 0; // shaders translated and pipelines made
+		uint64_t gpu_wait_ns    = 0; // the CPU waiting for the GPU to finish work
+		uint64_t readback_ns    = 0; // color metadata read back from the GPU
+		uint64_t screen_wait_ns = 0; // waiting for a free swap chain image (in D3D12's Present)
+		uint64_t present_ns     = 0; // showing the frame, that wait included
+		uint64_t gpu_thread_ns  = 0; // the GPU thread's work on the game's command buffers
+	};
+	// Any thread: the frames presented since `since_ms` (ClockMs; as many as the history holds), oldest first: when each was presented, how
+	// long it took (the time since the one before), in milliseconds, and the work done in that time.
 	struct RecentFrame {
-		double presented_ms = 0.0;
-		double time_ms      = 0.0;
+		double    presented_ms = 0.0;
+		double    time_ms      = 0.0;
+		FrameWork work;
 	};
 	[[nodiscard]] std::vector<RecentFrame> FramesSince(double since_ms) const;
+	// Any thread: the work done since the last presented frame.
+	[[nodiscard]] FrameWork WorkSinceLastPresent() const;
 	// Any thread: the frames presented since the start.
 	[[nodiscard]] uint64_t FramesPresented() const;
 	// Any thread: goes up when the emulator's log starts anew.
@@ -219,6 +232,7 @@ private:
 
 	mutable std::mutex        m_presents_mutex;
 	std::array<int64_t, 1201> m_present_counters {}; // QueryPerformanceCounter at each present (10 s at 120 fps)
+	std::array<FrameWork, 1201> m_present_work {};   // the work counters' totals at each present
 	uint64_t                  m_presents = 0;
 };
 

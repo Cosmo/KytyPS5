@@ -452,11 +452,36 @@ void EmulatorHost::OnGameVisible(std::function<void()> handler) {
 	m_game_visible = std::move(handler);
 }
 
+// The work counters' totals now (FrameWork).
+static EmulatorHost::FrameWork WorkTotalsNow() {
+	using Common::DebugCounters::Counter;
+	using Common::DebugCounters::Get;
+	return {.compile_ns     = Get(Counter::ShaderCompileNs) + Get(Counter::PipelineCreateNs),
+	        .gpu_wait_ns    = Get(Counter::GpuWaitNs),
+	        .readback_ns    = Get(Counter::ColorMetadataReadbackNs),
+	        .screen_wait_ns = Get(Counter::PresentAcquireNs),
+	        .present_ns     = Get(Counter::PresentNs),
+	        .gpu_thread_ns  = Get(Counter::GpuThreadBusyNs)};
+}
+
+// The work between two totals (the counters may have restarted: then none).
+static EmulatorHost::FrameWork WorkBetween(const EmulatorHost::FrameWork& older, const EmulatorHost::FrameWork& newer) {
+	const auto delta = [](uint64_t before, uint64_t after) { return after >= before ? after - before : 0; };
+	return {.compile_ns     = delta(older.compile_ns, newer.compile_ns),
+	        .gpu_wait_ns    = delta(older.gpu_wait_ns, newer.gpu_wait_ns),
+	        .readback_ns    = delta(older.readback_ns, newer.readback_ns),
+	        .screen_wait_ns = delta(older.screen_wait_ns, newer.screen_wait_ns),
+	        .present_ns     = delta(older.present_ns, newer.present_ns),
+	        .gpu_thread_ns  = delta(older.gpu_thread_ns, newer.gpu_thread_ns)};
+}
+
 void EmulatorHost::FramePresented() {
 	LARGE_INTEGER counter {};
 	QueryPerformanceCounter(&counter);
+	const auto work = WorkTotalsNow();
 	{
 		std::lock_guard lock(m_presents_mutex);
+		m_present_work[m_presents % m_present_work.size()]       = work;
 		m_present_counters[m_presents++ % m_present_counters.size()] = counter.QuadPart;
 	}
 
@@ -541,10 +566,17 @@ std::vector<EmulatorHost::RecentFrame> EmulatorHost::FramesSince(double since_ms
 		if (static_cast<double>(newer) * to_ms < since_ms) {
 			break;
 		}
-		frames.push_back({static_cast<double>(newer) * to_ms, static_cast<double>(newer - older) * to_ms});
+		frames.push_back({static_cast<double>(newer) * to_ms, static_cast<double>(newer - older) * to_ms,
+		                  WorkBetween(m_present_work[(m_presents - age - 1) % ring], m_present_work[(m_presents - age) % ring])});
 	}
 	std::reverse(frames.begin(), frames.end());
 	return frames;
+}
+
+EmulatorHost::FrameWork EmulatorHost::WorkSinceLastPresent() const {
+	const auto      now = WorkTotalsNow();
+	std::lock_guard lock(m_presents_mutex);
+	return m_presents == 0 ? FrameWork {} : WorkBetween(m_present_work[(m_presents - 1) % m_present_work.size()], now);
 }
 
 void EmulatorHost::SetTitle(std::string text) {

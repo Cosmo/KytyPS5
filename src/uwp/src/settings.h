@@ -64,6 +64,9 @@ struct AppSettings {
 	// The CPU panel at the top right (Controllers moves to its left): each core's load and the busiest threads. Not with Detailed, which lists
 	// the threads itself. Off.
 	bool overlay_cpu = false;
+	// The hitches panel above it: the slow frames of the last 10 seconds (upstream's hitches), what the last one's time went on, and an average
+	// frame's. With every overlay detail. Off.
+	bool overlay_hitches = false;
 	// Full's frame graph with the swap file's stripe under the frame times. Off.
 	bool overlay_swap = false;
 	// A notice at the bottom right while the emulator translates shaders or builds pipelines, overlay or not. On.
