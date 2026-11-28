@@ -1175,6 +1175,12 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			}
 		}
 #else
+		// Where predication does not work (the Series X: D3D12::PredicatedClearsWork), the selected clears are drawn instead
+		// (BlitHelper::ClearSelected), for single-sampled targets; making room for them may submit, so before the lock.
+		const bool drawn_clears = !m_graphics.predicated_clears && desc.info.samples == 1;
+		if (drawn_clears) {
+			m_blit_helper.PrepareClearSelected();
+		}
 		{
 			std::scoped_lock lock {m_lock};
 			auto&            image = m_slot_images[id];
@@ -1182,8 +1188,8 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			const bool native_current = (image.usage.render_target || image.IsGpuModified()) &&
 			                            !image.IsBufferModified() && !image.IsCpuDirty();
 			// As the Vulkan renderer, with D3D12 predication: one clear per slice and key, each
-			// predicated on its check.
-			const bool candidate = m_graphics.predicated_clears && count <= D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION &&
+			// predicated on its check (or drawn where its check selected it).
+			const bool candidate = (m_graphics.predicated_clears || drawn_clears) && count <= D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION &&
 			                       (desc.info.metadata.compression == VideoOutCompression::Uncompressed ||
 			                        native_current);
 			if (candidate) {
@@ -1200,8 +1206,12 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 				for (uint32_t slice = 0; slice < count && expand; slice++) {
 					m_buffer_cache.MarkColorMetadataChecked(run(slice), mip.size, keys);
 				}
-				image.ClearSelected(m_scheduler.Current(), view.format, view.base_level, image_first,
-				                    count, keys, clears, *predicates);
+				if (m_graphics.predicated_clears) {
+					image.ClearSelected(m_scheduler.Current(), view.format, view.base_level, image_first,
+					                    count, keys, clears, *predicates);
+				} else {
+					m_blit_helper.ClearSelected(image, view.format, view.base_level, image_first, count, keys, clears, *predicates);
+				}
 				CommitGpuWrite(image);
 				return;
 			}

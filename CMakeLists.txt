@@ -466,6 +466,12 @@ if(KYTY_BUILD_UWP)
 	add_gpu_blit_shader(gpu_blit_fsr1_easu gpu_blit_fsr1_easu.frag "-I${KYTY_THIRD_PARTY_DIR}/fidelityfx-fsr")
 	add_gpu_blit_shader(gpu_blit_fsr1_rcas gpu_blit_fsr1_rcas.frag "-I${KYTY_THIRD_PARTY_DIR}/fidelityfx-fsr")
 endif()
+if(KYTY_GPU_BACKEND STREQUAL "D3D12")
+	# Color clears selected on the GPU, drawn where predication does not work (D3D12 BlitHelper::ClearSelected).
+	add_gpu_blit_shader(gpu_clear_selected_float gpu_clear_selected.frag)
+	add_gpu_blit_shader(gpu_clear_selected_uint gpu_clear_selected.frag -DCLEAR_UINT=1)
+	add_gpu_blit_shader(gpu_clear_selected_sint gpu_clear_selected.frag -DCLEAR_SINT=1)
+endif()
 # At SPIR-V 1.6 glslang declares a task shader's workgroup size with LocalSizeId, which needs maintenance4.
 add_gpu_blit_shader(gpu_mesh_indirect gpu_mesh_indirect.task --target-env spirv1.5)
 list(APPEND kyty_emulator_src ${gpu_blit_shader_headers})
